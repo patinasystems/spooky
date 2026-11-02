@@ -14,5 +14,5 @@ cd "$repo_root"
 nu macos/build.nu \
     --configuration ReleaseLocal \
     --arch "$(uname -m)" \
-    --build-dir "$repo_root/macos/build-blocks" \
-    --xcconfig "$repo_root/prototype/native-input/blocks.xcconfig"
+    --build-dir "$repo_root/macos/build-spooky" \
+    --xcconfig "$repo_root/prototype/native-input/spooky.xcconfig"

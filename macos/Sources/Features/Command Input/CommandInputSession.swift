@@ -3,7 +3,7 @@ import Foundation
 import CoreText
 import GhosttyKit
 
-/// Opt-in, local-zsh prototype. The native draft never travels through a paste API.
+/// Native editing for the user's zsh. The draft never travels through a paste API.
 /// The shell accepts a generation-bound file from a dedicated ZLE key widget.
 @MainActor
 final class CommandInputSession {
@@ -26,6 +26,8 @@ final class CommandInputSession {
     private var generation: String?
     private var acceptedGeneration: String?
     private var pending: Pending?
+    private var handoff: CommandInputHandoff?
+    private var shellContext = "start"
     private var terminalRequested = false
     private var recoveryVisible = false
     private var receivedFirstPrompt = false
@@ -35,47 +37,42 @@ final class CommandInputSession {
     private var focusSequence: UInt64 = 0
 
     private(set) var draft = ""
-    private(set) var status = "Starting isolated zsh…"
+    private(set) var status = "Starting shell…"
     private(set) var focusRequest: UInt64 = 0
-    private(set) var editorVisible = true
+    private(set) var editorVisible = false
     private(set) var layout = CommandTerminalLayout()
     private(set) var blockMetadata: [String: CommandBlockMetadata] = [:]
     private(set) var currentBlockID: String?
     private(set) var editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
     var notice: String? {
-        if failed || (!ready && pending == nil && !draft.isEmpty)
+        if failed || (!ready && pending == nil && handoff == nil && !draft.isEmpty)
             || status.hasPrefix("Command exceeds") || status.hasPrefix("Remove control") {
             return status
         }
         return nil
     }
 
-    var isEditable: Bool { ready && !terminalRequested && pending == nil && !failed }
-    var canReturnToEditor: Bool { ready && pending == nil && !failed }
+    var isEditable: Bool { ready && !terminalRequested && pending == nil && handoff == nil && !failed }
+    var canReturnToEditor: Bool { ready && pending == nil && handoff == nil && !failed }
     var isRecoveringDraft: Bool { recoveryVisible }
+    var isTransferringSubmission: Bool { !failed && (pending != nil || handoff != nil) }
 
     private struct Pending {
         let id: String
         let generation: String
+        let blockID: String
         let started: Date
     }
 
     init() throws {
-        guard let script = Bundle.main.url(forResource: "native-input", withExtension: "zsh") else {
-            throw BridgeError.unavailable("The native-input.zsh app resource is missing.")
-        }
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("patina-ghostty-input-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory, withIntermediateDirectories: false,
             attributes: [.posixPermissions: 0o700])
         do {
-            // The controlled starter shell deliberately does not source the user's .zshrc.
-            // Quote the bundle path as data; submitted command text never enters this file.
-            let quoted = "'" + script.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-            let startup = "source \(quoted)\n"
-            try Data(startup.utf8).write(to: directory.appendingPathComponent(".zshrc"), options: .atomic)
+            try CommandShellStartup.prepare(in: directory)
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
@@ -96,9 +93,8 @@ final class CommandInputSession {
     }
 
     func configure(_ configuration: inout Ghostty.SurfaceConfiguration) {
-        configuration.command = "/bin/zsh --no-globalrcs -i"
-        configuration.initialInput = nil
-        configuration.environmentVariables["ZDOTDIR"] = directory.path
+        // Core shell detection attaches our bootstrap after environment
+        // overrides. Preserve the user's command, initial input and ZDOTDIR.
         configuration.environmentVariables["PATINA_NATIVE_INPUT_DIR"] = directory.path
     }
 
@@ -190,7 +186,8 @@ final class CommandInputSession {
 
     @discardableResult
     func submit(_ text: String) -> Bool {
-        guard isEditable, let generation, let surfaceView, !surfaceView.readonly else { return false }
+        guard isEditable, let generation, let blockID = currentBlockID,
+              let surfaceView, !surfaceView.readonly else { return false }
         completionTask?.cancel()
         guard text.utf8.count <= Self.maximumBytes else {
             status = "Command exceeds the prototype's 1 MiB limit. Draft preserved."
@@ -205,14 +202,12 @@ final class CommandInputSession {
             return false
         }
 
-        let request = Pending(id: UUID().uuidString, generation: generation, started: Date())
+        let request = Pending(id: UUID().uuidString, generation: generation, blockID: blockID, started: Date())
         pending = request
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
-        // AppKit restores the full PTY viewport synchronously before the task
-        // below waits for the terminal thread to apply its new dimensions.
-        editorVisible = false
-        focusRequest = 0
+        // Restore the PTY viewport behind the retained native draft. Keyboard
+        // focus stays native until acceptance reaches the terminal transcript.
         changed()
         submissionTask = Task { [weak self, bridge] in
             do {
@@ -240,7 +235,6 @@ final class CommandInputSession {
                       model.perform(action: "text:\\x1b[99;1~") else {
                     throw BridgeError.unavailable("The terminal rejected the submit trigger.")
                 }
-                self.focusTerminal()
             } catch {
                 guard let self, self.pending?.id == request.id else { return }
                 self.pending = nil
@@ -270,7 +264,7 @@ final class CommandInputSession {
         terminalRequested = false
         recoveryVisible = false
         editorVisible = true
-        status = "Native input · isolated local zsh"
+        status = "Native input · zsh"
         _ = surfaceView?.surfaceModel?.perform(action: "scroll_to_bottom")
         requestEditorFocus()
         changed()
@@ -296,6 +290,7 @@ final class CommandInputSession {
             changed()
         }
         if surfaceView?.childExitedMessage != nil {
+            handoff = nil
             ready = false
             editorVisible = recoveryVisible
             focusRequest = 0
@@ -307,11 +302,9 @@ final class CommandInputSession {
             self.pending = nil
             if receipt.accepted {
                 acceptedGeneration = pending.generation
+                handoff = CommandInputHandoff(blockID: pending.blockID, generation: pending.generation)
                 recoveryVisible = false
-                draft = ""
-                editorVisible = false
-                focusRequest = 0
-                status = "Running · keyboard input goes to the terminal"
+                status = "Submitting…"
             } else {
                 failed = true
                 status = "Shell rejected submission (\(receipt.reason)). Draft preserved; use terminal input."
@@ -326,6 +319,7 @@ final class CommandInputSession {
         }
 
         if let state = snapshot.state {
+            shellContext = state.context
             currentBlockID = state.blockID
             let newGeneration = generation != state.generation
             generation = state.generation
@@ -338,7 +332,7 @@ final class CommandInputSession {
                 if !terminalRequested {
                     let shouldFocus = !receivedFirstPrompt || newGeneration
                     editorVisible = true
-                    status = "Native input · isolated local zsh"
+                    status = "Native input · zsh"
                     if shouldFocus, let view = surfaceView,
                        view.window?.isKeyWindow == true,
                        view.window?.firstResponder === view {
@@ -347,22 +341,25 @@ final class CommandInputSession {
                 }
                 receivedFirstPrompt = true
             } else if !ready && pending == nil && !failed {
-                editorVisible = recoveryVisible
-                focusRequest = 0
+                editorVisible = recoveryVisible || (handoff != nil && !terminalRequested)
+                if handoff == nil { focusRequest = 0 }
                 status = state.context == "cont"
                     ? "Incomplete command · finish or cancel it in the terminal"
                     : "Terminal input · a program or shell editor owns the keyboard"
             }
         } else if receivedFirstPrompt {
+            handoff = nil
             ready = false
             editorVisible = recoveryVisible
             focusRequest = 0
             status = "Shell bridge unavailable · draft preserved"
         } else if Date().timeIntervalSince(launchedAt) > 5 {
             ready = false
-            failed = true
-            status = "Shell bridge did not start · use terminal input"
+            // Other configured shells/commands use ordinary terminal input.
+            // Slow user startup files can still attach when their prompt arrives.
+            status = "Terminal input"
         }
+        finishHandoffIfReady()
         if presentationKey != previous { changed() }
         if receivedFirstPrompt && pending == nil {
             deadlineTask?.cancel()
@@ -377,11 +374,13 @@ final class CommandInputSession {
         let focusRequest: UInt64
         let draft: String
         let currentBlockID: String?
+        let transferring: Bool
     }
 
     private var presentationKey: Presentation {
         Presentation(status: status, editable: isEditable, visible: editorVisible,
-                     focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID)
+                     focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID,
+                     transferring: isTransferringSubmission)
     }
 
     private func focusTerminal() {
@@ -397,6 +396,21 @@ final class CommandInputSession {
         // intermediate zero was never observed by the editor.
         focusSequence &+= 1
         focusRequest = focusSequence
+    }
+
+    private func finishHandoffIfReady() {
+        guard let handoff, handoff.canFinish(layout: layout, readyGeneration: ready ? generation : nil,
+                                             context: shellContext) else { return }
+        self.handoff = nil
+        draft = ""
+        editorVisible = ready && !terminalRequested
+        if ready {
+            status = "Native input · zsh"
+        } else {
+            status = shellContext == "cont" ? "Incomplete command · finish or cancel it in the terminal"
+                : "Running · keyboard input goes to the terminal"
+        }
+        if editorVisible { requestEditorFocus() } else { focusRequest = 0 }
     }
 
     /// Timeouts do not wait for the slower recovery watchdog. Keep the existing
@@ -434,11 +448,25 @@ final class CommandInputSession {
             }
         }
         layout = updated
+        finishHandoffIfReady()
         changed()
     }
 
     private func changed() {
         onChange?()
+    }
+}
+
+/// A receipt precedes ZLE redisplay. Keep native presentation until the terminal
+/// has parsed this command's output boundary, a continuation, or the next prompt.
+struct CommandInputHandoff {
+    let blockID: String
+    let generation: String
+
+    func canFinish(layout: CommandTerminalLayout, readyGeneration: String?, context: String) -> Bool {
+        if !layout.primary || context == "cont" { return true }
+        if let readyGeneration, readyGeneration != generation { return true }
+        return layout.lastStartedBlockID == blockID
     }
 }
 

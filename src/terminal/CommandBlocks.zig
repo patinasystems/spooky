@@ -73,6 +73,13 @@ pub fn prune(self: *CommandBlocks, pages: *PageList) void {
     }
 }
 
+/// IDs cross the C API in a fixed, byte-preserving NUL-terminated buffer.
+pub fn validID(id: []const u8) bool {
+    if (id.len == 0 or id.len > 64) return false;
+    for (id) |c| if (c < 0x20 or c == 0x7f) return false;
+    return true;
+}
+
 pub fn mark(
     self: *CommandBlocks,
     alloc: Allocator,
@@ -82,9 +89,7 @@ pub fn mark(
     pin: Pin,
     end_inclusive: bool,
 ) Allocator.Error!void {
-    // The fixed C representation is UTF-8/byte preserving and NUL terminated.
-    if (id.len == 0 or id.len > 64) return;
-    for (id) |c| if (c < 0x20 or c == 0x7f) return;
+    if (!validID(id)) return;
     self.prune(pages);
 
     for (self.blocks.items) |*block| {

@@ -25,6 +25,12 @@ class SurfaceScrollView: NSView {
     /// on the same row.
     private var lastSentRow: Int?
 
+    /// Native block chrome spans the viewport while the scroll view's own
+    /// scrollers remain above it. The overlay must pass hit testing through.
+    func installViewportOverlay(_ overlay: NSView) {
+        scrollView.addSubview(overlay, positioned: .above, relativeTo: scrollView.contentView)
+    }
+
     init(contentSize: CGSize, surfaceView: Ghostty.SurfaceView) {
         self.surfaceView = surfaceView
         // The scroll view is our outermost view that controls all our scrollbar

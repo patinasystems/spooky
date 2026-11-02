@@ -1,6 +1,6 @@
-# Ghostty Patina Blocks
+# Spooky
 
-An opt-in macOS Ghostty fork with an inline AppKit command editor and grouped
+A macOS Ghostty fork with an inline AppKit command editor and grouped
 command/output history. One real Ghostty terminal grid renders the transcript;
 AppKit places block headers and the native editor using positions tracked by the
 terminal core. Output is not captured through pipes or replayed as plain text.
@@ -11,7 +11,7 @@ inside the editor. While browsing terminal history, the current header and draft
 remain pinned at the bottom. At the live prompt, the editor sits inline at the
 terminal input position.
 
-This is a controlled local-zsh prototype. See the
+Native input integrates with your normal local zsh startup and configuration. See the
 [design and implementation notes](../../docs/native-command-input.md) for the
 protocol, fidelity limits, and remaining work.
 
@@ -28,26 +28,21 @@ GHOSTTY_ZIG=/path/to/zig ./prototype/native-input/build.sh
 
 The build helper compiles native-architecture GhosttyKit, then invokes
 `macos/build.nu` with `ReleaseLocal`, the separate
-[`blocks.xcconfig`](blocks.xcconfig), and an absolute output directory:
+[`spooky.xcconfig`](spooky.xcconfig), and an absolute output directory:
 
 ```text
-macos/build-blocks/ReleaseLocal/Ghostty.app
+macos/build-spooky/ReleaseLocal/Spooky.app
 ```
 
-The app displays as **Ghostty Patina Blocks**, with bundle ID
-`com.patinasystems.ghostty.blocks`. The original prototype in `macos/build/`
-remains separate; these helpers neither rebuild that app bundle nor stop its
-running process. The launcher checks the Blocks bundle ID before starting it.
-An alternate Blocks app path may be supplied as its first argument.
+The app displays as **Spooky**, with bundle ID `com.patinasystems.spooky`.
+It opens normally from Finder or the launcher. Native input is enabled by default;
+`GHOSTTY_NATIVE_INPUT=0` disables it when launching the executable directly.
+Existing Blocks and Diagnostics development apps remain separate.
 
-When working from Kitchen, follow its `pat run` compute-routing rules for the
-build. Use the local executor when the separate checkout is only on this Mac.
-
-The launcher sets `GHOSTTY_NATIVE_INPUT=1` and disables upstream updates, default
-user Ghostty configuration, automatic shell integration, and window restoration.
-Only this launch enables the custom UI. The distinct app identity comes from the
-Blocks xcconfig; do not distribute another configuration under the same name
-without checking its bundle ID and update settings.
+The launcher uses normal user Ghostty configuration, shell selection, and window
+restoration. The fork disables upstream updates so they cannot replace Spooky.
+When working from Kitchen, follow its `pat run` compute-routing rules; use the
+local executor when this separate checkout is only on this Mac.
 
 ## Try it
 
@@ -95,20 +90,22 @@ shell retains exports and working-directory changes between commands.
   feature adds no Lookout or Observation framework dependency.
 - A real `NSTextView` owns text, selection, marked input, and its own undo manager.
   Ordinary edits do not replace its text storage on every presentation update.
-- Each pane launches an isolated local zsh with a private temporary `ZDOTDIR`.
-  It does not source the user's `.zshrc`; it inherits the terminal environment
-  and working directory. Personal shell startup files are not modified.
+- The configured/default shell launches normally. For zsh, a temporary bootstrap
+  restores your effective `ZDOTDIR` and loads normal startup files, including
+  `.zshrc`. Personal files are not modified. PATH, aliases, history settings,
+  plugins, custom completions, options, and keymaps remain available.
 - Atomic request/state/receipt files transfer the draft to a dedicated ZLE key
   widget. The widget checks the prompt generation, request ID, and empty input
   buffer before invoking normal `.accept-line` in the existing shell.
-- Completion uses system zsh definitions in a private `zpty` worker forked from
+- Completion uses your loaded zsh definitions in a private `zpty` worker forked from
   the current shell at each primary prompt. It inherits cwd, variables, aliases,
   and functions without sourcing a different startup configuration. The worker
   returns zsh's exact quoted buffer and cursor; AppKit applies a normal undoable
   edit only if the draft, caret, revision, and prompt are still current. See
   [native completion](../../docs/native-completion.md) for the protocol and limits.
-- Drafts remain until acceptance. Uncertain submissions are never replayed, and
-  a recovery view retains the draft after an error.
+- Drafts remain through acceptance until the terminal confirms the ownership
+  handoff. Uncertain submissions are never replayed, and a recovery view retains
+  the draft after an error.
 - Tagged OSC 133 markers identify each primary command block. Core-tracked pins
   keep its header and input/output boundaries associated with terminal cells
   across scrolling and reflow. A continuation keeps the same block ID.
@@ -130,8 +127,9 @@ contexts such as command/process substitutions; use terminal input for those.
 Completion functions can perform their ordinary I/O, but the draft is never
 accepted or executed by the completion widget. Each pane has one private idle
 completion worker at its primary prompt. Responses are bounded to 200 items and
-8 MiB. Syntax coloring, imported user configuration/plugins, remote/nested-shell
-adapters, fish, and Linux are not implemented. Selection highlighting remains
+8 MiB. Syntax coloring and native remote/nested-shell, fish, and Linux adapters are
+not implemented. User startup/plugins load normally, but not every custom ZLE
+widget or asynchronous prompt theme is compatible with native editing. Selection highlighting remains
 AppKit's native text selection.
 
 The editor accepts up to 1 MiB of UTF-8 and rejects control characters other than
@@ -152,10 +150,16 @@ files include accepted commands and are not a permanent history service.
 
 As of 2026-11-02:
 
-- All 37 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
+- All 49 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
   transfer, retained shell state, ownership, stale/duplicate rejection, block
   markers, stable continuation IDs, completion metadata, and exit/cancellation.
-- Six focused command-block core tests and the existing erase regressions pass.
+  Startup fixtures exercise normal interactive/login startup order, custom
+  ZDOTDIR, aliases/PATH/history, existing completions/fpath/styles, hooks,
+  keymaps, options, prompt restoration, and ordinary-terminal fallback when
+  required hook support is unavailable.
+- Eight focused command-block core regressions pass, including durable
+  submission markers across erase, hard reset, and scrollback eviction. The
+  selected-command/startup-environment core test also passes.
 - All 30 AppKit editor tests pass, covering selection/replacement, newline and
   submission behavior, retained drafts, IME-Return handling, independent undo,
   editor sizing, deferred-focus ownership, completion menus, cancellation,
@@ -163,9 +167,18 @@ As of 2026-11-02:
 - Six completion-transport tests and four real filesystem notification tests
   pass. Completion shell tests cover live context, quoting, Unicode/multiline
   carets, unchanged visible input, unsafe contexts, and response bounds.
+- Three submission-handoff tests and two startup-resource tests pass, bringing
+  the targeted native total to 45.
 - The native arm64 `ReleaseLocal` app builds successfully and passes
-  strict/deep code-signature verification. This iteration was checked in a
-  separate Diagnostics bundle, leaving the running Blocks app untouched.
+  strict/deep code-signature verification. Spooky uses its own bundle and build
+  directory, preserving the earlier development apps.
+- The delivered Spooky app was opened normally through Finder. Its live shell
+  reported login and interactive mode, configured history, and loaded user
+  aliases and completions. Unique-path Tab completion, multiline submission,
+  and fresh-editor focus passed. A command that erased the screen before `read`
+  received terminal input and returned to native editing. Full-width separators
+  were confirmed visually. The handoff tests cover when native presentation can
+  be released; no high-speed frame recording was taken.
 - Interactive checks pass for multiline paste and Cmd+A selection, full-buffer
   submission, a single visible command/output block, fresh-prompt recovery, and
   independent metadata on successive blocks.
@@ -200,7 +213,7 @@ uv run --no-project --python python3 test/native-input/test_zsh_bridge.py
 Native tests live in
 [`CommandTextViewTests.swift`](../../macos/Tests/Ghostty/CommandTextViewTests.swift).
 Use `macos/build.nu --action test --only-testing GhosttyTests/CommandTextViewTests`
-with a testable configuration, the Blocks xcconfig, an isolated build directory,
+with a testable configuration, the Spooky xcconfig, an isolated build directory,
 and the architecture used for GhosttyKit. `build.nu` skips UI automation tests.
 Repeat the interactive checks when changing layout, focus, or terminal ownership;
 physical IME/VoiceOver and broader terminal-application qualification remain

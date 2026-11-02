@@ -1,3 +1,5 @@
 // Side-by-side cursor and diagnostics candidate; preserve the running Blocks app.
 PATINA_BUNDLE_ID = com.patinasystems.ghostty.cursor-performance
 PATINA_DISPLAY_NAME = Ghostty Patina Diagnostics
+PATINA_APP_NAME = Ghostty
+SPOOKY_NATIVE_INPUT_ENABLED = 0

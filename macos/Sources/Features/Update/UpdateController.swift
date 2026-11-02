@@ -40,6 +40,9 @@ class UpdateController {
     /// This must be called before the updater can check for updates. If starting fails,
     /// the error will be shown to the user.
     func startUpdater() {
+        // A fork must never replace itself with an upstream Ghostty release.
+        guard !AppBranding.upstreamUpdatesDisabled else { return }
+
         do {
             try updater.start()
         } catch {
@@ -60,6 +63,8 @@ class UpdateController {
     ///
     /// This is typically connected to a menu item action.
     func checkForUpdates() {
+        guard !AppBranding.upstreamUpdatesDisabled else { return }
+
         // If we're already idle, then just check for updates immediately.
         if viewModel.state == .idle {
             updater.checkForUpdates()

@@ -28,8 +28,9 @@ final class NativeCommandSurfaceHost: NSView {
         super.init(frame: NSRect(origin: .zero, size: size))
         wantsLayer = true
         clipsToBounds = true
-        [terminalView, headers, pinnedHeader, editor, notice, editButton, terminalButton, draftButton]
+        [terminalView, pinnedHeader, editor, notice, editButton, terminalButton, draftButton]
             .forEach { addSubview($0) }
+        terminalView.installViewportOverlay(headers)
         notice.font = .systemFont(ofSize: 11)
         notice.isSelectable = true
         for button in [editButton, terminalButton, draftButton] {
@@ -94,10 +95,11 @@ final class NativeCommandSurfaceHost: NSView {
         let line = max(1, geometry.cellHeight)
         let height = min(max(line, measuredHeight), max(line, min(line * 12, bounds.height * 0.45)))
         let recovering = session.editorVisible && session.isRecoveringDraft
+        let transferring = session.isTransferringSubmission
         let editing = recovering || (session.editorVisible && geometry.primary && session.currentBlockID != nil)
         // Recovery must remain selectable even when no primary prompt exists.
         let browsing = recovering || (editing && !geometry.atBottom)
-        let reserved = editing ? (browsing ? height + line : max(0, height - line)) : 0
+        let reserved = editing && !transferring ? (browsing ? height + line : max(0, height - line)) : 0
         let terminalHeight = max(line * 2, bounds.height - reserved)
         let x = browsing ? geometry.paddingLeft : geometry.cursorX
         let y = browsing ? max(0, bounds.height - height)
@@ -133,7 +135,11 @@ final class NativeCommandSurfaceHost: NSView {
         }
         editor.isHidden = !shown
         editor.setAccessibilityHidden(!shown)
-        let editorFrame = NSRect(x: x, y: y, width: max(1, bounds.width - x - geometry.paddingLeft), height: height)
+        // Keep the submitted draft over the old prompt while the PTY expands
+        // behind it. Following the terminal cursor here would expose its block
+        // caret before ZLE has redisplayed/accepted the submitted buffer.
+        let editorFrame = transferring && !editor.frame.isEmpty ? editor.frame
+            : NSRect(x: x, y: y, width: max(1, bounds.width - x - geometry.paddingLeft), height: height)
         if editor.frame != editorFrame {
             editor.dismissCompletions()
             editor.frame = editorFrame
@@ -217,15 +223,16 @@ private final class CommandHeaderOverlay: NSView {
         let measurement = CommandInputDiagnostics.begin(.headerDraw)
         defer { CommandInputDiagnostics.end(measurement) }
         for row in rows where row.y + line > 0 && row.y < bounds.height {
-            // Leave the terminal's native overlay scroller above the transcript
-            // unobstructed; the headers must not cut its thumb into segments.
+            // The background and separator are full bleed. Only text reserves
+            // padding and scrollbar space; the scroll view draws its scroller
+            // above this overlay so the thumb remains uninterrupted.
             let rightInset = max(padding, NSScroller.scrollerWidth(for: .regular, scrollerStyle: .overlay))
             let rect = NSRect(x: padding, y: row.y,
                               width: max(0, bounds.width - padding - rightInset), height: line)
             background.setFill()
-            rect.fill()
+            NSRect(x: 0, y: row.y, width: bounds.width, height: line).fill()
             foreground.withAlphaComponent(0.16).setFill()
-            NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: 0.5).fill()
+            NSRect(x: 0, y: row.y, width: bounds.width, height: 0.5).fill()
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineBreakMode = .byTruncatingMiddle
             let font = NSFont.monospacedSystemFont(ofSize: max(9, line * 0.66), weight: .regular)

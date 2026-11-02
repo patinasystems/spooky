@@ -1,51 +1,98 @@
-# Native command input prototype. Loaded only by the isolated starter shell.
+# Native command input integration, loaded after the user's zsh startup files.
 #
 # The app owns a private (0700), per-shell PATINA_NATIVE_INPUT_DIR. It atomically
 # publishes `request`: generation LF, request UUID LF, then the UTF-8 draft.
 # A normal ZLE key widget, bound to ESC [ 99 ; 1 ~, consumes it exactly once.
-# This is deliberately not an adapter for arbitrary user startup files/plugins.
+# User configuration owns the environment, history, completion system and main
+# keymap. Native block mode owns visible prompt text while ZLE is editing.
+
+# Source the definitions with aliases disabled and stable parsing options, then
+# restore every caller option. Quoting this small loader also protects it from
+# aliases defined by .zshrc before the rest of the file is parsed.
+if [[ ${_patina_native_loading-} != 1 ]]; then
+    () {
+        'builtin' 'emulate' -L zsh -o no_aliases -o no_warn_create_global
+        'builtin' 'local' _patina_native_loading=1
+        'builtin' 'source' -- "${(%):-%x}"
+    }
+    'builtin' 'return' "$?"
+fi
 
 [[ -o interactive && -n $PATINA_NATIVE_INPUT_DIR &&
    $PATINA_NATIVE_INPUT_DIR == /* && -d $PATINA_NATIVE_INPUT_DIR &&
    ! -L $PATINA_NATIVE_INPUT_DIR ]] || return 0
 (( ${+_patina_native_loaded} )) && return 0
+# A user may deliberately remove the system functions from fpath. Without the
+# hook helper we cannot preserve their ZLE widgets; leave the ordinary shell
+# intact rather than taking over its prompt with an incomplete integration.
+if (( ! ${+functions[add-zle-hook-widget]} )) ||
+   [[ ${functions[add-zle-hook-widget]} == 'builtin autoload -X'* ]]; then
+    builtin autoload -Uz +X add-zle-hook-widget 2>/dev/null || return 1
+fi
 
-typeset -g _patina_native_loaded=1
-typeset -g _patina_native_dir=$PATINA_NATIVE_INPUT_DIR
-unset PATINA_NATIVE_INPUT_DIR
-typeset -gi _patina_native_counter=0
-typeset -g _patina_native_generation="$$-0"
-typeset -g _patina_native_last_state=''
-typeset -gA _patina_native_seen
-typeset -gA _patina_native_completion_seen
-typeset -gi _patina_native_completion_available=0 _patina_native_completion_fd=0
-typeset -gi _patina_native_block_counter=0 _patina_native_input_recorded=0
-typeset -g _patina_native_block_id=''
-typeset -gi _patina_native_tty=1
+builtin typeset -g _patina_native_loaded=1
+builtin typeset -g _patina_native_dir=$PATINA_NATIVE_INPUT_DIR
+builtin unset PATINA_NATIVE_INPUT_DIR
+builtin typeset -gi _patina_native_counter=0
+builtin typeset -g _patina_native_generation="$$-0"
+builtin typeset -g _patina_native_last_state=''
+builtin typeset -gA _patina_native_seen
+builtin typeset -gA _patina_native_completion_seen
+builtin typeset -gA _patina_native_completion_options
+builtin typeset -gi _patina_native_completion_available=0 _patina_native_completion_fd=0
+builtin typeset -gi _patina_native_block_counter=0 _patina_native_input_recorded=0
+builtin typeset -g _patina_native_block_id=''
+builtin typeset -gi _patina_native_tty=1
 builtin zmodload zsh/datetime
 {
     builtin zmodload zsh/system &&
         builtin sysopen -o cloexec -wu _patina_native_tty -- /dev/tty
 } 2>/dev/null || _patina_native_tty=1
 
-# One native-owned prompt, with no duplicate hostname or right-prompt display.
-# The primary prompt's single blank header row is emitted before ZLE starts;
-# PS1 itself contains only a nonprinting input-boundary marker.
-PS1=''
-PS2='> '
-RPS1=''
-RPS2=''
+builtin typeset -g _patina_native_saved_ps1=$PS1 _patina_native_saved_ps2=$PS2
+builtin typeset -g _patina_native_saved_rps1=$RPS1 _patina_native_saved_rps2=$RPS2
+builtin typeset -g _patina_native_marked_ps1='' _patina_native_marked_ps2=''
+builtin typeset -g _patina_native_block_cwd=''
+builtin typeset -gi _patina_native_prompt_active=0
+
+_patina_native_restore_prompt() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    (( _patina_native_prompt_active )) || return 0
+    [[ $PS1 == $_patina_native_marked_ps1 ]] && PS1=$_patina_native_saved_ps1
+    [[ $PS2 == $_patina_native_marked_ps2 ]] && PS2=$_patina_native_saved_ps2
+    [[ -z $RPS1 ]] && RPS1=$_patina_native_saved_rps1
+    [[ -z $RPS2 ]] && RPS2=$_patina_native_saved_rps2
+    _patina_native_prompt_active=0
+    return 0
+}
+
+_patina_native_apply_prompt() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    _patina_native_restore_prompt
+    _patina_native_saved_ps1=$PS1
+    _patina_native_saved_ps2=$PS2
+    _patina_native_saved_rps1=$RPS1
+    _patina_native_saved_rps2=$RPS2
+    _patina_native_marked_ps1=$'%{\e]133;B;aid='"$_patina_native_block_id"$'\a%}'
+    _patina_native_marked_ps2=$'%{\e]133;P;k=s\a%}'"$PS2"$'%{\e]133;B;aid='"$_patina_native_block_id"$'\a%}'
+    PS1=$_patina_native_marked_ps1
+    PS2=$_patina_native_marked_ps2
+    RPS1=''
+    RPS2=''
+    _patina_native_prompt_active=1
+}
 
 _patina_native_metadata() {
-    builtin emulate -L zsh
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     [[ -n $_patina_native_block_id ]] || return 1
-    local destination="$_patina_native_dir/blocks/$_patina_native_block_id/$1"
-    local temporary="$destination.tmp.$$"
+    builtin local destination="$_patina_native_dir/blocks/$_patina_native_block_id/$1"
+    builtin local temporary="$destination.tmp.$$"
     builtin print -rn -- "$2" > "$temporary" &&
         command /bin/mv -f "$temporary" "$destination"
 }
 
 _patina_native_record_input() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     (( _patina_native_input_recorded )) && return 0
     _patina_native_metadata input "$1" || return 1
     _patina_native_metadata status accepted || return 1
@@ -53,7 +100,8 @@ _patina_native_record_input() {
 }
 
 _patina_native_finish_block() {
-    local result=$1
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local result=$1
     [[ -n $_patina_native_block_id ]] || return 0
     _patina_native_metadata exit-status "$result"
     _patina_native_metadata finished-wall "$EPOCHREALTIME"
@@ -64,29 +112,49 @@ _patina_native_finish_block() {
 
 _patina_native_precmd() {
     # Preserve the foreground command's status before touching files or git.
-    local result=$?
+    builtin local result=$?
+    # Capture user options before entering the implementation's temporary
+    # parsing settings. Completion restores the relevant options in its worker.
+    if builtin zle; then
+        _patina_native_apply_prompt
+        return 0
+    fi
+    if (( ${+_patina_native_initial_options} )); then
+        _patina_native_completion_options=("${(@kv)_patina_native_initial_options[@]}")
+    else
+        _patina_native_completion_options=("${(@kv)options[@]}")
+    fi
+    _patina_native_prepare_prompt "$result"
+    _patina_native_completion_start
+    return 0
+}
+
+_patina_native_prepare_prompt() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local result=$1
     _patina_native_finish_block "$result"
     (( ++_patina_native_block_counter ))
     _patina_native_block_id="$$-$_patina_native_block_counter"
     _patina_native_input_recorded=0
     command /bin/mkdir -p "$_patina_native_dir/blocks/$_patina_native_block_id"
-    _patina_native_metadata cwd "$PWD"
-    local branch
+    _patina_native_block_cwd=$PWD
+    _patina_native_metadata cwd "$_patina_native_block_cwd"
+    builtin local branch
     branch=$(command /usr/bin/git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
     _patina_native_metadata branch "$branch"
     _patina_native_metadata status editing
-    _patina_native_completion_start
 
     # A starts the header on a fresh line; the LF reserves exactly one row.
     # B may repeat during ZLE redisplay. The block identity remains unchanged.
     builtin print -rnu $_patina_native_tty -- \
         $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n'
-    PS1=$'%{\e]133;B;aid='"$_patina_native_block_id"$'\a%}'
-    PS2=$'%{\e]133;P;k=s\a%}> %{\e]133;B;aid='"$_patina_native_block_id"$'\a%}'
+    _patina_native_apply_prompt
     return 0
 }
 
 _patina_native_preexec() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    _patina_native_restore_prompt
     _patina_native_completion_stop
     # Keep the original accepted native buffer immutable. In a continuation,
     # preexec's typed command includes the additional terminal-entered lines.
@@ -100,7 +168,8 @@ _patina_native_preexec() {
 }
 
 _patina_native_exit() {
-    local result=$?
+    builtin local result=$?
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     _patina_native_completion_stop
     _patina_native_finish_block "$result"
     _patina_native_publish exited end
@@ -108,31 +177,47 @@ _patina_native_exit() {
 }
 
 _patina_native_publish() {
-    builtin emulate -L zsh
-    local value="$1"$'\t'"$_patina_native_generation"$'\t'"$2"$'\t'"$_patina_native_block_id"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local value="$1"$'\t'"$_patina_native_generation"$'\t'"$2"$'\t'"$_patina_native_block_id"
     [[ $value == $_patina_native_last_state ]] && return 0
-    local temporary="$_patina_native_dir/state.tmp.$$"
+    builtin local temporary="$_patina_native_dir/state.tmp.$$"
     builtin print -r -- "$value" > "$temporary" &&
         command /bin/mv -f "$temporary" "$_patina_native_dir/state" &&
         _patina_native_last_state=$value
 }
 
 _patina_native_receipt() {
-    builtin emulate -L zsh
-    local value="$1"$'\t'"$2"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local value="$1"$'\t'"$2"
     [[ -n $3 ]] && value+=$'\t'"$3"
-    local temporary="$_patina_native_dir/receipt.tmp.$$"
+    builtin local temporary="$_patina_native_dir/receipt.tmp.$$"
     builtin print -r -- "$value" > "$temporary" &&
         command /bin/mv -f "$temporary" "$_patina_native_dir/receipt"
 }
 
 _patina_native_line_init() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     (( ++_patina_native_counter ))
     _patina_native_generation="$$-$_patina_native_counter"
+    # Startup's one-shot precmd can precede user theme hooks in the first
+    # captured hook list. Finalize after them and after existing ZLE init hooks.
+    if [[ $PS1 != $_patina_native_marked_ps1 || $PS2 != $_patina_native_marked_ps2 ||
+          -n $RPS1 || -n $RPS2 ]]; then
+        _patina_native_apply_prompt
+        builtin zle .reset-prompt
+    fi
+    if [[ $CONTEXT == start && $_patina_native_block_cwd != $PWD ]]; then
+        _patina_native_block_cwd=$PWD
+        _patina_native_metadata cwd "$PWD"
+        builtin local branch
+        branch=$(command /usr/bin/git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
+        _patina_native_metadata branch "$branch"
+    fi
     _patina_native_redraw
 }
 
 _patina_native_redraw() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     if [[ $CONTEXT != start ]]; then
         _patina_native_publish terminal "$CONTEXT"
     elif [[ -n $BUFFER ]]; then
@@ -143,27 +228,32 @@ _patina_native_redraw() {
 }
 
 _patina_native_line_finish() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     if [[ $CONTEXT == start ]]; then
         _patina_native_record_input "$BUFFER"
     fi
     _patina_native_publish running "$CONTEXT"
+    # This also runs for blank input/cancellation, which have no preexec hook.
+    # Theme/precmd/preexec functions see their own prompt values between edits.
+    _patina_native_restore_prompt
 }
 
 _patina_native_byte_count() {
-    local LC_ALL=C
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local LC_ALL=C
     REPLY=${#1}
 }
 
 _patina_native_submit() {
-    builtin emulate -L zsh
-    local request="$_patina_native_dir/request"
-    local consumed="$_patina_native_dir/consumed.$$"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local request="$_patina_native_dir/request"
+    builtin local consumed="$_patina_native_dir/consumed.$$"
     # A delayed duplicate trigger must not erase a receipt the app has yet to see.
     [[ -f $request && ! -L $request ]] || return 0
     command /bin/mv -f "$request" "$consumed" || return 1
 
-    local generation identifier payload descriptor reason REPLY
-    local -A metadata
+    builtin local generation identifier payload descriptor reason REPLY
+    builtin local -A metadata
     {
         if ! builtin zmodload zsh/stat ||
            ! builtin zstat -H metadata "$consumed" ||
@@ -239,21 +329,27 @@ _patina_native_submit() {
 # The app binds UUID to its draft revision and discards obsolete responses.
 
 _patina_native_completion_initialize() {
-    # This starter shell deliberately loads only the system completion library.
-    # No user rc, completion dump, or site-function autoload path is consulted.
-    fpath=(/usr/share/zsh/$ZSH_VERSION/functions)
-    builtin autoload -Uz compinit
-    compinit -i -D &&
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    # Preserve an initialized user completion system, including wrappers,
+    # compdefs, styles and fpath. Bootstrap compsys only when none exists.
+    if (( ! ${+functions[compdef]} || ! ${+_comps} )); then
+        builtin autoload -Uz compinit
+        compinit -i -D || return 0
+    fi
+    (( ${+functions[_main_complete]} )) || builtin autoload -Uz _main_complete
+    {
         builtin zmodload zsh/zpty &&
         builtin zmodload -F zsh/files b:zf_mkdir b:zf_mv b:zf_rm &&
         builtin zf_mkdir -p "$_patina_native_dir/completions" &&
         _patina_native_completion_available=1
+    }
     return 0
 }
 
 _patina_native_completion_noop() { return 0 }
 
 _patina_native_completion_stop() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     if (( _patina_native_completion_fd )); then
         builtin zle -F $_patina_native_completion_fd 2>/dev/null
         _patina_native_completion_fd=0
@@ -270,6 +366,7 @@ _patina_native_completion_stop() {
 }
 
 _patina_native_completion_drain() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     builtin zpty -r _patina_native_completion >/dev/null 2>&1
     if (( $? == 2 )); then
         builtin zle -F "$1" 2>/dev/null
@@ -294,6 +391,7 @@ _patina_native_completion_start() {
 }
 
 _patina_native_completion_worker() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     # The worker must never publish lifecycle/block events for the real shell.
     precmd_functions=()
     preexec_functions=()
@@ -306,7 +404,7 @@ _patina_native_completion_worker() {
     if (( _patina_native_tty > 2 )); then
         builtin exec {_patina_native_tty}>&-
     fi
-    local working=''
+    builtin local working=''
     builtin vared -i _patina_native_completion_noop \
         -f _patina_native_completion_noop working
 }
@@ -314,8 +412,9 @@ _patina_native_completion_worker() {
 # Populate dynamically scoped generation/identifier/payload/caret/character_caret
 # and reason. Read only a finite regular file; no eval or shell expansion.
 _patina_native_completion_read() {
-    local descriptor REPLY
-    local -A metadata
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local descriptor REPLY
+    builtin local -A metadata
     if ! builtin zmodload zsh/stat ||
        ! builtin zstat -H metadata "$1" || (( metadata[size] > 1048846 )); then
         reason=oversized-request
@@ -367,7 +466,7 @@ _patina_native_completion_read() {
         fi
         # ZLE CURSOR counts Unicode characters, while the transport uses bytes.
         # Binary search also rejects byte offsets in the middle of a scalar.
-        local -i low=0 high=${#payload} middle bytes wanted=10#$caret
+        builtin local -i low=0 high=${#payload} middle bytes wanted=10#$caret
         character_caret=-1
         while (( low <= high )); do
             middle=$(( (low + high) / 2 ))
@@ -392,8 +491,9 @@ _patina_native_completion_read() {
 }
 
 _patina_native_completion_reject() {
-    local destination="$_patina_native_dir/completions/$identifier"
-    local staging="$_patina_native_dir/completions/.pending-$identifier"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local destination="$_patina_native_dir/completions/$identifier"
+    builtin local staging="$_patina_native_dir/completions/.pending-$identifier"
     # Successful/previously rejected responses are immutable, even on replay.
     [[ -e $destination ]] && return 0
     builtin zf_mkdir -p "$staging" || return 1
@@ -407,15 +507,15 @@ _patina_native_completion_reject() {
 }
 
 _patina_native_complete() {
-    builtin emulate -L zsh
-    local LC_ALL=en_US.UTF-8
-    local request="$_patina_native_dir/completion-request"
-    local consumed="$_patina_native_dir/completion-consumed.$$"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local LC_ALL=en_US.UTF-8
+    builtin local request="$_patina_native_dir/completion-request"
+    builtin local consumed="$_patina_native_dir/completion-consumed.$$"
     [[ -f $request && ! -L $request ]] || return 0
     (( _patina_native_completion_available )) || return 0
     builtin zf_mv -f "$request" "$consumed" || return 1
-    local generation identifier='-' payload caret reason
-    local -i character_caret
+    builtin local generation identifier='-' payload caret reason
+    builtin local -i character_caret
     {
         if _patina_native_completion_read "$consumed"; then
             if [[ -n ${_patina_native_completion_seen[$identifier]-} ]]; then
@@ -451,16 +551,16 @@ _patina_native_completion_generate() {
     _patina_completion_matches=$compstate[nmatches]
     compstate[insert]='menu:1'
     compstate[list]=''
-    unset MENUSELECT
+    builtin unset MENUSELECT
 }
 
 _patina_native_completion_worker_widget() {
-    builtin emulate -L zsh
-    local LC_ALL=en_US.UTF-8
-    local generation identifier='-' payload caret reason REPLY
-    local -i character_caret
-    local active="$_patina_native_dir/completion-active"
-    local request="$_patina_native_dir/completion-worker-request.$_patina_native_block_id"
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local LC_ALL=en_US.UTF-8
+    builtin local generation identifier='-' payload caret reason REPLY
+    builtin local -i character_caret
+    builtin local active="$_patina_native_dir/completion-active"
+    builtin local request="$_patina_native_dir/completion-worker-request.$_patina_native_block_id"
     [[ -f $active && ! -L $active ]] || return 0
     # Claim by rename before reading. A newer request can then replace active
     # without the old reader deleting it after finishing its own payload.
@@ -470,15 +570,28 @@ _patina_native_completion_worker_widget() {
         return 0
     fi
     builtin zf_rm -f "$request"
-    local destination="$_patina_native_dir/completions/$identifier"
-    local staging="$_patina_native_dir/completions/.pending-$identifier"
+    builtin local destination="$_patina_native_dir/completions/$identifier"
+    builtin local staging="$_patina_native_dir/completions/.pending-$identifier"
     [[ -e $destination ]] && return 0
     builtin zf_mkdir -p "$staging/items" || return 1
-    local -i _patina_completion_matches=0 index count=0 total_bytes=0 truncated=0 bytes
-    local -A seen
+    builtin local -i _patina_completion_matches=0 index count=0 total_bytes=0 truncated=0 bytes
+    builtin local -A seen
     {
         BUFFER=$payload
         CURSOR=$character_caret
+        # Restore user completion options before ZLE parses the command. Doing
+        # this inside the completion function is too late for alias expansion.
+        builtin local option
+        for option in aliases alwaystoend alwayslastprompt autolist automenu autonamedirs \
+            autoparamkeys autoparamslash autoremoveslash bashautolist completealiases \
+            completeinword globcomplete hashlistall listambiguous listbeep listpacked \
+            listrowsfirst listtypes menucomplete recexact; do
+            if [[ ${_patina_native_completion_options[$option]-off} == on ]]; then
+                builtin setopt "$option"
+            else
+                builtin unsetopt "$option"
+            fi
+        done
         builtin zle _patina_native_completion_generate_widget
         for (( index=1; index<=_patina_completion_matches; ++index )); do
             # Hidden/duplicate display matches must not make enumeration unbounded.
@@ -525,10 +638,14 @@ builtin zle -N _patina_native_submit
 builtin zle -N _patina_native_complete
 builtin zle -N _patina_native_completion_worker_widget
 builtin zle -C _patina_native_completion_generate_widget menu-complete _patina_native_completion_generate
-builtin zle -N zle-line-init _patina_native_line_init
-builtin zle -N zle-line-pre-redraw _patina_native_redraw
-builtin zle -N zle-line-finish _patina_native_line_finish
-# The starter shell uses emacs mode; also bind vi maps for explicit user toggles.
+builtin autoload -Uz add-zle-hook-widget
+add-zle-hook-widget line-init _patina_native_line_init
+add-zle-hook-widget line-pre-redraw _patina_native_redraw
+add-zle-hook-widget line-finish _patina_native_line_finish
+# Reserve only the two transport sequences. Preserve the user's main keymap
+# (including a custom map copied before this integration was loaded).
+builtin bindkey -M main $'\e[99;1~' _patina_native_submit
+builtin bindkey -M main $'\e[99;2~' _patina_native_complete
 builtin bindkey -M emacs $'\e[99;1~' _patina_native_submit
 builtin bindkey -M viins $'\e[99;1~' _patina_native_submit
 builtin bindkey -M vicmd $'\e[99;1~' _patina_native_submit

@@ -1,9 +1,17 @@
-> **Patina fork:** This repository explores a macOS native command editor for
-> Ghostty: an AppKit multiline editor that starts inline and grows, command/output
-> blocks, native selection, clipboard, undo, and zsh-backed Tab completion.
-> Try the [macOS prototype](prototype/native-input/README.md)
-> or read the [implementation design](docs/native-command-input.md).
-> **Status: opt-in prototype for an isolated local zsh session, not full Warp parity.**
+# Spooky
+
+A macOS Ghostty fork with an AppKit multiline command editor, command/output
+blocks, native selection and undo, and zsh-backed Tab completion.
+
+Spooky loads your normal terminal configuration and zsh startup files. The
+native editor is enabled by default; other configured shells and explicit
+commands retain ordinary terminal input. All custom UI uses AppKit.
+
+[Build and run Spooky](prototype/native-input/README.md) ·
+[Implementation](docs/native-command-input.md) ·
+[Shell completion](docs/native-completion.md)
+
+Built on Ghostty. The original project and attribution follow.
 
 <!-- LOGO -->
 <h1>

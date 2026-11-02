@@ -26,6 +26,7 @@ struct CommandTerminalLayout: Equatable {
     var paddingTop: CGFloat = 0
     var cursorX: CGFloat = 0
     var cursorY: CGFloat = 0
+    var lastStartedBlockID: String?
     var blocks: [CommandBlockAnchor] = []
 
     @MainActor
@@ -47,6 +48,10 @@ struct CommandTerminalLayout: Equatable {
         result.paddingTop = layout.padding_top
         result.cursorX = layout.cursor_x
         result.cursorY = layout.cursor_y
+        result.lastStartedBlockID = withUnsafeBytes(of: layout.last_started_id) { bytes in
+            let value = String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)
+            return value?.isEmpty == false ? value : nil
+        }
         result.blocks = records.prefix(Int(count)).compactMap { record in
             let id = withUnsafeBytes(of: record.id) { bytes in
                 String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)

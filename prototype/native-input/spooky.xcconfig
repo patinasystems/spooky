@@ -1,0 +1,5 @@
+// Normal Spooky app: native input and the user's usual terminal configuration.
+PATINA_APP_NAME = Spooky
+PATINA_BUNDLE_ID = com.patinasystems.spooky
+PATINA_DISPLAY_NAME = Spooky
+SPOOKY_NATIVE_INPUT_ENABLED = 1

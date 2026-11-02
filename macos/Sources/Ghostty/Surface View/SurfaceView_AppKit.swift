@@ -388,15 +388,17 @@ extension Ghostty {
 
             // Setup our surface. This will also initialize all the terminal IO.
             var surface_cfg = baseConfig ?? SurfaceConfiguration()
-            if ProcessInfo.processInfo.environment["GHOSTTY_NATIVE_INPUT"] == "1" {
+            let nativeInputSetting = ProcessInfo.processInfo.environment["GHOSTTY_NATIVE_INPUT"]
+            let nativeInputDefault = Bundle.main.object(forInfoDictionaryKey: "SpookyNativeInputEnabled") as? Bool ?? false
+            if nativeInputSetting == "1" || (nativeInputSetting != "0" && nativeInputDefault) {
                 do {
                     let session = try CommandInputSession()
                     session.configure(&surface_cfg)
                     commandInputSession = session
                 } catch {
                     AppDelegate.logger.error("Native input initialization failed: \(error.localizedDescription, privacy: .public)")
-                    self.error = Ghostty.Error.apiFailed
-                    return
+                    // A native-editor resource or filesystem failure must not
+                    // prevent the configured shell/command from opening.
                 }
             }
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in

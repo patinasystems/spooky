@@ -104,6 +104,14 @@
 			</array>
 		</dict>
 	</array>
+	<key>SpookyNativeInputEnabled</key>
+#if SPOOKY_NATIVE_INPUT_ENABLED
+	<true/>
+#else
+	<false/>
+#endif
+	<key>SpookyDisableUpstreamUpdates</key>
+	<true/>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
 	<key>SUPublicEDKey</key>

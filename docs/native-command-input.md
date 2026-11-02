@@ -1,11 +1,11 @@
 # Native command input and blocks
 
 This fork adds an AppKit command editor and command/output grouping to Ghostty.
-The current implementation targets a controlled local zsh on macOS. The
+The native editor integrates with the user’s normal local zsh on macOS. The
 [prototype guide](../prototype/native-input/README.md) contains build commands,
 current verification status, and operating limits.
 
-Repository: [patinasystems/ghostty](https://github.com/patinasystems/ghostty).
+Repository: [patinasystems/spooky](https://github.com/patinasystems/spooky).
 The initial source inspection used upstream
 [`0b1729e945978fca4bcd6165d8ac408bf675a7f2`](https://github.com/ghostty-org/ghostty/commit/0b1729e945978fca4bcd6165d8ac408bf675a7f2).
 The fork now extends both the native app and terminal core.
@@ -31,6 +31,14 @@ Ghostty's upstream SwiftUI application shell is retained. This feature does not
 introduce Lookout or Observation frameworks. TextKit owns ordinary edits; host
 updates only replace text for an actual external change, such as acceptance or
 recovery, so presentation updates do not destroy selection and undo.
+
+Block identity and lifecycle are independent of the drawing framework. The
+editor and interactive controls belong in AppKit; the terminal transcript
+already uses Ghostty's Metal renderer. Simple block backgrounds, separators,
+and highlights could eventually join that existing render pass if measured
+scrolling costs justify it. The current AppKit overlays are small and redraw
+only when their content or geometry changes. Full-width backgrounds/separators
+sit below the native scrollbar, while text alone retains padding.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
@@ -70,7 +78,8 @@ Do not infer exact per-process output ownership from a block boundary.
 | [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | AppKit block/header presentation and inline or pinned editor placement. |
 | [`CommandBlockLayout.swift`](../macos/Sources/Features/Command%20Input/CommandBlockLayout.swift) | Snapshot of core geometry and immutable block metadata. |
 | [`CommandInputSession.swift`](../macos/Sources/Features/Command%20Input/CommandInputSession.swift) | Per-pane draft, acknowledgement, focus, recovery, and off-main bridge I/O. |
-| [`native-input.zsh`](../macos/Sources/Features/Command%20Input/native-input.zsh) | Isolated shell bootstrap, ZLE submission, block markers, and metadata publication. |
+| [`CommandShellStartup.swift`](../macos/Sources/Features/Command%20Input/CommandShellStartup.swift), [`native-input-startup.zsh`](../macos/Sources/Features/Command%20Input/native-input-startup.zsh) | Private bootstrap resources, normal user startup, and deferred attachment. |
+| [`native-input.zsh`](../macos/Sources/Features/Command%20Input/native-input.zsh) | ZLE submission, block markers, completion, and metadata publication after normal user startup. |
 | [`CommandBlocks.zig`](../src/terminal/CommandBlocks.zig) | ID-associated tracked pins and block lifetime within the terminal screen. |
 | [`embedded.zig`](../src/apprt/embedded.zig), [`ghostty.h`](../include/ghostty.h) | `ghostty_surface_command_layout` geometry boundary between core and host. |
 
@@ -80,11 +89,21 @@ never shares live `NSTextStorage` with a worker.
 
 ## Submission and ownership
 
-Each pane creates a private temporary directory and launches `/bin/zsh
---no-globalrcs -i` with its own `ZDOTDIR`. The starter shell does not source the
-user's `.zshrc`. The Blocks launcher disables upstream automatic shell integration
-so there is one owner of the block markers. The adapter removes its bootstrap
-environment variable before commands or nested shells can inherit it.
+Ghostty’s core selects the configured command or default shell, including its
+normal login-shell behavior. For interactive zsh, the core saves the effective
+`ZDOTDIR` after environment overrides and temporarily redirects it to a private
+pane directory. The generated `.zshenv` immediately restores the original value,
+sources the real user `.zshenv`, and lets zsh load global/user `.zprofile`,
+`.zshrc`, and `.zlogin` normally. Native integration attaches at the first prompt.
+User files are never rewritten, and private injection variables are consumed
+before nested shells can inherit them. Other shells and explicit scripts or
+commands retain the normal terminal path.
+
+The adapter preserves PATH, aliases, functions, history configuration, completion
+search paths/definitions, options, and the main keymap. It chains existing ZLE
+hooks. Spooky’s block header owns the visible primary prompt; theme hooks still
+run and see their own saved prompt values. Arbitrary asynchronous prompt rewrites
+and widgets requiring direct ZLE editing need separate compatibility work.
 
 The app atomically publishes a request containing:
 
@@ -107,8 +126,12 @@ prompt. Incomplete syntax yields to a terminal continuation; its block ID remain
 stable while each new ZLE invocation advances the validation generation.
 
 Acceptance means the shell owns the draft, not that it has executed successfully.
-The app retains the draft until that receipt, prevents duplicate submission, and
-does not replay an unknown outcome. A ready state from the accepted generation
+The app retains the draft through that receipt and keeps its native presentation
+until the terminal has parsed this command’s output boundary, entered a
+continuation, or reached the next prompt. The viewport expands behind the draft,
+preventing the terminal block cursor from flashing before the command arrives.
+The parsed boundary survives erased or evicted display anchors. Duplicate
+submissions are prevented, and an unknown outcome is never replayed. A ready state from the accepted generation
 cannot re-enable editing. Recovery remains copyable after a failure or shell
 exit. Unfocused panes must not claim first responder when a new prompt arrives.
 
@@ -185,9 +208,10 @@ replacement is still a proposal. The
 and [hook documentation](https://zsh.sourceforge.io/Doc/Release/Functions.html#Hook-Functions)
 define the underlying shell primitives.
 
-The separate **Ghostty Patina Blocks** app uses
-`com.patinasystems.ghostty.blocks` and `macos/build-blocks/`. It preserves the
-original `macos/build/` prototype. The native arm64 build, strict/deep signature
-verification, 30 AppKit editor tests, ten bridge/watch tests, and interactive block/editing/focus checks have
-passed. See the prototype guide for the exact build, launch flags, test coverage,
-and remaining physical IME/VoiceOver qualification.
+The application is **Spooky**, bundle ID `com.patinasystems.spooky`, built as
+`macos/build-spooky/ReleaseLocal/Spooky.app`. Native input is enabled by default;
+`GHOSTTY_NATIVE_INPUT=0` opts into ordinary terminal editing. The launcher opens
+the app normally and does not disable user configuration or window restoration.
+Upstream automatic updates are disabled for the fork. Existing Blocks and
+Diagnostics development bundles remain separate. See the guide for current
+verification and remaining physical IME/VoiceOver qualification.

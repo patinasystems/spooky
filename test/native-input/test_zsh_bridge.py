@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PTY integration tests for the opt-in, isolated native-input zsh prototype.
+"""PTY integration tests for the opt-in native-input zsh integration.
 
 Run: uv run --no-project --python python3 test/native-input/test_zsh_bridge.py
 No Ghostty build or user startup files are required. Each test has a private
@@ -23,12 +23,13 @@ ADAPTER = (
     Path(__file__).resolve().parents[2]
     / "macos/Sources/Features/Command Input/native-input.zsh"
 )
+STARTUP = ADAPTER.with_name("native-input-startup.zsh")
 TRIGGER = b"\x1b[99;1~"
 COMPLETION_TRIGGER = b"\x1b[99;2~"
 
 
 class Shell:
-    def __init__(self):
+    def __init__(self, *, user_rc="", startup_files=None, login=False, zdotdir="home", native_ready=True):
         self.temporary = tempfile.TemporaryDirectory(prefix="ghostty-native-input-")
         self.root = Path(self.temporary.name)
         self.bridge = self.root / "bridge"
@@ -39,28 +40,43 @@ class Shell:
         (self.root / ".zshrc").write_text(
             "PS1='probe> '\nPS2='continue> '\nHISTFILE=/dev/null\nSAVEHIST=0\n"
             f"typeset -g _PROBE_DIR={shlex.quote(str(self.root))}\n"
-            f"source {shlex.quote(str(ADAPTER))}\n"
             "_probe_finish() {\n"
             '  builtin print -rn -- "$BUFFER" > "$_PROBE_DIR/last-buffer"\n'
-            "  _patina_native_line_finish\n}\n"
+            "}\n"
             "zle -N zle-line-finish _probe_finish\n"
+            + user_rc
         )
+        for relative, content in (startup_files or {}).items():
+            path = self.root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        # Exercise the same .zshenv dispatcher copied by the app. All startup
+        # files are synthetic/private. Login and global startup behavior remain
+        # the same as an ordinary zsh invocation.
+        (self.bridge / ".zshenv").write_bytes(STARTUP.read_bytes())
+        (self.bridge / "native-input.zsh").write_bytes(ADAPTER.read_bytes())
+        environment = {
+            "HOME": str(self.root), "ZDOTDIR": str(self.bridge),
+            "PATINA_NATIVE_INPUT_DIR": str(self.bridge),
+            "TERM": "xterm-256color", "PATH": "/usr/bin:/bin",
+            "LC_ALL": "en_US.UTF-8",
+        }
+        if zdotdir != "unset":
+            environment["SPOOKY_ZSH_ZDOTDIR"] = "" if zdotdir == "empty" else str(self.root)
         self.pid, self.terminal = pty.fork()
         if self.pid == 0:
             os.chdir(self.root)
             os.execve(
-                "/bin/zsh", ["zsh", "--no-globalrcs", "-i"],
-                {
-                    "HOME": str(self.root), "ZDOTDIR": str(self.root),
-                    "PATINA_NATIVE_INPUT_DIR": str(self.bridge),
-                    "TERM": "xterm-256color", "PATH": "/usr/bin:/bin",
-                    "LC_ALL": "en_US.UTF-8",
-                },
+                "/bin/zsh", ["zsh", "-il" if login else "-i"],
+                environment,
             )
         os.set_blocking(self.terminal, False)
         self.output = bytearray()
         try:
-            self.wait(lambda: self.state()[0] == "ready")
+            if native_ready:
+                self.wait(lambda: self.state()[0] == "ready")
+            else:
+                self.wait(lambda: b"probe> " in self.output)
         except BaseException:
             self.close()
             raise
@@ -714,6 +730,231 @@ class NativeInputBridgeTests(unittest.TestCase):
         shell.wait(lambda: shell.receipt()[0] == "rejected")
         self.assertEqual(shell.receipt()[2], "oversized-request")
         self.assertEqual(shell.state()[0], "ready")
+
+
+@unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
+class UserStartupCompatibilityTests(unittest.TestCase):
+    def shell(self, **options):
+        shell = Shell(**options)
+        self.addCleanup(shell.close)
+        return shell
+
+    def test_login_loads_user_files_once_in_normal_order(self):
+        shell = self.shell(
+            login=True,
+            startup_files={
+                ".zshenv": 'print -r -- env >> "$HOME/startup-order"\n'
+                'export PROBE_ENVIRONMENT=from-zshenv\n'
+                'print -rn -- "${+PATINA_NATIVE_INPUT_DIR}|${+SPOOKY_ZSH_ZDOTDIR}" '
+                '> "$HOME/startup-markers"\n',
+                ".zprofile": 'print -r -- profile >> "$HOME/startup-order"\n'
+                'export PROBE_PROFILE=from-profile\n',
+                ".zlogin": 'print -r -- login >> "$HOME/startup-order"\n'
+                'export PROBE_LOGIN=from-login\n',
+            },
+            user_rc='print -r -- rc >> "$HOME/startup-order"\n'
+            '_probe_user_precmd() { print -r -- precmd >> "$HOME/startup-order"; }\n'
+            'precmd_functions+=(_probe_user_precmd)\n'
+            '_probe_user_init() { print -r -- init >> "$HOME/startup-order"; }\n'
+            'zle -N zle-line-init _probe_user_init\n',
+        )
+        self.assertEqual(shell.result("startup-order"), b"env\nprofile\nrc\nlogin\nprecmd\ninit\n")
+        self.assertEqual(shell.result("startup-markers"), b"0|0")
+        _, generation = shell.submit(
+            'print -rn -- "$PROBE_ENVIRONMENT|$PROBE_PROFILE|$PROBE_LOGIN|${options[login]}" '
+            '> "$_PROBE_DIR/result"'
+        )
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"from-zshenv|from-profile|from-login|on")
+        self.assertEqual(shell.result("startup-order").splitlines().count(b"env"), 1)
+        self.assertTrue(shell.complete("prin")["items"])
+
+    def test_nonlogin_skips_profile_and_login_but_keeps_rc_environment(self):
+        shell = self.shell(
+            startup_files={
+                ".zshenv": 'print -r -- env >> "$HOME/startup-order"\n',
+                ".zprofile": 'print -r -- WRONG-profile >> "$HOME/startup-order"\n',
+                ".zlogin": 'print -r -- WRONG-login >> "$HOME/startup-order"\n',
+            },
+            user_rc='print -r -- rc >> "$HOME/startup-order"\n'
+            'export PATH="$HOME/custom-bin:$PATH"\n'
+            'alias patina_startup_alias="print -rn -- configured"\n'
+            'alias patina_git=git\n',
+        )
+        self.assertEqual(shell.result("startup-order"), b"env\nrc\n")
+        _, generation = shell.submit('patina_startup_alias > "$_PROBE_DIR/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"configured")
+        _, generation = shell.submit('print -rn -- "$PATH" > "$_PROBE_DIR/path"')
+        shell.ready_after(generation)
+        self.assertTrue(shell.result("path").startswith(f"{shell.root}/custom-bin:".encode()))
+        self.assertEqual(shell.complete("patina_startup_a")["items"][0]["buffer"], "patina_startup_alias ")
+        self.assertIn("patina_git checkout", {item["buffer"] for item in shell.complete("patina_git che")["items"]})
+
+    def test_zshenv_can_redirect_later_startup_files(self):
+        shell = self.shell(
+            login=True,
+            startup_files={
+                ".zshenv": 'export ZDOTDIR="$HOME/config"\n',
+                "config/.zprofile": 'export PROBE_REDIRECT_PROFILE=loaded\n',
+                "config/.zshrc": 'typeset -g _PROBE_DIR=$HOME\n'
+                'export PROBE_REDIRECT_RC=loaded\n',
+                "config/.zlogin": 'export PROBE_REDIRECT_LOGIN=loaded\n',
+            },
+            user_rc='export PROBE_WRONG_RC=loaded\n',
+        )
+        _, generation = shell.submit(
+            'print -rn -- "$ZDOTDIR|$PROBE_REDIRECT_PROFILE|$PROBE_REDIRECT_RC|'
+            '$PROBE_REDIRECT_LOGIN|${+PROBE_WRONG_RC}" > "$HOME/result"'
+        )
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), f"{shell.root}/config|loaded|loaded|loaded|0".encode())
+
+    def test_preserves_unset_and_explicitly_empty_zdotdir(self):
+        for mode, expected in (("unset", b"0|"), ("empty", b"1|")):
+            with self.subTest(mode=mode):
+                shell = self.shell(zdotdir=mode)
+                _, generation = shell.submit(
+                    'print -rn -- "${+ZDOTDIR}|${ZDOTDIR-}" > "$HOME/result"'
+                )
+                shell.ready_after(generation)
+                self.assertEqual(shell.result(), expected)
+
+    def test_existing_compsys_custom_fpath_styles_and_wrapper_survive(self):
+        shell = self.shell(
+            startup_files={
+                "completions/_patina_configured": "#compdef patina_configured\n"
+                "compadd -- 'configured one' 'configured two'\n",
+                "PROFILE_FILE": "",
+            },
+            user_rc='fpath=("$HOME/completions" $fpath)\n'
+            'autoload -Uz compinit\ncompinit -i -D\n'
+            'autoload +X _main_complete\n'
+            'functions[_probe_main_complete]=$functions[_main_complete]\n'
+            '_main_complete() { print -rn -- used > "$HOME/completion-wrapper"; '
+            '_probe_main_complete "$@"; }\n'
+            'zstyle ":completion:*" matcher-list "m:{a-z}={A-Z}"\n'
+            '_probe_custom() { compadd -- PROFILE_CHOICE; }\n'
+            'compdef _probe_custom patina_upper\n',
+        )
+        self.assertEqual(
+            {item["buffer"] for item in shell.complete("patina_configured ")["items"]},
+            {"patina_configured configured\\ one", "patina_configured configured\\ two"},
+        )
+        self.assertEqual(shell.result("completion-wrapper"), b"used")
+        self.assertEqual(shell.complete("patina_upper ")["items"][0]["buffer"], "patina_upper PROFILE_CHOICE ")
+        self.assertEqual(shell.complete("cat pro")["items"][0]["buffer"], "cat PROFILE_FILE ")
+        _, generation = shell.submit('print -rn -- "$fpath[1]" > "$HOME/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), f"{shell.root}/completions".encode())
+
+    def test_fallback_compinit_discovers_user_fpath(self):
+        shell = self.shell(
+            startup_files={
+                "completions/_patina_lazy": "#compdef patina_lazy\ncompadd -- lazy-choice\n",
+            },
+            user_rc='fpath=("$HOME/completions" $fpath)\n',
+        )
+        self.assertEqual(shell.complete("patina_lazy la")["items"][0]["buffer"], "patina_lazy lazy-choice ")
+
+    def test_missing_hook_helper_keeps_ordinary_terminal_working(self):
+        shell = self.shell(user_rc="fpath=()\n", native_ready=False)
+        self.assertEqual(shell.state()[0], "missing")
+        shell.raw('print -rn -- "$PS1|${#fpath[@]}" > "$HOME/result"\r')
+        shell.wait(lambda: shell.result() is not None)
+        self.assertEqual(shell.result(), b"probe> |0")
+        self.assertNotIn(b"function definition file not found", shell.output)
+
+    def test_completion_options_follow_initial_and_live_shell_configuration(self):
+        shell = self.shell(user_rc='autoload -Uz compinit\ncompinit -i -D\n'
+            '_probe_option_completion() { compadd -- "$options[completealiases]"; }\n'
+            'compdef _probe_option_completion patina_option\n'
+            '_probe_target_completion() { compadd -- target-choice; }\n'
+            '_probe_alias_completion() { compadd -- alias-choice; }\n'
+            'compdef _probe_target_completion patina_target\n'
+            'compdef _probe_alias_completion patina_alias\n'
+            'alias patina_alias=patina_target\n'
+            'setopt complete_aliases\n')
+        self.assertEqual(shell.complete("patina_option ")["items"][0]["buffer"], "patina_option on ")
+        self.assertEqual(shell.complete("patina_alias ")["items"][0]["buffer"], "patina_alias alias-choice ")
+        _, generation = shell.submit("unsetopt complete_aliases")
+        shell.ready_after(generation)
+        self.assertEqual(shell.complete("patina_option ")["items"][0]["buffer"], "patina_option off ")
+        self.assertEqual(shell.complete("patina_alias ")["items"][0]["buffer"], "patina_alias target-choice ")
+
+    def test_custom_main_keymap_and_zle_hooks_coexist(self):
+        shell = self.shell(user_rc='bindkey -v\n'
+            'bindkey -N patina-user-map viins\nbindkey -A patina-user-map main\n'
+            '_probe_key() { BUFFER=\'print -rn -- keymap > "$HOME/result"\'; CURSOR=$#BUFFER; }\n'
+            'zle -N _probe_key\nbindkey -M patina-user-map "^X" _probe_key\n'
+            '_probe_init() { print -r -- init >> "$HOME/zle-hooks"; }\n'
+            '_probe_redraw() { print -r -- redraw >> "$HOME/zle-hooks"; }\n'
+            '_probe_finish_extra() { print -r -- finish >> "$HOME/zle-hooks"; }\n'
+            'zle -N zle-line-init _probe_init\n'
+            'autoload -Uz add-zle-hook-widget\n'
+            'add-zle-hook-widget line-pre-redraw _probe_redraw\n'
+            'add-zle-hook-widget line-finish _probe_finish_extra\n')
+        self.assertTrue(shell.complete("prin")["items"])
+        generation = shell.state()[1]
+        shell.raw(b"\x18")
+        shell.wait(lambda: shell.state()[0] == "terminal")
+        shell.raw("\r")
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"keymap")
+        hooks = shell.result("zle-hooks").splitlines()
+        self.assertIn(b"redraw", hooks)
+        self.assertEqual(hooks.count(b"finish"), 1)
+        self.assertEqual(hooks.count(b"init"), 2)
+        _, generation = shell.submit('bindkey -lL main > "$HOME/keymap"')
+        shell.ready_after(generation)
+        self.assertIn(b"patina-user-map main", shell.result("keymap"))
+
+    def test_user_history_receives_native_commands(self):
+        shell = self.shell(user_rc='HISTFILE="$HOME/configured-history"\n'
+            'HISTSIZE=100\nSAVEHIST=100\nsetopt inc_append_history extended_history\n')
+        draft = "export PATINA_HISTORY_PROBE=configured"
+        _, generation = shell.submit(draft)
+        shell.ready_after(generation)
+        shell.wait(lambda: shell.result("configured-history") is not None)
+        self.assertIn(draft.encode(), shell.result("configured-history"))
+        _, generation = shell.submit('print -rn -- "$HISTFILE|$SAVEHIST|${options[incappendhistory]}" > "$HOME/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), f"{shell.root}/configured-history|100|on".encode())
+
+    def test_aliases_and_nondefault_options_do_not_change_transport(self):
+        shell = self.shell(user_rc='alias local="print BAD_LOCAL"\n'
+            'alias typeset="print BAD_TYPESET"\n'
+            'alias source="print BAD_SOURCE"\n'
+            'alias _patina_native_submit="print BAD_WIDGET"\n'
+            'setopt sh_word_split ksh_arrays no_unset warn_create_global complete_aliases\n')
+        _, generation = shell.submit(
+            'builtin print -rn -- "${options[shwordsplit]}|${options[ksharrays]}|'
+            '${options[nounset]}|${options[warncreateglobal]}|${options[completealiases]}" '
+            '> "$HOME/result"'
+        )
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"on|on|on|on|on")
+        self.assertTrue(shell.complete("prin")["items"])
+        self.assertNotIn(b"BAD_", shell.output)
+
+    def test_prompt_themes_keep_their_values_between_commands(self):
+        shell = self.shell(user_rc='typeset -gi _probe_theme_count=0\n'
+            '_probe_theme() { (( ++_probe_theme_count )); '
+            'PS1="theme-$_probe_theme_count> "; PS2="secondary> "; RPS1="right"; return 0; }\n'
+            'precmd_functions+=(_probe_theme)\n'
+            '_probe_before_command() { print -rn -- "$PS1|$PS2|$RPS1" > "$HOME/prompt-values"; }\n'
+            'preexec_functions+=(_probe_before_command)\n')
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        self.assertEqual(shell.result("prompt-values"), b"theme-1> |secondary> |right")
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        self.assertEqual(shell.result("prompt-values"), b"theme-2> |secondary> |right")
+        self.assertTrue(shell.complete("prin")["items"])
+        block = shell.state()[3]
+        _, generation = shell.submit("false")
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "exit-status"), b"1")
 
 
 if __name__ == "__main__":

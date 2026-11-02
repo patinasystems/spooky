@@ -3,6 +3,8 @@ import Cocoa
 
 extension UpdateDriver: SPUUpdaterDelegate {
     func feedURLString(for updater: SPUUpdater) -> String? {
+        guard !AppBranding.upstreamUpdatesDisabled else { return nil }
+
         guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
             return nil
         }

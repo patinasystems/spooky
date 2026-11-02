@@ -49,7 +49,7 @@ pub fn init(
     };
 
     const env = b.graph.environ_map;
-    const app_path = b.fmt("macos/build/{s}/Ghostty.app", .{xc_config});
+    const app_path = b.fmt("macos/build-spooky/{s}/Spooky.app", .{xc_config});
 
     // Our step to build the Ghostty macOS app.
     const build = build: {
@@ -69,6 +69,7 @@ pub fn init(
             "Ghostty",
             "-configuration",
             xc_config,
+            "SYMROOT=build-spooky",
         });
 
         // If we have a specific architecture, we need to pass it

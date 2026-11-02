@@ -1,11 +1,10 @@
 # Native command completion
 
 Assessment dated 2026-11-02. This comparison does not propose changing the
-default shell. The first implementation now uses the existing controlled zsh:
+default shell. The first implementation now uses the user’s normal zsh:
 an AppKit menu receives full buffer/cursor results from a per-prompt zpty worker
-forked from the live shell's state. It loads system completion definitions and
-rejects dynamic expansion syntax; it is not arbitrary user-config completion
-parity. The provider comparisons and effort ranges below describe broader
+forked from the live shell's state. It reuses the user’s loaded completion definitions and rejects dynamic
+expansion syntax; arbitrary custom ZLE-widget parity is not promised. The provider comparisons and effort ranges below describe broader
 implementation choices, not measured development time. The current fish documentation identifies
 itself as 4.9.3. The source check below pins fish commit
 [`5564c2f06b115123318f00ddc874b8d8e9ca4707`](https://github.com/fish-shell/fish-shell/tree/5564c2f06b115123318f00ddc874b8d8e9ca4707).
@@ -14,7 +13,7 @@ completion latency measurements were performed.
 
 **Chosen route.** Keep the native multiline AppKit editor and integrate the
 chosen shell's mechanics. The current provider uses a snapshot of the existing
-controlled zsh session rather than a separate command/path implementation. zsh
+normal zsh session rather than a separate command/path implementation. zsh
 produces completed buffers and cursor positions, so it owns quoting and token
 replacement. The app owns selection, presentation, undo, and acceptance. A fish
 session adapter remains an optional future provider; changing the default shell
@@ -28,8 +27,8 @@ empty until the
 [`submission widget`](../macos/Sources/Features/Command%20Input/native-input.zsh)
 accepts the whole draft. Changing the child process to fish would not deliver
 Tab or that draft to fish's interactive reader. The controlled zsh bootstrap
-originally did not call `compinit` or read the user's `.zshrc`. The new adapter
-initializes system completions while retaining the isolated startup policy.
+originally did not call `compinit` or read the user's `.zshrc`. Spooky now loads normal user startup files and reuses their completion system;
+if it is not initialized, the adapter runs compinit using the existing fpath.
 
 The following comparison retains rough planning estimates for future alternatives
 or broader qualification. It is not a remaining-work schedule for the current
@@ -91,9 +90,9 @@ can later reuse the tokenizer, but coloring alone is not a completion engine.
 **The implemented zsh provider uses a prompt-time snapshot.** zsh's `compinit` initializes
 its function-based completion system and redefines completion widgets. Its
 completion definitions use contexts, tags, and styles, rather than merely
-returning filenames. Use the controlled shell's own function search path and
-retain its completion security checks; loading arbitrary user configuration is
-a separate compatibility decision.
+returning filenames. Use the shell’s existing function search path and retain its completion security
+checks. Startup files and plugins load before the adapter; it reuses initialized
+compdefs instead of replacing them.
 ([zsh completion system](https://zsh.sourceforge.io/Doc/Release/Completion-System.html))
 
 At each primary prompt, `precmd` forks a private `zpty` worker from the live
@@ -102,8 +101,10 @@ completion definitions without running another `.zshrc`. The worker opens its
 own `vared`/ZLE context before the foreground ZLE starts. Lifecycle hooks are
 disabled there, its output is drained, and it never borrows or redraws the
 foreground editor's buffer. It is stopped before command execution and replaced
-at the next primary prompt. Changes after the snapshot within the same prompt
-are not automatically mirrored.
+at the next primary prompt. Changes after the snapshot within the same prompt are not automatically mirrored.
+On the first prompt, all startup files have loaded, but later user precmd hooks
+can still run after the initial worker snapshot. On subsequent prompts the
+native precmd hook runs after the previously registered user hooks.
 
 The foreground completion widget validates the empty primary prompt and
 generation, then forwards the request to that worker. Completion does not call
@@ -165,10 +166,9 @@ any draft containing a backtick, `(`, `{`, or `$'`, even quoted/escaped. This
 excludes command/process substitution, braced expressions, executable glob
 qualifiers, and ANSI-C-quoted forms from native completion. Basic `$NAME`
 completion is supported. These are completion limits, not changes to zsh's
-submission language; terminal completion remains the fallback. Only system
-completion files under `/usr/share/zsh/$ZSH_VERSION/functions` are initialized
-with `compinit -i -D`; no user rc, site-function path, or completion dump is
-loaded by this bootstrap.
+submission language; terminal completion remains the fallback. Existing user completion definitions and fpath are preserved. If compsys has
+not been initialized by user startup, `compinit -i -D` initializes it without
+writing a new completion dump. The adapter does not rerun an existing compinit.
 
 Sources: [shell adapter](../macos/Sources/Features/Command%20Input/native-input.zsh),
 [file bridge](../macos/Sources/Features/Command%20Input/CommandCompletionBridge.swift),
@@ -244,12 +244,14 @@ dialog to every Tab press.
 ([fish completion evaluation](https://fishshell.com/docs/current/completions.html),
 [zsh completion functions](https://zsh.sourceforge.io/Doc/Release/Completion-System.html))
 
-**Verification status.** The recorded milestone checks passed 37 PTY tests and
-40 targeted Swift tests. The PTY suite covers shell-state inheritance, paths
+**Verification status.** The recorded milestone checks passed 49 PTY tests and
+45 targeted Swift tests. The PTY suite covers normal startup files, user
+completion configuration and hooks, history, shell-state inheritance, paths
 and quoting, multiline Unicode and middle-caret completion, request identity,
 dynamic-syntax rejection, output isolation, bounds, and ordinary submission.
 The Swift suite includes 30 native editor tests, six completion bridge tests,
-and four file-event tests. It covers undoable acceptance, menu key routing,
+four file-event tests, three submission-handoff tests, and two startup-resource
+tests. It covers undoable acceptance, menu key routing,
 Unicode boundaries, stale replies, cancellation, and focus. Live app checks
 passed for unique path completion and undo, multiple-candidate keyboard
 selection and acceptance without submission, git arguments, changed cwd,
@@ -257,8 +259,7 @@ new aliases and variables, multiline input, and completion before trailing
 text. A completed variable command submitted normally and printed its value.
 Terminal-output copy/paste retained native editing focus. The automation
 captures the main window separately from the nonactivating completion panel,
-so the popup's visual placement still needs a direct visual check. Fish and
-arbitrary user-plugin compatibility are not tested.
+so the popup's visual placement still needs a direct visual check. Fish and arbitrary user-plugin compatibility are not fully qualified.
 
 Test sources: [PTY suite](../test/native-input/test_zsh_bridge.py),
 [editor tests](../macos/Tests/Ghostty/CommandTextViewTests.swift),

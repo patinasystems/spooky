@@ -70,6 +70,12 @@ scrolling_region: ScrollingRegion,
 /// The last reported pwd, if any.
 pwd: std.ArrayList(u8),
 
+/// Latest parsed tagged primary-screen OSC 133 C. This is a handoff receipt,
+/// independent of drawable command anchors. Keep it across erasure, pruning,
+/// and RIS so a command that immediately clears and waits for input cannot
+/// leave the native editor holding keyboard focus. A new Terminal starts empty.
+last_started_command_id: [65]u8 = @splat(0),
+
 /// The title of the terminal as set by escape sequences (e.g. OSC 0/2).
 title: std.ArrayList(u8),
 
@@ -2846,6 +2852,12 @@ pub fn semanticPrompt(
             else => return,
         };
         if (cmd.readOption(.aid)) |id| {
+            const Blocks = @import("CommandBlocks.zig");
+            if (!Blocks.validID(id)) return;
+            if (kind == .output) {
+                self.last_started_command_id = @splat(0);
+                @memcpy(self.last_started_command_id[0..id.len], id);
+            }
             const screen = self.screens.active;
             var pin = screen.cursor.page_pin.*;
             const end_inclusive = kind == .end and (pin.x > 0 or screen.cursor.pending_wrap);
@@ -17782,6 +17794,54 @@ test "Terminal: command blocks line erase removes header but input redraw preser
     try t.printString("new text");
     try testing.expect(screen.command_blocks.blocks.items[0].header == null);
     try testing.expect(screen.command_blocks.blocks.items[0].input != null);
+}
+
+test "Terminal: command blocks parsed start survives display clear and RIS" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    try testing.expectEqualStrings("", std.mem.sliceTo(&t.last_started_command_id, 0));
+    // Process the start marker and destructive output in the same parser batch,
+    // before the GUI gets any opportunity to query drawable command anchors.
+    stream.nextSlice("\x1b]133;A;aid=clear-wait\x07\r\n\x1b]133;B;aid=clear-wait\x07run\r\n" ++
+        "\x1b]133;C;aid=clear-wait\x07output\x1b[2J\x1b[H");
+    try testing.expectEqual(@as(usize, 0), t.screens.active.command_blocks.blocks.items.len);
+    try testing.expectEqualStrings("clear-wait", std.mem.sliceTo(&t.last_started_command_id, 0));
+    stream.nextSlice("\x1bc");
+    try testing.expectEqual(@as(usize, 0), t.screens.active.command_blocks.blocks.items.len);
+    try testing.expectEqualStrings("clear-wait", std.mem.sliceTo(&t.last_started_command_id, 0));
+    // A later prompt alone cannot claim its command has started. C still works
+    // without a drawable header, and replacing a longer ID clears its tail.
+    stream.nextSlice("\x1b]133;A;aid=new\x07");
+    try testing.expectEqualStrings("clear-wait", std.mem.sliceTo(&t.last_started_command_id, 0));
+    stream.nextSlice("\x1b[2J\x1b]133;C;aid=new\x07");
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_started_command_id, 0));
+    stream.nextSlice("\x1b]133;C\x07\x1b]133;C;aid=" ++ @as([65]u8, @splat('x')) ++ "\x07");
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_started_command_id, 0));
+    _ = try t.switchScreen(.alternate);
+    stream.nextSlice("\x1b]133;C;aid=alternate\x07");
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_started_command_id, 0));
+}
+
+test "Terminal: command blocks parsed start survives complete history eviction" {
+    var t = try init(testing.io, testing.allocator, .{
+        .cols = 12,
+        .rows = 3,
+        .max_scrollback_bytes = null,
+        .max_scrollback_lines = 1,
+    });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=evicted\x07\r\n\x1b]133;B;aid=evicted\x07run\r\n" ++
+        "\x1b]133;C;aid=evicted\x07\x1b]133;D;0;aid=evicted\x07");
+    const screen = t.screens.active;
+    const page_rows = screen.pages.pages.first.?.capacity().rows;
+    for (0..4 * page_rows) |_| try t.linefeed();
+    screen.command_blocks.prune(&screen.pages);
+    try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
+    try testing.expectEqualStrings("evicted", std.mem.sliceTo(&t.last_started_command_id, 0));
 }
 
 test "Terminal: semantic prompt" {

@@ -760,6 +760,12 @@ const Subprocess = struct {
         // This is not apprt-specific, so we do it here.
         _ = env.orderedRemove("VTE_VERSION");
 
+        // Native editing is requested per pane, but the core still owns shell
+        // selection (including initial-command). Never replace a user's command.
+        const native_input_dir = cfg.env_override.map.get("PATINA_NATIVE_INPUT_DIR") orelse
+            env.get("PATINA_NATIVE_INPUT_DIR");
+        var native_input = false;
+
         // Setup our shell integration, if we can.
         const shell_command: configpkg.Command = shell: {
             const default_shell_command: configpkg.Command =
@@ -775,6 +781,13 @@ const Subprocess = struct {
                 cfg.shell_integration_features,
                 cfg.cursor_blink orelse true,
             );
+
+            if (native_input_dir != null and
+                try shell_integration.supportsNativeInput(alloc, default_shell_command))
+            {
+                native_input = true;
+                break :shell default_shell_command;
+            }
 
             const force: ?shell_integration.Shell = switch (cfg.shell_integration) {
                 .none => {
@@ -824,6 +837,14 @@ const Subprocess = struct {
                 entry.key_ptr.*,
                 entry.value_ptr.*,
             );
+        }
+
+        if (native_input) {
+            try shell_integration.setupNativeInput(&env, native_input_dir.?);
+        } else {
+            // Do not accidentally attach to a nested zsh launched by a command
+            // or a different shell that was explicitly selected for this pane.
+            _ = env.orderedRemove("PATINA_NATIVE_INPUT_DIR");
         }
 
         // Build our args list

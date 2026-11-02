@@ -6,6 +6,7 @@ excluded:
   - build
   - build-blocks
   - build-cursor-performance
+  - build-spooky
 
 disabled_rules:
   - cyclomatic_complexity

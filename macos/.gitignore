@@ -3,5 +3,6 @@
 build/
 build-blocks/
 build-cursor-performance/
+build-spooky/
 xcuserdata/
 DerivedData/

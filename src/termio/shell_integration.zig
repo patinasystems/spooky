@@ -32,6 +32,56 @@ pub const ShellIntegration = struct {
     command: config.Command,
 };
 
+/// Native editing attaches to an ordinary interactive zsh. Explicit scripts,
+/// commands, and other shells keep their existing terminal startup behavior.
+pub fn supportsNativeInput(alloc: Allocator, command: config.Command) !bool {
+    if (try detectShell(alloc, command) != .zsh) return false;
+    var args = try command.argIterator(alloc);
+    defer args.deinit();
+    _ = args.next();
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--login") or std.mem.eql(u8, arg, "--interactive")) continue;
+        if (arg.len < 2 or arg[0] != '-') return false;
+        for (arg[1..]) |flag| if (flag != 'i' and flag != 'l') return false;
+    }
+    return true;
+}
+
+/// Run after configured environment overrides so custom ZDOTDIR is preserved.
+/// The generated .zshenv restores it before sourcing the real user's .zshenv;
+/// zsh itself then loads the remaining startup files in their normal order.
+pub fn setupNativeInput(env: *EnvMap, directory: []const u8) !void {
+    if (env.get("ZDOTDIR")) |original| {
+        try env.put("SPOOKY_ZSH_ZDOTDIR", original);
+    } else {
+        _ = env.orderedRemove("SPOOKY_ZSH_ZDOTDIR");
+    }
+    try env.put("ZDOTDIR", directory);
+}
+
+test "native input preserves selected command and startup environment" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    try testing.expect(try supportsNativeInput(alloc, .{ .shell = "/bin/zsh" }));
+    try testing.expect(try supportsNativeInput(alloc, .{ .direct = &.{ "/bin/zsh", "-il" } }));
+    try testing.expect(!try supportsNativeInput(alloc, .{ .shell = "fish" }));
+    try testing.expect(!try supportsNativeInput(alloc, .{ .shell = "zsh -c 'echo hello'" }));
+    try testing.expect(!try supportsNativeInput(alloc, .{ .shell = "zsh script.zsh" }));
+    try testing.expect(!try supportsNativeInput(alloc, .{ .shell = "zsh -f" }));
+
+    var env = EnvMap.init(alloc);
+    defer env.deinit();
+    try setupNativeInput(&env, "/private/bridge");
+    try testing.expectEqualStrings("/private/bridge", env.get("ZDOTDIR").?);
+    try testing.expect(env.get("SPOOKY_ZSH_ZDOTDIR") == null);
+    try env.put("ZDOTDIR", "");
+    try setupNativeInput(&env, "/private/next");
+    try testing.expectEqualStrings("", env.get("SPOOKY_ZSH_ZDOTDIR").?);
+    try env.put("ZDOTDIR", "/custom/zsh");
+    try setupNativeInput(&env, "/private/last");
+    try testing.expectEqualStrings("/custom/zsh", env.get("SPOOKY_ZSH_ZDOTDIR").?);
+}
+
 /// Set up the command execution environment for automatic
 /// integrated shell integration and return a ShellIntegration
 /// struct describing the integration.  If integration fails

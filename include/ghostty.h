@@ -557,6 +557,9 @@ typedef struct {
   double padding_top;
   double cursor_x;
   double cursor_y;
+  // Latest parsed tagged primary-screen C, independent of visible anchors.
+  // Empty before any C; preserved across screen clear, history eviction, RIS.
+  char last_started_id[65];
 } ghostty_command_layout_s;
 
 // Config types

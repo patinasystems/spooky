@@ -7,13 +7,14 @@ class DockTilePlugin: NSObject, NSDockTilePlugIn {
 
     private let pluginBundle = Bundle(for: DockTilePlugin.self)
 
-    // Separate defaults based on debug vs release builds so we can test icons
-    // without messing up releases.
-    #if DEBUG
-    private let ghosttyUserDefaults = UserDefaults(suiteName: "com.mitchellh.ghostty.debug")
-    #else
-    private let ghosttyUserDefaults = UserDefaults(suiteName: "com.mitchellh.ghostty")
-    #endif
+    // The plug-in runs inside the Dock, so Bundle.main is not the terminal app.
+    // Read only our owning app's preferences, including side-by-side builds.
+    private let ghosttyUserDefaults: UserDefaults? = {
+        let bundle = Bundle(for: DockTilePlugin.self)
+        let suffix = ".dock-tile"
+        guard let identifier = bundle.bundleIdentifier, identifier.hasSuffix(suffix) else { return nil }
+        return UserDefaults(suiteName: String(identifier.dropLast(suffix.count)))
+    }()
 
     private var iconChangeObserver: Any?
 

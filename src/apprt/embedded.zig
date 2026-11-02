@@ -1571,6 +1571,7 @@ pub const CAPI = struct {
         padding_top: f64,
         cursor_x: f64,
         cursor_y: f64,
+        last_started_id: [65]u8,
     };
 
     // ghostty_clipboard_content_s
@@ -2066,6 +2067,7 @@ pub const CAPI = struct {
             .padding_top = padding_top,
             .cursor_x = 0,
             .cursor_y = 0,
+            .last_started_id = term.last_started_command_id,
         };
         if (!layout.primary) return 0;
         if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {
