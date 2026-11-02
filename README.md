@@ -1,3 +1,9 @@
+> **Patina fork:** This repository explores a macOS native command editor for
+> Ghostty: editable multiline input, mouse and keyboard selection, and native
+> clipboard and undo behavior. Try the [macOS prototype](prototype/native-input/README.md)
+> or read the [implementation design](docs/native-command-input.md).
+> **Status: opt-in prototype for an isolated local zsh session, not full Warp parity.**
+
 <!-- LOGO -->
 <h1>
 <p align="center">

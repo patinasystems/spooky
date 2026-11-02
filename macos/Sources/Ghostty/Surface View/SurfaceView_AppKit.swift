@@ -8,6 +8,10 @@ import GhosttyKit
 extension Ghostty {
     /// The NSView implementation for a terminal surface.
     class SurfaceView: OSSurfaceView, Codable, Identifiable {
+        /// Enabled only by the separate native-input prototype launcher.
+        private(set) var commandInputSession: CommandInputSession?
+        @Published var commandInputRevision: UInt64 = 0
+
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes.
         @Published private(set) var title: String = "" {
@@ -384,7 +388,18 @@ extension Ghostty {
             ) { [weak self] event in self?.localEventHandler(event) }
 
             // Setup our surface. This will also initialize all the terminal IO.
-            let surface_cfg = baseConfig ?? SurfaceConfiguration()
+            var surface_cfg = baseConfig ?? SurfaceConfiguration()
+            if ProcessInfo.processInfo.environment["GHOSTTY_NATIVE_INPUT"] == "1" {
+                do {
+                    let session = try CommandInputSession()
+                    session.configure(&surface_cfg)
+                    commandInputSession = session
+                } catch {
+                    AppDelegate.logger.error("Native input initialization failed: \(error.localizedDescription, privacy: .public)")
+                    self.error = Ghostty.Error.apiFailed
+                    return
+                }
+            }
             let surface = surface_cfg.withCValue(view: self) { surface_cfg_c in
                 ghostty_surface_new(app, &surface_cfg_c)
             }
@@ -393,6 +408,7 @@ extension Ghostty {
                 return
             }
             self.surfaceModel = Ghostty.Surface(cSurface: surface)
+            commandInputSession?.attach(to: self)
 
             // Setup our tracking area so we get mouse moved events
             updateTrackingAreas()
