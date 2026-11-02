@@ -1,0 +1,3 @@
+// Side-by-side development app; preserve the original native-input prototype.
+PATINA_BUNDLE_ID = com.patinasystems.ghostty.blocks
+PATINA_DISPLAY_NAME = Ghostty Patina Blocks

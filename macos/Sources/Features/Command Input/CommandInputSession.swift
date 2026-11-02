@@ -1,5 +1,7 @@
 import AppKit
 import Foundation
+import CoreText
+import GhosttyKit
 
 /// Opt-in, local-zsh prototype. The native draft never travels through a paste API.
 /// The shell accepts a generation-bound file from a dedicated ZLE key widget.
@@ -7,10 +9,14 @@ import Foundation
 final class CommandInputSession {
     private static let maximumBytes = 1_048_576
 
+    var onChange: (() -> Void)?
+    private var hasEditorFont = false
+
     let directory: URL
     private let bridge: CommandInputBridge
     private weak var surfaceView: Ghostty.SurfaceView?
     private var pollingTask: Task<Void, Never>?
+    private var geometryTask: Task<Void, Never>?
     private var submissionTask: Task<Void, Never>?
     private var generation: String?
     private var acceptedGeneration: String?
@@ -27,9 +33,22 @@ final class CommandInputSession {
     private(set) var status = "Starting isolated zsh…"
     private(set) var focusRequest: UInt64 = 0
     private(set) var editorVisible = true
+    private(set) var layout = CommandTerminalLayout()
+    private(set) var blockMetadata: [String: CommandBlockMetadata] = [:]
+    private(set) var currentBlockID: String?
+    private(set) var editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+
+    var notice: String? {
+        if failed || (!ready && pending == nil && !draft.isEmpty)
+            || status.hasPrefix("Command exceeds") || status.hasPrefix("Remove control") {
+            return status
+        }
+        return nil
+    }
 
     var isEditable: Bool { ready && !terminalRequested && pending == nil && !failed }
     var canReturnToEditor: Bool { ready && pending == nil && !failed }
+    var isRecoveringDraft: Bool { recoveryVisible }
 
     private struct Pending {
         let id: String
@@ -62,6 +81,7 @@ final class CommandInputSession {
 
     deinit {
         pollingTask?.cancel()
+        geometryTask?.cancel()
         submissionTask?.cancel()
         // This directory belongs only to this surface. No user shell files are changed.
         try? FileManager.default.removeItem(at: directory)
@@ -79,11 +99,22 @@ final class CommandInputSession {
         let bridge = self.bridge
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                let snapshot = await bridge.snapshot()
+                let ids = self?.layout.blocks.map(\.id) ?? []
+                let snapshot = await bridge.snapshot(visibleBlockIDs: ids)
                 guard !Task.isCancelled else { break }
                 self?.receive(snapshot)
                 do {
                     try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    break
+                }
+            }
+        }
+        geometryTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshGeometry()
+                do {
+                    try await Task.sleep(for: .milliseconds(33))
                 } catch {
                     break
                 }
@@ -116,9 +147,29 @@ final class CommandInputSession {
         let request = Pending(id: UUID().uuidString, generation: generation, started: Date())
         pending = request
         status = "Submitting…"
+        // AppKit restores the full PTY viewport synchronously before the task
+        // below waits for the terminal thread to apply its new dimensions.
+        editorVisible = false
+        focusRequest = 0
         changed()
         submissionTask = Task { [weak self, bridge] in
             do {
+                // Return to the live prompt deliberately, then wait until the
+                // terminal thread has applied the editor-driven viewport resize.
+                _ = self?.surfaceView?.surfaceModel?.perform(action: "scroll_to_bottom")
+                var applied = false
+                for _ in 0..<50 {
+                    guard let self, !Task.isCancelled else { return }
+                    self.refreshGeometry()
+                    if self.layoutMatchesSurfaceSize {
+                        applied = true
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard applied else {
+                    throw BridgeError.unavailable("The terminal is still resizing; submission was not sent.")
+                }
                 try await bridge.submit(text: text, generation: request.generation, id: request.id)
                 guard let self, self.pending?.id == request.id, !Task.isCancelled else { return }
                 // This action writes only the dedicated widget trigger, never the command.
@@ -156,6 +207,7 @@ final class CommandInputSession {
         recoveryVisible = false
         editorVisible = true
         status = "Native input · isolated local zsh"
+        _ = surfaceView?.surfaceModel?.perform(action: "scroll_to_bottom")
         requestEditorFocus()
         changed()
     }
@@ -175,6 +227,10 @@ final class CommandInputSession {
 
     private func receive(_ snapshot: CommandInputBridge.Snapshot) {
         let previous = presentationKey
+        if blockMetadata != snapshot.metadata {
+            blockMetadata = snapshot.metadata
+            changed()
+        }
         if surfaceView?.childExitedMessage != nil {
             ready = false
             editorVisible = recoveryVisible
@@ -206,6 +262,7 @@ final class CommandInputSession {
         }
 
         if let state = snapshot.state {
+            currentBlockID = state.blockID
             let newGeneration = generation != state.generation
             generation = state.generation
             // State and receipt are independent atomic files: a snapshot can
@@ -251,28 +308,52 @@ final class CommandInputSession {
         let visible: Bool
         let focusRequest: UInt64
         let draft: String
+        let currentBlockID: String?
     }
 
     private var presentationKey: Presentation {
         Presentation(status: status, editable: isEditable, visible: editorVisible,
-                     focusRequest: focusRequest, draft: draft)
+                     focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID)
     }
 
     private func focusTerminal() {
         guard let view = surfaceView, let window = view.window, window.isKeyWindow else { return }
+        if let controller = window.windowController as? BaseTerminalController,
+           let focused = controller.focusedSurface, focused !== view { return }
         window.makeFirstResponder(view)
     }
 
     private func requestEditorFocus() {
         // A fast command can hide and show the editor within one polling turn.
         // The request must differ from the previous view's token even when an
-        // intermediate zero was never rendered by SwiftUI.
+        // intermediate zero was never observed by the editor.
         focusSequence &+= 1
         focusRequest = focusSequence
     }
 
+    private var layoutMatchesSurfaceSize: Bool {
+        guard let surface = surfaceView?.surface, layout.primary else { return false }
+        let desired = ghostty_surface_size(surface)
+        return layout.rows > 0 && layout.rows == desired.rows && layout.columns == desired.columns
+    }
+
+    private func refreshGeometry() {
+        guard let surface = surfaceView?.surface else { return }
+        let updated = CommandTerminalLayout.read(from: surface)
+        guard updated != layout || !hasEditorFont else { return }
+        if !hasEditorFont || updated.cellHeight != layout.cellHeight || updated.cellWidth != layout.cellWidth {
+            if let raw = ghostty_surface_quicklook_font(surface) {
+                let font = Unmanaged<CTFont>.fromOpaque(raw).takeRetainedValue()
+                editorFont = font as NSFont
+                hasEditorFont = true
+            }
+        }
+        layout = updated
+        changed()
+    }
+
     private func changed() {
-        surfaceView?.commandInputRevision &+= 1
+        onChange?()
     }
 }
 
@@ -293,6 +374,7 @@ private actor CommandInputBridge {
         let kind: String
         let generation: String
         let context: String
+        let blockID: String
     }
 
     struct Receipt: Sendable {
@@ -304,26 +386,55 @@ private actor CommandInputBridge {
     struct Snapshot: Sendable {
         let state: State?
         let receipt: Receipt?
+        let metadata: [String: CommandBlockMetadata]
     }
 
     let directory: URL
+    private var metadataCache: [String: CommandBlockMetadata] = [:]
 
     init(directory: URL) { self.directory = directory }
 
-    func snapshot() -> Snapshot {
+    func snapshot(visibleBlockIDs: [String]) -> Snapshot {
         let stateFields = fields("state")
         let receiptFields = fields("receipt")
-        let state: State? = stateFields.count == 3
-            ? State(kind: stateFields[0], generation: stateFields[1], context: stateFields[2]) : nil
+        let state: State? = stateFields.count == 4
+            ? State(kind: stateFields[0], generation: stateFields[1], context: stateFields[2], blockID: stateFields[3]) : nil
         let receipt: Receipt? = receiptFields.count >= 2
             ? Receipt(id: receiptFields[1], accepted: receiptFields[0] == "accepted",
                       reason: receiptFields.count > 2 ? receiptFields[2] : "unknown") : nil
-        return Snapshot(state: state, receipt: receipt)
+        var visibleMetadata: [String: CommandBlockMetadata] = [:]
+        let ids = Set(visibleBlockIDs + [state?.blockID].compactMap { $0 })
+        for id in ids where Self.validID(id) {
+            if let cached = metadataCache[id], cached.completed {
+                visibleMetadata[id] = cached
+                continue
+            }
+            let block = directory.appendingPathComponent("blocks").appendingPathComponent(id)
+            guard let cwd = text(at: block.appendingPathComponent("cwd"), maximum: 16384) else { continue }
+            let status = text(at: block.appendingPathComponent("status"))?.trimmingCharacters(in: .newlines) ?? "editing"
+            let exitStatus = text(at: block.appendingPathComponent("exit-status"))
+                .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let start = text(at: block.appendingPathComponent("started-wall"))
+                .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let end = text(at: block.appendingPathComponent("finished-wall"))
+                .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            let elapsed: Double? = if let start, let end { max(0, end - start) } else { nil }
+            let metadata = CommandBlockMetadata(
+                id: id, workingDirectory: cwd,
+                branch: text(at: block.appendingPathComponent("branch"))?.trimmingCharacters(in: .newlines) ?? "",
+                status: status, exitStatus: exitStatus, elapsed: elapsed)
+            metadataCache[id] = metadata
+            visibleMetadata[id] = metadata
+        }
+        if metadataCache.count > 1024 {
+            metadataCache = metadataCache.filter { ids.contains($0.key) }
+        }
+        return Snapshot(state: state, receipt: receipt, metadata: visibleMetadata)
     }
 
     func submit(text: String, generation: String, id: String) throws {
         let state = fields("state")
-        guard state == ["ready", generation, "start"] else {
+        guard state.count == 4, Array(state.prefix(3)) == ["ready", generation, "start"] else {
             throw BridgeError.unavailable("The shell is no longer at the same empty prompt.")
         }
         let payload = Data("\(generation)\n\(id)\n\(text)".utf8)
@@ -332,10 +443,20 @@ private actor CommandInputBridge {
 
     private func fields(_ name: String) -> [String] {
         let url = directory.appendingPathComponent(name)
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attributes[.size] as? NSNumber, size.intValue <= 4096,
-              let data = try? Data(contentsOf: url),
-              let text = String(data: data, encoding: .utf8) else { return [] }
+        guard let text = text(at: url) else { return [] }
         return text.trimmingCharacters(in: .newlines).components(separatedBy: "\t")
+    }
+
+    private static func validID(_ id: String) -> Bool {
+        !id.isEmpty && id.utf8.count <= 64
+            && id.utf8.allSatisfy { (48...57).contains($0) || $0 == 45 }
+    }
+
+    private func text(at url: URL, maximum: Int = 4096) -> String? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber, size.intValue <= maximum,
+              let data = try? Data(contentsOf: url),
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        return text
     }
 }

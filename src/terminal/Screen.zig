@@ -14,6 +14,7 @@ const tripwire = @import("../tripwire.zig");
 const unicode = @import("../unicode/main.zig");
 const Selection = @import("Selection.zig");
 const PageList = @import("PageList.zig");
+const CommandBlocks = @import("CommandBlocks.zig");
 const selection_codepoints = @import("selection_codepoints.zig");
 const StringMap = @import("StringMap.zig");
 const ScreenFormatter = @import("formatter.zig").ScreenFormatter;
@@ -82,6 +83,9 @@ else
 
 /// Semantic prompt (OSC133) state.
 semantic_prompt: SemanticPrompt = .disabled,
+
+/// Identified command regions; pins move with reflow and scrollback.
+command_blocks: CommandBlocks = .{},
 
 /// Dirty flags for the renderer.
 dirty: Dirty = .{},
@@ -363,6 +367,7 @@ pub fn deinit(self: *Screen) void {
         self.kitty_images.deinit(self.alloc, self);
     }
     self.cursor.deinit(self.alloc);
+    self.command_blocks.deinit(self.alloc, &self.pages);
     self.pages.deinit();
 }
 
@@ -439,6 +444,7 @@ pub fn memoryUsage(self: *const Screen) MemoryUsage {
 /// - Disables protection mode
 ///
 pub fn reset(self: *Screen) void {
+    self.command_blocks.deinit(self.alloc, &self.pages);
     // Reset our pages
     self.pages.reset();
 
@@ -1854,6 +1860,16 @@ pub fn clearRows(
     protected: bool,
 ) void {
     defer self.assertIntegrity();
+
+    if (self.command_blocks.blocks.items.len > 0) {
+        if (self.pages.pin(tl)) |first_pin| {
+            var first = first_pin;
+            first.x = 0;
+            var last = if (bl) |p| self.pages.pin(p) orelse first else self.pages.getBottomRight(.screen) orelse first;
+            last.x = self.pages.cols - 1;
+            self.command_blocks.invalidateRows(&self.pages, first, last);
+        }
+    }
 
     // If the blank cell is the zero cell, a row already marked blank
     // already holds exactly what the clear would write.

@@ -89,7 +89,7 @@ struct CommandTextViewTests {
 
     @Test func clearedEditorStillFillsAndReceivesClicksInItsViewport() {
         let scrollView = CommandEditorScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 180))
-        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 76), textContainer: nil)
+        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 24), textContainer: nil)
         scrollView.documentView = view
         scrollView.tile()
 
@@ -107,6 +107,151 @@ struct CommandTextViewTests {
         #expect(scrollView.hitTest(point) === view)
     }
 
+    @Test func emptyEditorMeasuresOneLineWithoutReservedBlankSpace() {
+        let view = makeSizedEditor(width: 400)
+        // A taller viewport must not become the content's desired height.
+        view.minSize.height = 180
+        view.setFrameSize(NSSize(width: 400, height: 180))
+
+        #expect(view.measuredContentHeight == 24)
+        #expect(view.textContainerInset == .zero)
+        #expect(view.textContainer?.lineFragmentPadding == 0)
+    }
+
+    @Test func trailingNewlineReservesTheEmptyInsertionLine() {
+        let view = makeSizedEditor(width: 400)
+        view.string = "echo hello"
+        let oneLine = view.measuredContentHeight
+
+        view.string = "echo hello\n"
+
+        #expect(oneLine == 24)
+        #expect(view.measuredContentHeight >= oneLine * 2)
+    }
+
+    @Test func softWrappedInputGrowsAndShrinksWithAvailableWidth() {
+        let view = makeSizedEditor(width: 400)
+        view.string = String(repeating: "word ", count: 24)
+        let wideHeight = view.measuredContentHeight
+
+        view.setFrameSize(NSSize(width: 100, height: 24))
+        let narrowHeight = view.measuredContentHeight
+        #expect(narrowHeight > wideHeight)
+
+        view.setFrameSize(NSSize(width: 400, height: 24))
+        #expect(view.measuredContentHeight == wideHeight)
+    }
+
+    @Test func nativeContainerDistinguishesUserEditsFromAcknowledgement() {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
+        var edits: [String] = []
+        editor.onTextChanged = { edits.append($0) }
+        editor.setDraft("echo one")
+        #expect(edits.isEmpty)
+
+        let range = (editor.textView.string as NSString).range(of: "one")
+        editor.textView.setSelectedRange(range)
+        editor.textView.insertText("two", replacementRange: range)
+        #expect(edits == ["echo two"])
+
+        let selection = editor.textView.selectedRange()
+        editor.setDraft("echo two")
+        #expect(editor.textView.selectedRange() == selection)
+        editor.setDraft("")
+        #expect(editor.textView.string.isEmpty)
+        #expect(editor.textView.undoManager?.canUndo == false)
+        #expect(edits == ["echo two"])
+    }
+
+    @Test func validDeferredFocusRequestFocusesTheNativeEditor() async {
+        let view = makeSizedEditor(width: 400)
+        let window = makeFocusWindow(containing: view)
+        defer { window.close() }
+        view.focusRequested = true
+
+        await drainMainQueue()
+
+        #expect(window.firstResponder === view)
+        #expect(!view.focusRequested)
+    }
+
+    @Test func deferredFocusRequestCancelsWhenTheWindowBecomesInactive() async {
+        let view = makeSizedEditor(width: 400)
+        let window = makeFocusWindow(containing: view)
+        defer { window.close() }
+        view.focusRequested = true
+        window.simulatedKey = false
+
+        await drainMainQueue()
+
+        #expect(window.firstResponder !== view)
+        #expect(!view.focusRequested)
+        window.simulatedKey = true
+        view.applyFocusRequest()
+        await drainMainQueue()
+        #expect(window.firstResponder !== view)
+    }
+
+    @Test func deferredFocusRequestRechecksTheOwningPane() async {
+        let view = makeSizedEditor(width: 400)
+        let window = makeFocusWindow(containing: view)
+        defer { window.close() }
+        var ownsFocus = true
+        view.canRequestFocus = { ownsFocus }
+        view.focusRequested = true
+        ownsFocus = false
+
+        await drainMainQueue()
+
+        #expect(window.firstResponder !== view)
+        #expect(!view.focusRequested)
+    }
+
+    @Test func deferredFocusRequestCannotReplaceANewerResponder() async {
+        let view = makeSizedEditor(width: 400)
+        let other = makeSizedEditor(width: 400)
+        let window = makeFocusWindow(containing: view)
+        defer { window.close() }
+        window.contentView?.addSubview(other)
+        view.focusRequested = true
+        #expect(window.makeFirstResponder(other))
+
+        await drainMainQueue()
+
+        #expect(window.firstResponder === other)
+        #expect(!view.focusRequested)
+    }
+
+    private func makeFocusWindow(containing view: CommandTextView) -> CommandFocusTestWindow {
+        // These windows are never ordered onscreen or made key. Override only
+        // the queried state so focus races can be tested without using the UI.
+        let window = CommandFocusTestWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+            styleMask: .borderless, backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        window.contentView?.addSubview(view)
+        return window
+    }
+
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    private func makeSizedEditor(width: CGFloat) -> CommandTextView {
+        let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: width, height: 24), textContainer: nil)
+        view.configureAppearance(
+            font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+            textColor: .textColor,
+            backgroundColor: .textBackgroundColor,
+            minimumLineHeight: 24
+        )
+        return view
+    }
+
     private func returnEvent(modifiers: NSEvent.ModifierFlags = []) throws -> NSEvent {
         try #require(NSEvent.keyEvent(
             with: .keyDown,
@@ -121,4 +266,10 @@ struct CommandTextViewTests {
             keyCode: 36
         ))
     }
+}
+
+@MainActor
+private final class CommandFocusTestWindow: NSWindow {
+    var simulatedKey = true
+    override var isKeyWindow: Bool { simulatedKey }
 }

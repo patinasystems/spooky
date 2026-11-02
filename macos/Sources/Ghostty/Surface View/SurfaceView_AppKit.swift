@@ -10,7 +10,6 @@ extension Ghostty {
     class SurfaceView: OSSurfaceView, Codable, Identifiable {
         /// Enabled only by the separate native-input prototype launcher.
         private(set) var commandInputSession: CommandInputSession?
-        @Published var commandInputRevision: UInt64 = 0
 
         // The current title of the surface as defined by the pty. This can be
         // changed with escape codes.

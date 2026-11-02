@@ -1549,6 +1549,30 @@ pub const CAPI = struct {
         cell_height_px: u32,
     };
 
+    const CommandBlock = extern struct {
+        id: [65]u8,
+        flags: u32,
+        header_y: f64,
+        input_y: f64,
+        output_y: f64,
+        end_y: f64,
+        complete: bool,
+    };
+
+    const CommandLayout = extern struct {
+        primary: bool,
+        viewport_at_bottom: bool,
+        cursor_valid: bool,
+        columns: u32,
+        rows: u32,
+        cell_width: f64,
+        cell_height: f64,
+        padding_left: f64,
+        padding_top: f64,
+        cursor_x: f64,
+        cursor_y: f64,
+    };
+
     // ghostty_clipboard_content_s
     //
     // One representation of clipboard contents. The data is binary-safe
@@ -2008,6 +2032,75 @@ pub const CAPI = struct {
             .cell_width_px = surface.core_surface.size.cell.width,
             .cell_height_px = surface.core_surface.size.cell.height,
         };
+    }
+
+    /// A bounded, owned-by-caller snapshot; never exposes page/pin pointers.
+    /// Called on the GUI thread, like the other surface geometry APIs.
+    export fn ghostty_surface_command_layout(
+        surface: *Surface,
+        layout: *CommandLayout,
+        blocks: ?[*]CommandBlock,
+        capacity: usize,
+    ) usize {
+        const core = &surface.core_surface;
+        const scale = surface.content_scale;
+        const size = core.size;
+        const cell_width = @as(f64, @floatFromInt(size.cell.width)) / scale.x;
+        const cell_height = @as(f64, @floatFromInt(size.cell.height)) / scale.y;
+        const padding_left = @as(f64, @floatFromInt(size.padding.left)) / scale.x;
+        const padding_top = @as(f64, @floatFromInt(size.padding.top)) / scale.y;
+
+        core.renderer_state.mutex.lockUncancelable(global.io());
+        defer core.renderer_state.mutex.unlock(global.io());
+        const term = core.renderer_state.terminal;
+        const screen = term.screens.active;
+        layout.* = .{
+            .primary = term.screens.active_key == .primary,
+            .viewport_at_bottom = screen.viewportIsBottom(),
+            .cursor_valid = false,
+            .columns = screen.pages.cols,
+            .rows = screen.pages.rows,
+            .cell_width = cell_width,
+            .cell_height = cell_height,
+            .padding_left = padding_left,
+            .padding_top = padding_top,
+            .cursor_x = 0,
+            .cursor_y = 0,
+        };
+        if (!layout.primary) return 0;
+        if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {
+            if (point.viewport.y < screen.pages.rows and point.viewport.x < screen.pages.cols) {
+                layout.cursor_valid = true;
+                layout.cursor_x = padding_left + @as(f64, @floatFromInt(point.viewport.x)) * cell_width;
+                layout.cursor_y = padding_top + @as(f64, @floatFromInt(point.viewport.y)) * cell_height;
+            }
+        }
+
+        const output = blocks orelse return 0;
+        if (capacity == 0) return 0;
+        screen.command_blocks.prune(&screen.pages);
+        const offset = screen.pages.scrollbar().offset;
+        var written: usize = 0;
+        for (screen.command_blocks.blocks.items) |block| {
+            const region = @import("../terminal/CommandBlocks.zig").region(
+                block,
+                &screen.pages,
+                offset,
+                screen.cursor.page_pin.*,
+            ) orelse continue;
+            output[written] = .{
+                .id = block.id,
+                .flags = region.flags,
+                .header_y = padding_top + @as(f64, @floatFromInt(region.header)) * cell_height,
+                .input_y = padding_top + @as(f64, @floatFromInt(region.input)) * cell_height,
+                .output_y = padding_top + @as(f64, @floatFromInt(region.output)) * cell_height,
+                .end_y = padding_top + @as(f64, @floatFromInt(region.end)) * cell_height,
+                .complete = block.complete,
+            };
+            written += 1;
+            if (written == capacity) break;
+        }
+        return written;
     }
 
     /// Returns the PID of the foreground process for the surface PTY.

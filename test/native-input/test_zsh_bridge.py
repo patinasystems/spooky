@@ -8,6 +8,7 @@ temporary HOME/ZDOTDIR, terminal, and bridge directory; no user history is read.
 
 import os
 import pty
+import re
 import select
 import shlex
 import signal
@@ -132,6 +133,20 @@ class Shell:
         path = self.root / name
         return path.read_bytes() if path.exists() else None
 
+    def metadata(self, block, name):
+        path = self.bridge / "blocks" / block / name
+        return path.read_bytes() if path.exists() else None
+
+    def markers(self):
+        self.pump()
+        return [
+            (match[0].decode(), match[1].decode())
+            for match in re.findall(
+                rb"\x1b\]133;([ABCD]);(?:[0-9]+;)?aid=([0-9]+-[0-9]+)\x07",
+                self.output,
+            )
+        ]
+
 
 @unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
 class NativeInputBridgeTests(unittest.TestCase):
@@ -176,15 +191,124 @@ class NativeInputBridgeTests(unittest.TestCase):
 
     def test_incomplete_input_yields_to_terminal_continuation(self):
         shell = self.shell
+        block = shell.state()[3]
         _, generation = shell.submit("if true; then")
         shell.wait(lambda: shell.state()[0] == "terminal" and shell.state()[2] == "cont")
         self.assertNotEqual(shell.state()[1], generation)
+        self.assertEqual(shell.state()[3], block)
         self.assertEqual(shell.receipt()[0], "accepted")
         shell.submit('print -r -- WRONG > "$_PROBE_DIR/result"')
         self.assertEqual(shell.receipt()[2], "not-primary-prompt")
         shell.raw('print -rn -- continued > "$_PROBE_DIR/result"\rfi\r')
         shell.wait(lambda: shell.result() == b"continued")
         shell.wait(lambda: shell.state()[0] == "ready")
+        self.assertNotEqual(shell.state()[3], block)
+        self.assertEqual(shell.metadata(block, "input"), b"if true; then")
+        self.assertIn(b"continued", shell.metadata(block, "executed-input"))
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+
+    def test_primary_block_reserves_one_header_row_and_finishes_in_order(self):
+        shell = self.shell
+        self.assertEqual(len(shell.state()), 4)
+        block = shell.state()[3]
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        next_block = shell.state()[3]
+        self.assertNotEqual(next_block, block)
+        markers = shell.markers()
+        for marker in "ACD":
+            self.assertEqual(markers.count((marker, block)), 1)
+        self.assertLess(markers.index(("A", block)), markers.index(("B", block)))
+        self.assertLess(markers.index(("B", block)), markers.index(("C", block)))
+        self.assertLess(markers.index(("C", block)), markers.index(("D", block)))
+        self.assertLess(markers.index(("D", block)), markers.index(("A", next_block)))
+        self.assertIn(f"\x1b]133;A;aid={block}\x07\r\n".encode(), shell.output)
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"0")
+        self.assertEqual(shell.metadata(next_block, "status"), b"editing")
+
+    def test_block_metadata_preserves_original_cwd_and_failure_status(self):
+        shell = self.shell
+        block = shell.state()[3]
+        draft = 'cd "$_PROBE_DIR/work"\nfalse'
+        _, generation = shell.submit(draft)
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "cwd"), str(shell.root.resolve()).encode())
+        self.assertEqual(shell.metadata(shell.state()[3], "cwd"), str(shell.root / "work").encode())
+        self.assertEqual(shell.metadata(block, "input"), draft.encode())
+        self.assertEqual(shell.metadata(block, "exit-status"), b"1")
+        self.assertGreater(float(shell.metadata(block, "started-wall")), 0)
+        self.assertGreater(float(shell.metadata(block, "finished-wall")), 0)
+
+    def test_submitted_command_occupies_one_transcript_line(self):
+        shell = self.shell
+        draft = "export PROBE_ECHO_ONCE=unique_value"
+        block = shell.state()[3]
+        _, generation = shell.submit(draft)
+        shell.ready_after(generation)
+        shell.pump()
+        first_input = shell.output.index(f"\x1b]133;B;aid={block}\x07".encode())
+        output_start = shell.output.index(f"\x1b]133;C;aid={block}\x07".encode())
+        input_bytes = shell.output[first_input:output_start]
+        # ZLE may redraw the short command repeatedly using CR/erase sequences.
+        # It must commit only one terminal row, not print duplicate commands.
+        self.assertIn(draft.encode(), input_bytes)
+        self.assertEqual(input_bytes.count(b"\n"), 1)
+
+    def test_empty_input_without_preexec_still_completes_block(self):
+        shell = self.shell
+        # Interactive comments are opt-in in zsh. An empty draft is a true
+        # no-preexec case under the starter shell's unchanged option defaults.
+        block = shell.state()[3]
+        _, generation = shell.submit("")
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "input"), b"")
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"0")
+        self.assertIsNone(shell.metadata(block, "started-wall"))
+        self.assertNotIn(("C", block), shell.markers())
+        self.assertIn(("D", block), shell.markers())
+
+    def test_syntax_error_without_preexec_completes_block(self):
+        shell = self.shell
+        block = shell.state()[3]
+        _, generation = shell.submit("echo )")
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+        self.assertGreater(int(shell.metadata(block, "exit-status")), 0)
+        self.assertIsNone(shell.metadata(block, "started-wall"))
+        self.assertIn(("D", block), shell.markers())
+
+    def test_cancelled_continuation_finishes_same_block(self):
+        shell = self.shell
+        block = shell.state()[3]
+        _, generation = shell.submit("if true; then")
+        shell.wait(lambda: shell.state()[2] == "cont")
+        self.assertEqual(shell.state()[3], block)
+        shell.raw(b"\x03")
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"130")
+        self.assertIsNone(shell.metadata(block, "started-wall"))
+
+    def test_terminal_entered_command_uses_same_block_metadata(self):
+        shell = self.shell
+        block = shell.state()[3]
+        generation = shell.state()[1]
+        shell.raw("false\r")
+        shell.ready_after(generation)
+        self.assertEqual(shell.metadata(block, "input"), b"false")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"1")
+        self.assertIn(("C", block), shell.markers())
+
+    def test_normal_shell_exit_finalizes_last_block(self):
+        shell = self.shell
+        block = shell.state()[3]
+        shell.submit("exit 7")
+        shell.wait(lambda: shell.state()[0] == "exited")
+        self.assertEqual(shell.metadata(block, "status"), b"completed")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"7")
+        self.assertIn(("D", block), shell.markers())
 
     def test_stale_generation_is_rejected(self):
         shell = self.shell

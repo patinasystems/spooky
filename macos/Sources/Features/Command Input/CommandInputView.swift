@@ -1,145 +1,114 @@
 import AppKit
-import SwiftUI
 
-/// The command editor is separate from the terminal grid. Only its owner can
-/// clear an acknowledged submission or hand input back to the running program.
+/// AppKit owns the editor and its viewport. The surface host positions this
+/// view at the prompt and supplies the available height; text reports its own
+/// content height independently of that viewport.
 @MainActor
-struct CommandInputView: View {
-    @Binding var text: String
-    var isEditable: Bool
-    var focusRequest: UInt64 = 0
-    var onSubmit: (String) -> Bool
-    var onUseTerminal: () -> Void
-    var onFocusChanged: (Bool) -> Void
+final class CommandInputView: NSView, NSTextViewDelegate {
+    let textView: CommandTextView
+    let scrollView: CommandEditorScrollView
 
-    @State private var editorHeight: CGFloat = 76
+    var onTextChanged: (String) -> Void = { _ in }
+    var onSubmit: (String) -> Bool = { _ in false }
+    var onUseTerminal: () -> Void = {}
+    var onFocusChanged: (Bool) -> Void = { _ in }
+    var onContentHeightChanged: (CGFloat) -> Void = { _ in }
+    /// The host checks that this pane still owns the requested activation.
+    var canRequestFocus: () -> Bool = { true }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            CommandEditorRepresentable(
-                text: $text,
-                isEditable: isEditable,
-                focusRequest: focusRequest,
-                onSubmit: onSubmit,
-                onUseTerminal: onUseTerminal,
-                onFocusChanged: onFocusChanged,
-                onContentHeightChanged: { editorHeight = min(186, max(76, $0)) }
-            )
-            .frame(height: editorHeight)
+    private var lastFocusRequest: UInt64 = 0
+    private var latestHeight: CGFloat = 0
+    private var heightReportScheduled = false
 
-            HStack {
-                Text(isEditable ? "Return to run · Shift Return for a new line" : "Waiting for the shell…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("Use Terminal", action: onUseTerminal)
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .help("Return keyboard input to the terminal (Escape)")
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 34)
-        }
-        .background(Color(nsColor: .textBackgroundColor))
-        .overlay(alignment: .top) { Divider() }
-    }
-}
+    override init(frame frameRect: NSRect) {
+        let contentFrame = NSRect(origin: .zero, size: frameRect.size)
+        textView = CommandTextView(frame: contentFrame, textContainer: nil)
+        scrollView = CommandEditorScrollView(frame: contentFrame)
+        super.init(frame: frameRect)
 
-@MainActor
-private struct CommandEditorRepresentable: NSViewRepresentable {
-    @Binding var text: String
-    var isEditable: Bool
-    var focusRequest: UInt64
-    var onSubmit: (String) -> Bool
-    var onUseTerminal: () -> Void
-    var onFocusChanged: (Bool) -> Void
-    var onContentHeightChanged: (CGFloat) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = CommandEditorScrollView()
+        wantsLayer = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
-
-        let textView = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 76), textContainer: nil)
-        textView.delegate = context.coordinator
+        scrollView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
-        update(textView, coordinator: context.coordinator)
-        return scrollView
+        addSubview(scrollView)
+
+        textView.delegate = self
+        textView.onSubmit = { [weak self] text in self?.onSubmit(text) ?? false }
+        textView.onUseTerminal = { [weak self] in self?.onUseTerminal() }
+        textView.onFocusChanged = { [weak self] focused in self?.onFocusChanged(focused) }
+        textView.onContentHeightChanged = { [weak self] height in self?.contentHeightChanged(height) }
+        textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
+        toolTip = "Return runs the command. Shift Return adds a line. Escape returns to terminal input."
     }
 
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let textView = scrollView.documentView as? CommandTextView else { return }
-        context.coordinator.parent = self
-        update(textView, coordinator: context.coordinator)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
-    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
-        guard let textView = scrollView.documentView as? CommandTextView else { return }
-        if textView.window?.firstResponder === textView {
-            coordinator.parent.onFocusChanged(false)
-        }
-        textView.focusRequested = false
-        textView.delegate = nil
-        textView.onFocusChanged = { _ in }
-        textView.onContentHeightChanged = { _ in }
+    override func layout() {
+        super.layout()
+        scrollView.frame = bounds
+        scrollView.tile()
     }
 
-    private func update(_ textView: CommandTextView, coordinator: Coordinator) {
-        textView.onSubmit = onSubmit
-        textView.onUseTerminal = onUseTerminal
-        textView.onFocusChanged = onFocusChanged
-        textView.onContentHeightChanged = { [weak coordinator] height in
-            coordinator?.contentHeightChanged(height)
-        }
-        textView.isEditable = isEditable
+    /// Acknowledgement and history loading are explicit external edits. Normal
+    /// keystrokes stay in NSTextView so their selection and undo groups survive.
+    func setDraft(_ text: String) {
+        guard textView.string != text else { return }
+        textView.string = text
+        textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        if text.isEmpty { textView.undoManager?.removeAllActions() }
+        textView.reportContentHeight()
+    }
+
+    func setEditable(_ editable: Bool) {
+        textView.isEditable = editable
         textView.isSelectable = true
-
-        // Replacing string on every SwiftUI update destroys native selection,
-        // marked text, and undo grouping. Only accept an actual external edit.
-        if textView.string != text {
-            textView.string = text
-            textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
-            if text.isEmpty { textView.undoManager?.removeAllActions() }
-            textView.reportContentHeight()
-        }
-
-        if focusRequest != coordinator.lastFocusRequest {
-            coordinator.lastFocusRequest = focusRequest
-            textView.focusRequested = focusRequest != 0
-        }
         textView.applyFocusRequest()
     }
 
-    @MainActor
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: CommandEditorRepresentable
-        var lastFocusRequest: UInt64 = 0
-        private var lastHeight: CGFloat = 0
+    /// Zero cancels a pending request. Nonzero tokens must be monotonically
+    /// increasing per surface; unchanged tokens never steal focus back.
+    func requestFocus(token: UInt64) {
+        guard token != lastFocusRequest else { return }
+        lastFocusRequest = token
+        textView.focusRequested = token != 0
+    }
 
-        init(_ parent: CommandEditorRepresentable) {
-            self.parent = parent
-        }
+    func configureAppearance(
+        font: NSFont,
+        textColor: NSColor,
+        backgroundColor: NSColor,
+        minimumLineHeight: CGFloat
+    ) {
+        layer?.backgroundColor = backgroundColor.cgColor
+        textView.configureAppearance(
+            font: font, textColor: textColor,
+            backgroundColor: backgroundColor,
+            minimumLineHeight: minimumLineHeight
+        )
+    }
 
-        func textDidChange(_ notification: Notification) {
-            guard let textView = notification.object as? CommandTextView else { return }
-            parent.text = textView.string
-        }
+    func textDidChange(_ notification: Notification) {
+        guard notification.object as? CommandTextView === textView else { return }
+        onTextChanged(textView.string)
+    }
 
-        func contentHeightChanged(_ height: CGFloat) {
-            guard lastHeight != height else { return }
-            lastHeight = height
-            // Layout may run during updateNSView; publish size on the next turn.
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.parent.onContentHeightChanged(self.lastHeight)
-            }
+    private func contentHeightChanged(_ height: CGFloat) {
+        guard latestHeight != height else { return }
+        latestHeight = height
+        guard !heightReportScheduled else { return }
+        heightReportScheduled = true
+        // TextKit may be laying out while the host changes the editor frame.
+        // Deliver one coalesced measurement after the current layout completes.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.heightReportScheduled = false
+            self.onContentHeightChanged(self.latestHeight)
         }
     }
 }

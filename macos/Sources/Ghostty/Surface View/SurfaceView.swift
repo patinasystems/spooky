@@ -30,65 +30,6 @@ extension Ghostty {
         }
 
         var body: some View {
-            VStack(spacing: 0) {
-                terminalBody
-                if let session = surfaceView.commandInputSession {
-                    if session.editorVisible {
-                        Text(session.status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.top, 6)
-                        CommandInputView(
-                            text: Binding(get: { session.draft }, set: { session.setDraft($0) }),
-                            isEditable: session.isEditable && !surfaceView.readonly,
-                            focusRequest: session.focusRequest,
-                            onSubmit: { session.submit($0) },
-                            onUseTerminal: { session.useTerminal() },
-                            onFocusChanged: { focused in
-                                if focused {
-                                    // AppKit already resigned the terminal responder.
-                                    // Writing SwiftUI's terminal FocusState here can
-                                    // asynchronously clear the new editor responder.
-                                    surfaceView.focusDidChange(false)
-                                    // A native text view can become first responder
-                                    // before SwiftUI propagates its focused value.
-                                    // Route pane actions to this surface immediately,
-                                    // without handing keyboard focus back to the PTY.
-                                    if let controller = surfaceView.window?.windowController as? BaseTerminalController,
-                                       controller.focusedSurface !== surfaceView {
-                                        controller.focusedSurfaceDidChange(to: surfaceView)
-                                    }
-                                }
-                            }
-                        )
-                        .focusedValue(\.ghosttySurfaceView, surfaceView)
-                    } else {
-                        HStack {
-                            Text(session.status)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(2)
-                            Spacer()
-                            if session.canReturnToEditor {
-                                Button("Edit Command") { session.useEditor() }
-                                    .font(.caption)
-                            } else if !session.draft.isEmpty {
-                                Button("View Draft") { session.showRecoveryDraft() }
-                                    .font(.caption)
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                    }
-                }
-            }
-        }
-
-        @ViewBuilder
-        private var terminalBody: some View {
             let center = NotificationCenter.default
 
             ZStack {
@@ -614,11 +555,14 @@ extension Ghostty {
         /// The best approach is to wrap this view in a GeometryReader and pass in the geo.size.
         let size: CGSize
 
-        func makeNSView(context: Context) -> SurfaceScrollView {
+        func makeNSView(context: Context) -> NSView {
+            if let session = view.commandInputSession {
+                return NativeCommandSurfaceHost(size: size, surfaceView: view, session: session)
+            }
             return SurfaceScrollView(contentSize: size, surfaceView: view)
         }
 
-        func updateNSView(_ scrollView: SurfaceScrollView, context: Context) {
+        func updateNSView(_ scrollView: NSView, context: Context) {
             // SwiftUI may defer frame updates under system load (e.g., memory
             // pressure, heavy I/O) or when external window managers trigger rapid
             // layout changes. When that happens, the scroll view's bounds can
@@ -1166,6 +1110,13 @@ extension Ghostty {
             }
 
             MainActor.assumeIsolated {
+                // An explicit pane navigation must establish its target before
+                // the native editor checks whether that pane may take focus.
+                if to.commandInputSession != nil,
+                   let controller = window.windowController as? BaseTerminalController,
+                   controller.focusedSurface !== to {
+                    controller.focusedSurfaceDidChange(to: to)
+                }
                 if to.commandInputSession?.focusEditorIfActive() != true {
                     window.makeFirstResponder(to)
                 }

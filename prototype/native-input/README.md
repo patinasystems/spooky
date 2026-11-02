@@ -1,49 +1,76 @@
-# Native input prototype
+# Ghostty Patina Blocks
 
-This is an opt-in macOS Ghostty build with a real AppKit multiline command editor.
-It runs a controlled local zsh session and uses Ghostty's existing renderer and
-PTY. It is the first implementation slice of the
-[longer-term design](../../docs/native-command-input.md), not full Warp parity.
+An opt-in macOS Ghostty fork with an inline AppKit command editor and grouped
+command/output history. One real Ghostty terminal grid renders the transcript;
+AppKit places block headers and the native editor using positions tracked by the
+terminal core. Output is not captured through pipes or replayed as plain text.
+
+The editor starts at one line, grows with hard and soft wraps, and stops growing
+at the smaller of 12 terminal lines or 45% of the pane. Longer drafts scroll
+inside the editor. While browsing terminal history, the current header and draft
+remain pinned at the bottom. At the live prompt, the editor sits inline at the
+terminal input position.
+
+This is a controlled local-zsh prototype. See the
+[design and implementation notes](../../docs/native-command-input.md) for the
+protocol, fidelity limits, and remaining work.
 
 ## Build and launch
 
-Use Xcode and its Metal toolchain, Zig 0.17.x, and Nushell. See
-[HACKING.md](../../HACKING.md) for upstream dependencies. The helper builds a
-native-architecture GhosttyKit and the `ReleaseLocal` app:
+Use Xcode and its Metal toolchain, Zig 0.17.x, and Nushell. The checked-out
+`build.zig.zon` and `src/build/zig.zig` own the Zig requirement; see
+[HACKING.md](../../HACKING.md) for other upstream dependencies.
 
 ```sh
 GHOSTTY_ZIG=/path/to/zig ./prototype/native-input/build.sh
 ./prototype/native-input/launch.sh
 ```
 
-When working from Kitchen, route that build through `pat run --on local --cost
-heavy -- '<build command>'`, because this separate repository is local to this
-Mac. The app appears as **Ghostty Patina** and uses bundle ID
-`com.patinasystems.ghostty.prototype`. The launcher disables upstream updates,
-default user Ghostty configuration, automatic shell integration, and window
-restoration for this controlled test. It does not replace an installed Ghostty.
+The build helper compiles native-architecture GhosttyKit, then invokes
+`macos/build.nu` with `ReleaseLocal`, the separate
+[`blocks.xcconfig`](blocks.xcconfig), and an absolute output directory:
 
-The launcher enables `GHOSTTY_NATIVE_INPUT=1`. Running the app without that
-environment variable retains the ordinary terminal UI. Only the `ReleaseLocal`
-app identity is changed; do not distribute other build configurations as the
-Patina prototype without reviewing their identities and update behavior.
+```text
+macos/build-blocks/ReleaseLocal/Ghostty.app
+```
+
+The app displays as **Ghostty Patina Blocks**, with bundle ID
+`com.patinasystems.ghostty.blocks`. The original prototype in `macos/build/`
+remains separate; these helpers neither rebuild that app bundle nor stop its
+running process. The launcher checks the Blocks bundle ID before starting it.
+An alternate Blocks app path may be supplied as its first argument.
+
+When working from Kitchen, follow its `pat run` compute-routing rules for the
+build. Use the local executor when the separate checkout is only on this Mac.
+
+The launcher sets `GHOSTTY_NATIVE_INPUT=1` and disables upstream updates, default
+user Ghostty configuration, automatic shell integration, and window restoration.
+Only this launch enables the custom UI. The distinct app identity comes from the
+Blocks xcconfig; do not distribute another configuration under the same name
+without checking its bundle ID and update settings.
 
 ## Try it
 
-1. Click the bottom editor and type or paste a multiline command. Drag to select
-   across lines; replace the selection, undo, and use normal macOS word/line
-   selection. Paste only inserts text.
-2. Shift+Return inserts a newline. Return submits the whole draft to the same
-   interactive zsh. Option/Control+Return also insert a newline.
-3. After submission, the terminal receives input until the shell returns to a
-   fresh prompt. Try `read answer; print -r -- "$answer"` or a terminal program.
-4. Use **Use Terminal** or Escape for ordinary shell editing, history, and Tab
-   completion. At an empty top-level prompt, **Edit Command** restores native
-   editing. A partially typed shell line must be cleared or run first.
-5. Incomplete syntax, such as `if true; then`, yields to the terminal continuation
-   prompt. Finish it there or cancel with Ctrl+C.
+1. Type or paste into the one-line native input. Add lines with Shift+Return and
+   resize the pane to check growth on soft wraps. Option/Control+Return also add
+   a newline. Pasting inserts text without executing it.
+2. Drag a selection across lines, replace it, and use ordinary macOS clipboard,
+   word/line selection, undo, and redo. Return submits the entire draft.
+3. The accepted command appears in the terminal transcript under its block
+   header. Its output retains Ghostty's colors, cursor behavior, and selection.
+   Headers show the command's original directory, optional Git branch, and
+   completion metadata.
+4. Scroll upward through previous commands. The current header and editor stay
+   at the bottom while the transcript scrolls independently.
+5. Use the terminal-input control or Escape for shell history and Tab completion.
+   Native editing can resume at an empty primary prompt; a partially edited shell
+   line must first be cleared or run.
+6. Try `read answer; print -r -- "$answer"` or a terminal application. Running
+   programs receive ordinary terminal input. Incomplete input such as
+   `if true; then` uses the terminal continuation prompt; finish it there or
+   cancel with Ctrl+C.
 
-For example, paste this entire buffer, select text across its lines, then submit:
+For a multiline example:
 
 ```sh
 export PATINA_DEMO='hello from the native editor'
@@ -54,80 +81,98 @@ emoji 👩🏽‍💻, and 日本語.
 END
 ```
 
-Then submit `printf '%s\n' "$PATINA_DEMO"` separately to verify that the shell's
-environment persists. `cd` persists as well.
+Submit `printf '%s\n' "$PATINA_DEMO"` separately afterward. The same interactive
+shell retains exports and working-directory changes between commands.
 
-## Implemented boundary
+## What the prototype does
 
-- A real `NSTextView` owns selection, text, marked input, and a per-editor undo
-  manager. Native copy/cut/paste/select-all/undo/redo stay in the editor.
-- Drafts remain present until the shell acknowledges acceptance. Failed or
-  uncertain submissions are not replayed. **View Draft** exposes a retained draft
-  when native submission has stopped.
-- Each pane gets a private temporary directory and isolated `ZDOTDIR`. The
-  starter shell does not load personal startup files or persist user history.
-  It still inherits the launched terminal environment and working directory.
-- The shell adapter validates the current prompt generation and request ID,
-  loads the complete draft into `BUFFER`, and invokes ZLE's normal `.accept-line`.
-  It does not send command text through a paste API or create a new shell for
-  each command.
-- Running programs, nonempty shell input, and continuation prompts retain the
-  normal terminal input path. Nested processes do not inherit the bridge
-  capability.
-- The editor accepts UTF-8 text up to 1 MiB. It explicitly rejects control
-  characters other than tabs and newlines; it does not silently remove them.
+- Custom block headers, layout, and editing use AppKit and explicit callbacks.
+  The upstream application's existing SwiftUI shell remains in place; this
+  feature adds no Lookout or Observation framework dependency.
+- A real `NSTextView` owns text, selection, marked input, and its own undo manager.
+  Ordinary edits do not replace its text storage on every presentation update.
+- Each pane launches an isolated local zsh with a private temporary `ZDOTDIR`.
+  It does not source the user's `.zshrc`; it inherits the terminal environment
+  and working directory. Personal shell startup files are not modified.
+- Atomic request/state/receipt files transfer the draft to a dedicated ZLE key
+  widget. The widget checks the prompt generation, request ID, and empty input
+  buffer before invoking normal `.accept-line` in the existing shell.
+- Drafts remain until acceptance. Uncertain submissions are never replayed, and
+  a recovery view retains the draft after an error.
+- Tagged OSC 133 markers identify each primary command block. Core-tracked pins
+  keep its header and input/output boundaries associated with terminal cells
+  across scrolling and reflow. A continuation keeps the same block ID.
+- Private per-block metadata stores the original directory and accepted input,
+  optional branch, lifecycle, and exit status. Displayed elapsed time currently
+  uses shell wall-clock timestamps; it is not a performance measurement.
 
-## Known limits
+## Limits
 
-History and completion are available through **Use Terminal**, not inside the
-native editor. Syntax coloring, imported user shell configuration, remote and
-nested-shell integration, native completion menus, and Linux are not implemented.
-Selection highlighting is native AppKit selection.
+Blocks group a **shared, mutable terminal transcript**. They are not independent,
+immutable terminal grids. Erasing or evicting terminal cells can invalidate a
+block's anchors. Background output can interleave with foreground output on the
+same PTY. Alternate-screen applications use the normal live terminal, rather
+than a reconstructed block transcript.
 
-This prototype uses atomic request/state/receipt files and polls small state
-records every 100 ms. A dedicated terminal key sequence wakes the ZLE submit
-widget. Generation checks reject stale requests when ZLE resumes, but an
-unexpected foreground change between readiness checking and sending that key
-sequence can deliver trigger bytes to the foreground program. General-purpose
-deployment needs a stronger ownership/transport protocol; the isolated starter
-shell is the explicitly limited test environment.
+Native editing is supported at the empty primary prompt only. History and
+completion remain available through terminal input. Syntax coloring, imported
+user configuration/plugins, remote or nested-shell adapters, native completion
+menus, and Linux are not implemented. Selection highlighting is AppKit's native
+text selection.
 
-The 100 ms polling and file protocol are feasibility choices, not performance
-claims or the intended final transport. Closing a pane removes its private
-directory; an app crash can leave a `patina-ghostty-input-*` directory in the
-system temporary directory. No personal shell startup files are edited.
+The editor accepts up to 1 MiB of UTF-8 and rejects control characters other than
+tabs and newlines. It does not silently remove unsupported bytes.
 
-## Verification
+The bridge polls small records every 100 ms. A dedicated terminal key sequence
+wakes its submit widget. Generation checks prevent a stale request from executing
+at a later prompt, but an unexpected foreground change between the readiness check
+and that key sequence can deliver trigger bytes to the foreground program. This
+controlled prototype does not establish a general-purpose ownership protocol.
 
-Validated on 2026-11-02 on Apple Silicon with Zig 0.17.0, Xcode 27, Swift 6.4,
-and system zsh 5.9:
+Closing a pane removes its private directory and block metadata. A crash can leave
+a `patina-ghostty-input-*` directory in the system temporary directory. These
+files include accepted commands and are not a permanent history service.
 
-- Native GhosttyKit and the `ReleaseLocal` arm64 app build successfully.
-- The 11 PTY integration tests pass.
-- All seven `CommandTextViewTests` pass, including multiline Unicode replacement,
-  newline versus submission, retained drafts, disabled resubmission, IME Return,
-  independent undo managers, and empty-editor sizing/hit testing.
-- Interactive checks confirm selection across lines, replacement and undo,
-  Shift+Return, full-buffer execution, persistent environment, and handoff to and
-  from an interactive `read` command.
-- New Swift files pass strict SwiftLint; shell syntax and diff whitespace checks
-  pass. These checks do not establish full Warp parity or production readiness.
+## Verification status
 
-The shell integration suite launches fresh PTYs and temporary shell environments:
+As of 2026-11-02:
+
+- All 19 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
+  transfer, retained shell state, ownership, stale/duplicate rejection, block
+  markers, stable continuation IDs, completion metadata, and exit/cancellation.
+- Six focused command-block core tests and the existing erase regressions pass.
+- All 15 AppKit editor tests pass, covering selection/replacement, newline and
+  submission behavior, retained drafts, IME-Return handling, independent undo,
+  editor sizing, and deferred-focus ownership checks.
+- The native arm64 `ReleaseLocal` Blocks app builds successfully and passes
+  strict/deep code-signature verification.
+- Interactive checks pass for multiline paste and Cmd+A selection, full-buffer
+  submission, a single visible command/output block, fresh-prompt recovery, and
+  independent metadata on successive blocks.
+- Filled-scrollback checks pass: the current header/editor stay pinned while
+  browsing history, and submission returns the viewport to the live bottom.
+- Foreground `read` and a controlled alternate-screen/read fixture receive
+  keyboard input and restore native editing afterward. Escape/return-to-editor,
+  soft-wrap/Shift+Return growth, and terminal Cmd+A output selection also pass.
+- Multiple-pane checks pass: background completion preserves the other pane's
+  draft focus, and Cmd+] explicitly moves focus to the native editor in the
+  selected pane.
+
+Physical IME sessions and VoiceOver have not been qualified. The synthetic
+IME-Return test checks that marked input does not also submit; it does not replace
+testing a complete input-method or assistive-technology session.
+
+Run the shell suite without building Ghostty:
 
 ```sh
 uv run --no-project --python python3 test/native-input/test_zsh_bridge.py
 ```
 
-It tests persistent state, exact multiline/Unicode/heredoc/trailing-newline
-transfer, continuation fallback, stale/duplicate rejection, nonempty-buffer
-preservation, `read` and raw-mode input, invalid payloads, and nested-process
-isolation.
-
-Native editor tests live in
+Native tests live in
 [`CommandTextViewTests.swift`](../../macos/Tests/Ghostty/CommandTextViewTests.swift).
-Run them through `macos/build.nu --action test --only-testing
-GhosttyTests/CommandTextViewTests`; choose a configuration with testability enabled
-and an architecture matching the built GhosttyKit. The helper skips UI tests,
-so this is not a substitute for interactive validation of focus, IME, VoiceOver,
-multiple panes, or terminal programs.
+Use `macos/build.nu --action test --only-testing GhosttyTests/CommandTextViewTests`
+with a testable configuration, the Blocks xcconfig, an isolated build directory,
+and the architecture used for GhosttyKit. `build.nu` skips UI automation tests.
+Repeat the interactive checks when changing layout, focus, or terminal ownership;
+physical IME/VoiceOver and broader terminal-application qualification remain
+separate work.

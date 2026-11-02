@@ -4,6 +4,7 @@ check_for_updates: false
 
 excluded:
   - build
+  - build-blocks
 
 disabled_rules:
   - cyclomatic_complexity

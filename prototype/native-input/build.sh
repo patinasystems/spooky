@@ -11,4 +11,8 @@ fi
 
 cd "$repo_root"
 "$zig_bin" build -Demit-macos-app=false -Doptimize=ReleaseFast -Dxcframework-target=native -j4
-nu macos/build.nu --configuration ReleaseLocal --arch "$(uname -m)"
+nu macos/build.nu \
+    --configuration ReleaseLocal \
+    --arch "$(uname -m)" \
+    --build-dir "$repo_root/macos/build-blocks" \
+    --xcconfig "$repo_root/prototype/native-input/blocks.xcconfig"

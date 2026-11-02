@@ -529,6 +529,36 @@ typedef struct {
   uint32_t cell_height_px;
 } ghostty_surface_size_s;
 
+// Native command chrome over the existing terminal grid. Coordinates are
+// top-left logical points, including surface padding. End is exclusive.
+#define GHOSTTY_COMMAND_BLOCK_HEADER 1u
+#define GHOSTTY_COMMAND_BLOCK_INPUT 2u
+#define GHOSTTY_COMMAND_BLOCK_OUTPUT 4u
+#define GHOSTTY_COMMAND_BLOCK_END 8u
+typedef struct {
+  char id[65];
+  uint32_t flags; // Available endpoints; offscreen endpoints may be negative.
+  double header_y;
+  double input_y;
+  double output_y;
+  double end_y;
+  bool complete;
+} ghostty_command_block_s;
+
+typedef struct {
+  bool primary;
+  bool viewport_at_bottom;
+  bool cursor_valid; // Cursor is within the visible primary grid.
+  uint32_t columns; // Applied terminal dimensions, not a queued resize.
+  uint32_t rows;
+  double cell_width;
+  double cell_height;
+  double padding_left;
+  double padding_top;
+  double cursor_x;
+  double cursor_y;
+} ghostty_command_layout_s;
+
 // Config types
 
 // config.Path
@@ -1191,6 +1221,10 @@ GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+// Copies visible blocks oldest first and returns the number written. Layout is
+// always filled; blocks may be NULL when capacity is zero. No borrowed pointers.
+GHOSTTY_API uintptr_t ghostty_surface_command_layout(ghostty_surface_t,
+    ghostty_command_layout_s*, ghostty_command_block_s*, uintptr_t capacity);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

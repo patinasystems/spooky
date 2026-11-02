@@ -2762,9 +2762,6 @@ pub fn semanticPrompt(
                     screen.semantic_prompt.click = .{ .cl = v };
                 }
             }
-
-            // The "aid" and "cl" options are also valid for this
-            // command but we don't yet handle these in any meaningful way.
         },
 
         .new_command => {
@@ -2776,10 +2773,8 @@ pub fn semanticPrompt(
             // nested more deeply). If no aid is specified, treat as an
             // aid whose value is the empty string.
 
-            // Ghostty:
-            // We don't currently do explicit command tracking in any way
-            // so there is no need to terminate prior commands. We just
-            // perform the `A` action.
+            // Native command regions are linear and use explicit D markers.
+            // Nested N termination semantics are not modeled; perform A.
             try self.semanticPrompt(.{
                 .action = .fresh_line_new_prompt,
                 .options_unvalidated = cmd.options_unvalidated,
@@ -2838,6 +2833,27 @@ pub fn semanticPrompt(
             // state but the spec doesn't really say what to do.
             self.screens.active.cursorSetSemanticContent(.output);
         },
+    }
+
+    // Native command chrome only participates in the primary screen and only
+    // for markers with an explicit identity. N already delegated to A above.
+    if (self.screens.active_key == .primary) {
+        const kind: @import("CommandBlocks.zig").Kind = switch (cmd.action) {
+            .fresh_line_new_prompt => .header,
+            .end_prompt_start_input, .end_prompt_start_input_terminate_eol => .input,
+            .end_input_start_output => .output,
+            .end_command => .end,
+            else => return,
+        };
+        if (cmd.readOption(.aid)) |id| {
+            const screen = self.screens.active;
+            var pin = screen.cursor.page_pin.*;
+            const end_inclusive = kind == .end and (pin.x > 0 or screen.cursor.pending_wrap);
+            // An end marker in the middle of a row anchors to its last
+            // occupied cell. Reflow need not retain the blank cursor cell.
+            if (end_inclusive and !screen.cursor.pending_wrap) pin.x -= 1;
+            try screen.command_blocks.mark(screen.alloc, &screen.pages, kind, id, pin, end_inclusive);
+        }
     }
 }
 
@@ -4213,6 +4229,10 @@ fn cursorInScrollingRegion(self: *const Terminal) bool {
 }
 
 pub fn eraseChars(self: *Terminal, count_req: usize) void {
+    self.screens.active.command_blocks.invalidateHeader(
+        &self.screens.active.pages,
+        self.screens.active.cursor.page_pin.*,
+    );
     const count = end: {
         const remaining = self.cols - self.screens.active.cursor.x;
         var end = @min(remaining, @max(count_req, 1));
@@ -4311,6 +4331,11 @@ pub fn eraseLine(
             return;
         },
     };
+
+    self.screens.active.command_blocks.invalidateHeader(
+        &self.screens.active.pages,
+        self.screens.active.cursor.page_pin.*,
+    );
 
     // All modes will clear the pending wrap state and we know we have
     // a valid mode at this point.
@@ -17605,6 +17630,158 @@ test "Terminal: eraseDisplay complete preserves cursor" {
     // active cursor.
     t.eraseDisplay(.complete, false);
     try testing.expect(t.screens.active.cursor.style_id != style.default_id);
+}
+
+test "Terminal: command blocks pair identities and preserve original input" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 8 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=123-1" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=123-1" });
+    try t.printString("echo hi");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=123-1" });
+    try t.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=123-1" });
+    try t.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=wrong" });
+    try testing.expect(!screen.command_blocks.blocks.items[0].complete);
+    try t.printString("hi");
+    try t.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=123-1" });
+    const block = screen.command_blocks.blocks.items[0];
+    const region = @import("CommandBlocks.zig").region(block, &screen.pages, 0, screen.cursor.page_pin.*).?;
+    try testing.expectEqual(@as(u32, 15), region.flags);
+    try testing.expectEqual(@as(i64, 0), region.header);
+    try testing.expectEqual(@as(i64, 1), region.input);
+    try testing.expectEqual(@as(i64, 2), region.output);
+    try testing.expectEqual(@as(i64, 3), region.end);
+    try testing.expect(block.complete);
+    // No identity, unknown identity and alternate-screen markers add nothing.
+    try t.semanticPrompt(.init(.fresh_line_new_prompt));
+    try testing.expectEqual(@as(usize, 1), screen.command_blocks.blocks.items.len);
+    _ = try t.switchScreen(.alternate);
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=alt" });
+    try testing.expectEqual(@as(usize, 0), t.screens.active.command_blocks.blocks.items.len);
+}
+
+test "Terminal: command blocks reflow keeps input and output anchors" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 8, .rows = 8 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=reflow" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=reflow" });
+    try t.printString("abcdefghijkl");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=reflow" });
+    try t.printString("output");
+    try t.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=reflow" });
+    try t.resize(testing.allocator, .{ .cols = 4, .rows = 8 });
+    const region = @import("CommandBlocks.zig").region(screen.command_blocks.blocks.items[0], &screen.pages, screen.pages.scrollbar().offset, screen.cursor.page_pin.*).?;
+    try testing.expectEqual(@as(u32, 15), region.flags);
+    try testing.expectEqual(@as(i64, 0), region.header);
+    try testing.expectEqual(@as(i64, 1), region.input);
+    try testing.expectEqual(@as(i64, 4), region.output);
+    try testing.expectEqual(@as(i64, 6), region.end);
+}
+
+test "Terminal: command blocks viewport scroll and history pruning" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 12, .rows = 3, .max_scrollback_bytes = null, .max_scrollback_lines = 6 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=scroll" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=scroll" });
+    try t.printString("true");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=scroll" });
+    try t.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=scroll" });
+    for (0..3) |_| try t.linefeed();
+    const Blocks = @import("CommandBlocks.zig");
+    try testing.expect(Blocks.region(screen.command_blocks.blocks.items[0], &screen.pages, screen.pages.scrollbar().offset, screen.cursor.page_pin.*) == null);
+    screen.pages.scroll(.top);
+    const region = Blocks.region(screen.command_blocks.blocks.items[0], &screen.pages, screen.pages.scrollbar().offset, screen.cursor.page_pin.*).?;
+    try testing.expectEqual(@as(i64, 0), region.header);
+    try testing.expectEqual(@as(i64, 2), region.end);
+    screen.pages.scroll(.active);
+    const page_rows = screen.pages.pages.first.?.capacity().rows;
+    for (0..4 * page_rows) |_| try t.linefeed();
+    screen.command_blocks.prune(&screen.pages);
+    try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
+}
+
+test "Terminal: command blocks erase invalidates active chrome and reset frees pins" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    const initial_pins = screen.pages.countTrackedPins();
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=clear" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=clear" });
+    try t.printString("run");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=clear" });
+    try t.printString("output");
+    // Last visible text is output, so ED2 clears rather than moving a prompt
+    // into scrollback. Its pins would otherwise survive at erased positions.
+    t.eraseDisplay(.complete, false);
+    try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
+    try testing.expectEqual(initial_pins, screen.pages.countTrackedPins());
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=reset" });
+    screen.reset();
+    try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
+    try testing.expectEqual(initial_pins, screen.pages.countTrackedPins());
+}
+
+test "Terminal: command blocks keep running identity when start is pruned" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 3, .max_scrollback_bytes = null, .max_scrollback_lines = 1 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    const Blocks = @import("CommandBlocks.zig");
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=long" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=long" });
+    try t.printString("run");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=long" });
+    const page_rows = screen.pages.pages.first.?.capacity().rows;
+    for (0..4 * page_rows) |_| {
+        try t.printString("output");
+        t.carriageReturn();
+        try t.linefeed();
+    }
+    screen.command_blocks.prune(&screen.pages);
+    try testing.expectEqual(@as(usize, 1), screen.command_blocks.blocks.items.len);
+    const running = Blocks.region(screen.command_blocks.blocks.items[0], &screen.pages, screen.pages.scrollbar().offset, screen.cursor.page_pin.*).?;
+    try testing.expectEqual(@as(u32, 0), running.flags);
+    try testing.expectEqual(@as(i64, 3), running.end);
+    try t.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=long" });
+    const complete = Blocks.region(screen.command_blocks.blocks.items[0], &screen.pages, screen.pages.scrollbar().offset, screen.cursor.page_pin.*).?;
+    try testing.expectEqual(@as(u32, 8), complete.flags);
+    try testing.expectEqual(@as(i64, 2), complete.end);
+    try testing.expect(screen.command_blocks.blocks.items[0].complete);
+}
+
+test "Terminal: command blocks line erase removes header but input redraw preserves anchor" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    const screen = t.screens.active;
+    try t.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=redraw" });
+    try t.linefeed();
+    try t.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=redraw" });
+    try t.printString("input");
+    t.eraseLine(.complete, false);
+    try testing.expect(screen.command_blocks.blocks.items[0].input != null);
+    try testing.expect(screen.command_blocks.blocks.items[0].header != null);
+    t.setCursorPos(1, 1);
+    t.eraseLine(.complete, false);
+    try t.printString("new text");
+    try testing.expect(screen.command_blocks.blocks.items[0].header == null);
+    try testing.expect(screen.command_blocks.blocks.items[0].input != null);
 }
 
 test "Terminal: semantic prompt" {
