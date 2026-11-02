@@ -33,8 +33,8 @@ updates only replace text for an actual external change, such as acceptance or
 recovery, so presentation updates do not destroy selection and undo.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
-Native selection is implemented; syntax coloring and native completion menus
-remain future work. Warp's [editor documentation](https://docs.warp.dev/terminal/editor/)
+Native selection and a zsh-backed AppKit completion menu are implemented;
+syntax coloring remains future work. Warp's [editor documentation](https://docs.warp.dev/terminal/editor/)
 is the behavior reference, not a dependency on Warp's application stack.
 
 ## One terminal transcript, grouped into blocks
@@ -159,14 +159,18 @@ are deliberately separate when continuation or shell expansion changes them.
 
 ## Limits and next work
 
-History navigation and completion currently use terminal input. A native
-completion menu needs a shell-aware provider with quoting, replacement ranges,
-revision checks, and cancellation. Reading a history file or asking a fresh
-background shell does not reproduce the live shell's state. User prompt plugins,
+Native Tab completion now uses a private zsh worker forked from the live shell
+at each primary prompt. The worker preserves shell context and produces exact
+quoted buffer/cursor edits; AppKit checks the draft revision and caret before
+applying them. It keeps temporary ZLE display out of the visible transcript.
+See [native completion](native-completion.md) for supported contexts and bounds.
+History navigation still uses terminal input. Reading a history file or asking
+a fresh background shell does not reproduce the live shell's state. User prompt plugins,
 arbitrary ZLE widgets, SSH/tmux/nested sessions, Fish/Bash, and Linux each require
 separate adapters and qualification.
 
-The current file bridge polls every 100 ms and caps drafts at 1 MiB. It rejects
+The file bridge uses directory notifications plus a two-second recovery
+watchdog and caps drafts at 1 MiB. It rejects
 NUL and unsupported control characters rather than silently changing them.
 There remains a readiness-to-trigger race: a foreground change can cause the
 widget key sequence to reach a program. Generation validation rejects the stale
@@ -184,6 +188,6 @@ define the underlying shell primitives.
 The separate **Ghostty Patina Blocks** app uses
 `com.patinasystems.ghostty.blocks` and `macos/build-blocks/`. It preserves the
 original `macos/build/` prototype. The native arm64 build, strict/deep signature
-verification, 15 AppKit tests, and interactive block/editing/focus checks have
+verification, 30 AppKit editor tests, ten bridge/watch tests, and interactive block/editing/focus checks have
 passed. See the prototype guide for the exact build, launch flags, test coverage,
 and remaining physical IME/VoiceOver qualification.

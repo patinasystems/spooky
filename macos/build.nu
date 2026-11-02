@@ -9,7 +9,7 @@ def main [
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
     --arch: string = ""                # Optional architecture for a native-only GhosttyKit build
     --xcconfig: string = ""            # Optional build settings file
-    --only-testing: string = ""        # Optional target, suite, or test identifier
+    --only-testing: string = ""        # Optional comma-separated target, suite, or test identifiers
     --build-dir: string = ""           # Optional isolated output directory
 ] {
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
@@ -25,7 +25,7 @@ def main [
 
     let arch_args = if $arch == "" { [] } else { [-arch $arch] }
     let config_args = if $xcconfig == "" { [] } else { [-xcconfig ($xcconfig | path expand)] }
-    let test_args = if $only_testing == "" { [] } else { [$"-only-testing:($only_testing)"] }
+    let test_args = if $only_testing == "" { [] } else { $only_testing | split row "," | each { |id| $"-only-testing:($id)" } }
     let derived_args = if $build_dir == "" { [] } else { [-derivedDataPath ($output_dir | path join "DerivedData")] }
 
     (^env -i

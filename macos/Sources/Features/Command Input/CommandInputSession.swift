@@ -10,12 +10,17 @@ final class CommandInputSession {
     private static let maximumBytes = 1_048_576
 
     var onChange: (() -> Void)?
+    var onCompletion: ((CommandCompletionResponse) -> Void)?
     private var hasEditorFont = false
 
     let directory: URL
     private let bridge: CommandInputBridge
+    private let completionBridge: CommandCompletionBridge
+    private var completionTask: Task<Void, Never>?
     private weak var surfaceView: Ghostty.SurfaceView?
     private var pollingTask: Task<Void, Never>?
+    private var fileEvents: CommandInputFileEvents?
+    private var deadlineTask: Task<Void, Never>?
     private var geometryTask: Task<Void, Never>?
     private var submissionTask: Task<Void, Never>?
     private var generation: String?
@@ -77,12 +82,15 @@ final class CommandInputSession {
         }
         self.directory = directory
         self.bridge = CommandInputBridge(directory: directory)
+        self.completionBridge = CommandCompletionBridge(directory: directory)
     }
 
     deinit {
         pollingTask?.cancel()
+        deadlineTask?.cancel()
         geometryTask?.cancel()
         submissionTask?.cancel()
+        completionTask?.cancel()
         // This directory belongs only to this surface. No user shell files are changed.
         try? FileManager.default.removeItem(at: directory)
     }
@@ -97,19 +105,20 @@ final class CommandInputSession {
     func attach(to surfaceView: Ghostty.SurfaceView) {
         self.surfaceView = surfaceView
         let bridge = self.bridge
+        let fileEvents = CommandInputFileEvents(directory: directory)
+        self.fileEvents = fileEvents
+        let events = fileEvents.events
         pollingTask = Task { [weak self] in
-            while !Task.isCancelled {
+            for await _ in events {
+                guard !Task.isCancelled else { break }
                 let ids = self?.layout.blocks.map(\.id) ?? []
                 let snapshot = await bridge.snapshot(visibleBlockIDs: ids)
                 guard !Task.isCancelled else { break }
                 self?.receive(snapshot)
-                do {
-                    try await Task.sleep(for: .milliseconds(100))
-                } catch {
-                    break
-                }
+                self?.fileEvents?.updateLiveBlock(snapshot.state?.blockID)
             }
         }
+        scheduleDeadline(after: max(0.05, 5.05 - Date().timeIntervalSince(launchedAt)))
         geometryTask = Task { [weak self] in
             while !Task.isCancelled {
                 self?.refreshGeometry()
@@ -125,12 +134,64 @@ final class CommandInputSession {
     func setDraft(_ value: String) {
         guard value != draft else { return }
         draft = value
+        completionTask?.cancel()
         changed()
+    }
+
+    func requestCompletion(_ request: CommandCompletionRequest) {
+        completionTask?.cancel()
+        guard isEditable, let generation, request.text == draft, surfaceView?.readonly != true else {
+            onCompletion?(.init(requestID: request.id, revision: request.revision, items: [],
+                                message: "Completion is available at an empty shell prompt."))
+            return
+        }
+        completionTask = Task { [weak self, completionBridge] in
+            do {
+                try await completionBridge.prepare(request, generation: generation)
+                try Task.checkCancellation()
+                guard let self, self.generation == generation, self.isEditable,
+                      self.draft == request.text, let surfaceView = self.surfaceView,
+                      let window = surfaceView.window, window.isKeyWindow,
+                      let editor = window.firstResponder as? CommandTextView,
+                      editor.string == request.text,
+                      editor.selectedRange() == NSRange(location: request.cursorUTF16, length: 0),
+                      (window.windowController as? BaseTerminalController)?.focusedSurface === surfaceView else {
+                    await completionBridge.cancel(request.id)
+                    self?.onCompletion?(.init(requestID: request.id, revision: request.revision, items: [],
+                                             message: "Completion cancelled. Press Tab to try again."))
+                    return
+                }
+                guard surfaceView.surfaceModel?.perform(action: "text:\\x1b[99;2~") == true else {
+                    throw BridgeError.unavailable("The terminal rejected the completion request.")
+                }
+                for _ in 0..<150 {
+                    try Task.checkCancellation()
+                    if let response = try await completionBridge.response(to: request, generation: generation) {
+                        guard !Task.isCancelled, self.isEditable,
+                              self.generation == generation, self.draft == request.text else { return }
+                        self.onCompletion?(response)
+                        return
+                    }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                throw BridgeError.unavailable("Completion timed out. Press Tab to try again.")
+            } catch {
+                await completionBridge.cancel(request.id)
+                guard !Task.isCancelled, let self, self.draft == request.text else { return }
+                self.onCompletion?(.init(requestID: request.id, revision: request.revision,
+                                         items: [], message: error.localizedDescription))
+            }
+        }
+    }
+
+    func cancelCompletion() {
+        completionTask?.cancel()
     }
 
     @discardableResult
     func submit(_ text: String) -> Bool {
         guard isEditable, let generation, let surfaceView, !surfaceView.readonly else { return false }
+        completionTask?.cancel()
         guard text.utf8.count <= Self.maximumBytes else {
             status = "Command exceeds the prototype's 1 MiB limit. Draft preserved."
             changed()
@@ -146,6 +207,7 @@ final class CommandInputSession {
 
         let request = Pending(id: UUID().uuidString, generation: generation, started: Date())
         pending = request
+        scheduleDeadline(after: 5.05)
         status = "Submitting…"
         // AppKit restores the full PTY viewport synchronously before the task
         // below waits for the terminal thread to apply its new dimensions.
@@ -182,6 +244,7 @@ final class CommandInputSession {
             } catch {
                 guard let self, self.pending?.id == request.id else { return }
                 self.pending = nil
+                self.deadlineTask?.cancel()
                 self.failed = true
                 self.ready = false
                 self.status = "Submission stopped: \(error.localizedDescription) Draft preserved."
@@ -192,6 +255,7 @@ final class CommandInputSession {
     }
 
     func useTerminal() {
+        completionTask?.cancel()
         terminalRequested = true
         recoveryVisible = false
         editorVisible = false
@@ -300,6 +364,10 @@ final class CommandInputSession {
             status = "Shell bridge did not start · use terminal input"
         }
         if presentationKey != previous { changed() }
+        if receivedFirstPrompt && pending == nil {
+            deadlineTask?.cancel()
+            deadlineTask = nil
+        }
     }
 
     private struct Presentation: Equatable {
@@ -331,6 +399,17 @@ final class CommandInputSession {
         focusRequest = focusSequence
     }
 
+    /// Timeouts do not wait for the slower recovery watchdog. Keep the existing
+    /// five-second behavior even when the shell publishes no further events.
+    private func scheduleDeadline(after seconds: TimeInterval) {
+        deadlineTask?.cancel()
+        deadlineTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.fileEvents?.requestRefresh()
+        }
+    }
+
     private var layoutMatchesSurfaceSize: Bool {
         guard let surface = surfaceView?.surface, layout.primary else { return false }
         let desired = ghostty_surface_size(surface)
@@ -339,8 +418,14 @@ final class CommandInputSession {
 
     private func refreshGeometry() {
         guard let surface = surfaceView?.surface else { return }
+        let diagnostic = CommandInputDiagnostics.begin(.geometrySnapshot)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         let updated = CommandTerminalLayout.read(from: surface)
         guard updated != layout || !hasEditorFont else { return }
+        CommandInputDiagnostics.record(.geometryChanged)
+        if updated.blocks.map(\.id) != layout.blocks.map(\.id) {
+            fileEvents?.requestRefresh()
+        }
         if !hasEditorFont || updated.cellHeight != layout.cellHeight || updated.cellWidth != layout.cellWidth {
             if let raw = ghostty_surface_quicklook_font(surface) {
                 let font = Unmanaged<CTFont>.fromOpaque(raw).takeRetainedValue()
@@ -395,6 +480,9 @@ private actor CommandInputBridge {
     init(directory: URL) { self.directory = directory }
 
     func snapshot(visibleBlockIDs: [String]) -> Snapshot {
+        let diagnostic = CommandInputDiagnostics.begin(.bridgeSnapshot)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        CommandInputDiagnostics.record(.bridgeSnapshotRequested)
         let stateFields = fields("state")
         let receiptFields = fields("receipt")
         let state: State? = stateFields.count == 4
@@ -406,6 +494,7 @@ private actor CommandInputBridge {
         let ids = Set(visibleBlockIDs + [state?.blockID].compactMap { $0 })
         for id in ids where Self.validID(id) {
             if let cached = metadataCache[id], cached.completed {
+                CommandInputDiagnostics.record(.bridgeCacheHit)
                 visibleMetadata[id] = cached
                 continue
             }
@@ -453,10 +542,12 @@ private actor CommandInputBridge {
     }
 
     private func text(at url: URL, maximum: Int = 4096) -> String? {
+        CommandInputDiagnostics.record(.bridgeFileRead)
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = attributes[.size] as? NSNumber, size.intValue <= maximum,
               let data = try? Data(contentsOf: url),
               let text = String(data: data, encoding: .utf8) else { return nil }
+        CommandInputDiagnostics.record(.bridgeFileBytes, amount: data.count)
         return text
     }
 }

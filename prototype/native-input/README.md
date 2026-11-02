@@ -62,10 +62,14 @@ without checking its bundle ID and update settings.
    completion metadata.
 4. Scroll upward through previous commands. The current header and editor stay
    at the bottom while the transcript scrolls independently.
-5. Use the terminal-input control or Escape for shell history and Tab completion.
-   Native editing can resume at an empty primary prompt; a partially edited shell
-   line must first be cleared or run.
-6. Try `read answer; print -r -- "$answer"` or a terminal application. Running
+5. Press Tab for zsh-backed completion in the native input. A unique match is
+   inserted directly; multiple matches open an AppKit menu. Tab/Shift+Tab or
+   arrows select, Return accepts without executing, and Escape dismisses the
+   menu. Option+Tab inserts a literal tab.
+6. Use the terminal-input control or Escape (with no completion menu open) for
+   shell history and unsupported completion contexts. Native editing can resume
+   at an empty primary prompt; clear or run any partially edited shell line.
+7. Try `read answer; print -r -- "$answer"` or a terminal application. Running
    programs receive ordinary terminal input. Incomplete input such as
    `if true; then` uses the terminal continuation prompt; finish it there or
    cancel with Ctrl+C.
@@ -97,6 +101,12 @@ shell retains exports and working-directory changes between commands.
 - Atomic request/state/receipt files transfer the draft to a dedicated ZLE key
   widget. The widget checks the prompt generation, request ID, and empty input
   buffer before invoking normal `.accept-line` in the existing shell.
+- Completion uses system zsh definitions in a private `zpty` worker forked from
+  the current shell at each primary prompt. It inherits cwd, variables, aliases,
+  and functions without sourcing a different startup configuration. The worker
+  returns zsh's exact quoted buffer and cursor; AppKit applies a normal undoable
+  edit only if the draft, caret, revision, and prompt are still current. See
+  [native completion](../../docs/native-completion.md) for the protocol and limits.
 - Drafts remain until acceptance. Uncertain submissions are never replayed, and
   a recovery view retains the draft after an error.
 - Tagged OSC 133 markers identify each primary command block. Core-tracked pins
@@ -114,17 +124,22 @@ block's anchors. Background output can interleave with foreground output on the
 same PTY. Alternate-screen applications use the normal live terminal, rather
 than a reconstructed block transcript.
 
-Native editing is supported at the empty primary prompt only. History and
-completion remain available through terminal input. Syntax coloring, imported
-user configuration/plugins, remote or nested-shell adapters, native completion
-menus, and Linux are not implemented. Selection highlighting is AppKit's native
-text selection.
+Native editing and completion are supported at the empty primary prompt only.
+History still uses terminal input. Native completion rejects dynamic expansion
+contexts such as command/process substitutions; use terminal input for those.
+Completion functions can perform their ordinary I/O, but the draft is never
+accepted or executed by the completion widget. Each pane has one private idle
+completion worker at its primary prompt. Responses are bounded to 200 items and
+8 MiB. Syntax coloring, imported user configuration/plugins, remote/nested-shell
+adapters, fish, and Linux are not implemented. Selection highlighting remains
+AppKit's native text selection.
 
 The editor accepts up to 1 MiB of UTF-8 and rejects control characters other than
 tabs and newlines. It does not silently remove unsupported bytes.
 
-The bridge polls small records every 100 ms. A dedicated terminal key sequence
-wakes its submit widget. Generation checks prevent a stale request from executing
+Directory notifications refresh bridge state, with a two-second recovery
+watchdog and explicit submission deadlines. A dedicated terminal key sequence
+wakes its submit or completion widget. Generation checks prevent a stale request from executing
 at a later prompt, but an unexpected foreground change between the readiness check
 and that key sequence can deliver trigger bytes to the foreground program. This
 controlled prototype does not establish a general-purpose ownership protocol.
@@ -137,15 +152,20 @@ files include accepted commands and are not a permanent history service.
 
 As of 2026-11-02:
 
-- All 19 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
+- All 37 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
   transfer, retained shell state, ownership, stale/duplicate rejection, block
   markers, stable continuation IDs, completion metadata, and exit/cancellation.
 - Six focused command-block core tests and the existing erase regressions pass.
-- All 15 AppKit editor tests pass, covering selection/replacement, newline and
+- All 30 AppKit editor tests pass, covering selection/replacement, newline and
   submission behavior, retained drafts, IME-Return handling, independent undo,
-  editor sizing, and deferred-focus ownership checks.
-- The native arm64 `ReleaseLocal` Blocks app builds successfully and passes
-  strict/deep code-signature verification.
+  editor sizing, deferred-focus ownership, completion menus, cancellation,
+  stale-result rejection, and Unicode edit boundaries.
+- Six completion-transport tests and four real filesystem notification tests
+  pass. Completion shell tests cover live context, quoting, Unicode/multiline
+  carets, unchanged visible input, unsafe contexts, and response bounds.
+- The native arm64 `ReleaseLocal` app builds successfully and passes
+  strict/deep code-signature verification. This iteration was checked in a
+  separate Diagnostics bundle, leaving the running Blocks app untouched.
 - Interactive checks pass for multiline paste and Cmd+A selection, full-buffer
   submission, a single visible command/output block, fresh-prompt recovery, and
   independent metadata on successive blocks.
@@ -157,6 +177,15 @@ As of 2026-11-02:
 - Multiple-pane checks pass: background completion preserves the other pane's
   draft focus, and Cmd+] explicitly moves focus to the native editor in the
   selected pane.
+- Native shell-completion checks pass for unique paths and undo, multiple-match
+  keyboard acceptance, git arguments, changed cwd, live aliases and variables,
+  multiline drafts, and preserving trailing text at a middle caret. Accepting a
+  menu result does not execute it; a subsequent Return submits normally.
+- Copying terminal output into the native editor retains editing focus. Pointer
+  ownership and background-matched appearance are covered by native tests;
+  physical mouse movement still needs a manual check. The automation's
+  main-window capture omits the separate completion panel, so its visual
+  placement also remains a manual check.
 
 Physical IME sessions and VoiceOver have not been qualified. The synthetic
 IME-Return test checks that marked input does not also submit; it does not replace
@@ -176,3 +205,9 @@ and the architecture used for GhosttyKit. `build.nu` skips UI automation tests.
 Repeat the interactive checks when changing layout, focus, or terminal ownership;
 physical IME/VoiceOver and broader terminal-application qualification remain
 separate work.
+
+The editor/shell diagnostic measurements are recorded in
+[`performance.md`](performance.md). Instrumentation is opt-in via
+`GHOSTTY_NATIVE_INPUT_DIAGNOSTICS=1` and logs aggregate counts/timings only.
+The migration inventory for removing upstream SwiftUI is in
+[`appkit-migration.md`](../../docs/appkit-migration.md).

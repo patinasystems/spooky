@@ -575,6 +575,10 @@ extension Ghostty {
         }
 
         func setCursorVisibility(_ visible: Bool) {
+            // A delayed terminal callback must not hide the application's
+            // pointer after an AppKit command editor has taken keyboard focus.
+            if !visible, commandInputSession != nil,
+               window?.firstResponder is CommandTextView { return }
             cursorVisible = visible
             // Technically this action could be called anytime we want to
             // change the mouse visibility but at the time of writing this

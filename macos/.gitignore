@@ -2,5 +2,6 @@
 /*.xcframework
 build/
 build-blocks/
+build-cursor-performance/
 xcuserdata/
 DerivedData/

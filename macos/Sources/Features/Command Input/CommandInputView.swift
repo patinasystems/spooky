@@ -13,12 +13,15 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     var onUseTerminal: () -> Void = {}
     var onFocusChanged: (Bool) -> Void = { _ in }
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
+    var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
+    var onCancelCompletion: () -> Void = {}
     /// The host checks that this pane still owns the requested activation.
     var canRequestFocus: () -> Bool = { true }
 
     private var lastFocusRequest: UInt64 = 0
     private var latestHeight: CGFloat = 0
     private var heightReportScheduled = false
+    private var configuredBackgroundColor: NSColor?
 
     override init(frame frameRect: NSRect) {
         let contentFrame = NSRect(origin: .zero, size: frameRect.size)
@@ -41,8 +44,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.onUseTerminal = { [weak self] in self?.onUseTerminal() }
         textView.onFocusChanged = { [weak self] focused in self?.onFocusChanged(focused) }
         textView.onContentHeightChanged = { [weak self] height in self?.contentHeightChanged(height) }
+        textView.onRequestCompletion = { [weak self] in self?.onRequestCompletion($0) }
+        textView.onCancelCompletion = { [weak self] in self?.onCancelCompletion() }
         textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
-        toolTip = "Return runs the command. Shift Return adds a line. Escape returns to terminal input."
+        toolTip = "Tab completes. Option Tab inserts a tab. Return runs the command. Shift Return adds a line."
     }
 
     required init?(coder: NSCoder) {
@@ -53,12 +58,14 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         super.layout()
         scrollView.frame = bounds
         scrollView.tile()
+        textView.updateCompletionPosition()
     }
 
     /// Acknowledgement and history loading are explicit external edits. Normal
     /// keystrokes stay in NSTextView so their selection and undo groups survive.
     func setDraft(_ text: String) {
         guard textView.string != text else { return }
+        textView.draftWillChangeExternally()
         textView.string = text
         textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         if text.isEmpty { textView.undoManager?.removeAllActions() }
@@ -66,10 +73,15 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     }
 
     func setEditable(_ editable: Bool) {
-        textView.isEditable = editable
-        textView.isSelectable = true
+        if !editable { textView.dismissCompletions() }
+        if textView.isEditable != editable { textView.isEditable = editable }
+        if !textView.isSelectable { textView.isSelectable = true }
         textView.applyFocusRequest()
     }
+
+    func receiveCompletions(_ response: CommandCompletionResponse) { textView.receiveCompletions(response) }
+
+    func dismissCompletions() { textView.dismissCompletions() }
 
     /// Zero cancels a pending request. Nonzero tokens must be monotonically
     /// increasing per surface; unchanged tokens never steal focus back.
@@ -85,7 +97,15 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         backgroundColor: NSColor,
         minimumLineHeight: CGFloat
     ) {
-        layer?.backgroundColor = backgroundColor.cgColor
+        if configuredBackgroundColor != backgroundColor {
+            configuredBackgroundColor = backgroundColor
+            layer?.backgroundColor = backgroundColor.cgColor
+            // The editor is a sibling of the terminal's scroll view, so it
+            // does not inherit that view's background-matched appearance.
+            // Native pointers, selections, and scrollers need the same match.
+            let name: NSAppearance.Name = backgroundColor.isLightColor ? .aqua : .darkAqua
+            if appearance?.name != name { appearance = NSAppearance(named: name) }
+        }
         textView.configureAppearance(
             font: font, textColor: textColor,
             backgroundColor: backgroundColor,
@@ -96,6 +116,11 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard notification.object as? CommandTextView === textView else { return }
         onTextChanged(textView.string)
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard notification.object as? CommandTextView === textView else { return }
+        textView.completionSelectionDidChange()
     }
 
     private func contentHeightChanged(_ height: CGFloat) {

@@ -5,6 +5,7 @@ check_for_updates: false
 excluded:
   - build
   - build-blocks
+  - build-cursor-performance
 
 disabled_rules:
   - cyclomatic_complexity

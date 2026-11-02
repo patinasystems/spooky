@@ -24,6 +24,7 @@ ADAPTER = (
     / "macos/Sources/Features/Command Input/native-input.zsh"
 )
 TRIGGER = b"\x1b[99;1~"
+COMPLETION_TRIGGER = b"\x1b[99;2~"
 
 
 class Shell:
@@ -116,6 +117,40 @@ class Shell:
     def trigger(self):
         os.write(self.terminal, TRIGGER)
 
+    def stage_completion(self, draft, caret=None, generation=None, identifier=None):
+        generation = generation or self.state()[1]
+        identifier = identifier or str(uuid.uuid4())
+        payload = draft.encode("utf-8") if isinstance(draft, str) else draft
+        caret = len(payload) if caret is None else caret
+        temporary = self.bridge / "completion-request.next"
+        temporary.write_bytes(f"{generation}\n{identifier}\n{caret}\n".encode() + payload)
+        temporary.chmod(0o600)
+        os.replace(temporary, self.bridge / "completion-request")
+        return identifier
+
+    def completion_response(self, identifier):
+        path = self.bridge / "completions" / identifier
+        if not path.exists():
+            return None
+        result = {
+            name: (path / name).read_text()
+            for name in ("generation", "identifier", "status", "reason", "count", "truncated")
+        }
+        result["items"] = [
+            {
+                "buffer": (path / "items" / str(index) / "buffer").read_text(),
+                "cursor": int((path / "items" / str(index) / "cursor").read_text()),
+            }
+            for index in range(1, int(result["count"]) + 1)
+        ]
+        return result
+
+    def complete(self, draft, caret=None, generation=None, identifier=None):
+        identifier = self.stage_completion(draft, caret, generation, identifier)
+        self.raw(COMPLETION_TRIGGER)
+        self.wait(lambda: self.completion_response(identifier) is not None)
+        return self.completion_response(identifier)
+
     def submit(self, draft, generation=None, identifier=None):
         generation = generation or self.state()[1]
         identifier = self.stage(draft, generation, identifier)
@@ -153,6 +188,295 @@ class NativeInputBridgeTests(unittest.TestCase):
     def setUp(self):
         self.shell = Shell()
         self.addCleanup(self.shell.close)
+
+    def test_completion_quotes_paths_and_keeps_visible_terminal_empty(self):
+        shell = self.shell
+        (shell.root / "alpha file").touch()
+        (shell.root / "alpine").mkdir()
+        before = shell.state()
+        identifier = str(uuid.uuid4())
+        shell.pump()
+        output_start = len(shell.output)
+        response = shell.complete("cat al", identifier=identifier)
+        shell.pump()
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["identifier"], identifier)
+        self.assertEqual(response["generation"], before[1])
+        self.assertEqual(
+            {item["buffer"] for item in response["items"]},
+            {"cat alpha\\ file", "cat alpine/"},
+        )
+        self.assertEqual(shell.state(), before)
+        self.assertNotIn(b"cat al", shell.output[output_start:])
+        self.assertIsNone(shell.metadata(before[3], "input"))
+        self.assertEqual(shell.metadata(before[3], "status"), b"editing")
+        # The parent's actual BUFFER is still empty and the next command works.
+        _, generation = shell.submit('print -rn -- after > "$_PROBE_DIR/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"after")
+
+    def test_completion_uses_live_cwd_functions_aliases_and_variables(self):
+        shell = self.shell
+        (shell.root / "work" / "live file").touch()
+        _, generation = shell.submit(
+            "cd work\nexport PROBE_COMPLETION_VALUE=retained\n"
+            "patina_function() { :; }\nalias patina_alias=true"
+        )
+        shell.ready_after(generation)
+        response = shell.complete("cat liv")
+        self.assertEqual(response["items"][0]["buffer"], "cat live\\ file ")
+        response = shell.complete("patina_")
+        self.assertTrue(
+            {"patina_function", "patina_alias"}.issubset(
+                {item["buffer"] for item in response["items"]}
+            )
+        )
+        response = shell.complete("echo $PROBE_COMPLETION_V")
+        self.assertEqual(response["items"][0]["buffer"], "echo $PROBE_COMPLETION_VALUE ")
+
+    def test_completion_git_subcommands_and_live_compdef(self):
+        shell = self.shell
+        response = shell.complete("git che")
+        self.assertIn("git checkout", {item["buffer"] for item in response["items"]})
+        _, generation = shell.submit(
+            "_patina_probe_candidates() { compadd -- 'first value' 'second value'; }\n"
+            "compdef _patina_probe_candidates patina_probe"
+        )
+        shell.ready_after(generation)
+        response = shell.complete("patina_probe ")
+        self.assertEqual(
+            {item["buffer"] for item in response["items"]},
+            {"patina_probe first\\ value", "patina_probe second\\ value"},
+        )
+
+    def test_completion_multiline_unicode_and_middle_caret(self):
+        shell = self.shell
+        (shell.root / "日本語 file").touch()
+        draft = 'echo "👩🏽‍💻"\ncat 日本 tail'
+        caret = len('echo "👩🏽‍💻"\ncat 日本'.encode())
+        before = shell.state()
+        shell.pump()
+        output_start = len(shell.output)
+        response = shell.complete(draft, caret)
+        self.assertEqual(response["status"], "ok")
+        item = response["items"][0]
+        self.assertEqual(item["buffer"], 'echo "👩🏽‍💻"\ncat 日本語\\ file  tail')
+        self.assertEqual(item["cursor"], len('echo "👩🏽‍💻"\ncat 日本語\\ file '.encode()))
+        self.assertEqual(shell.state(), before)
+        shell.pump()
+        self.assertNotIn(b"echo", shell.output[output_start:])
+
+    def test_completion_inside_quotes_preserves_zsh_suffix(self):
+        shell = self.shell
+        (shell.root / "alpha file").touch()
+        response = shell.complete('cat "alph')
+        self.assertEqual(response["items"][0]["buffer"], 'cat "alpha file" ')
+        self.assertEqual(response["items"][0]["cursor"], len('cat "alpha file" '))
+
+    def test_completion_rejects_dynamic_syntax_without_executing_draft(self):
+        shell = self.shell
+        for draft in (
+            'cat ./$(touch NEVER)/a',
+            'cat ./`touch NEVER`/a',
+            'cat <(touch NEVER)',
+            'cat *(e:touch NEVER:)',
+            'echo ${PROBE:=changed}',
+            r"cat $'\x24\x28touch NEVER\x29'/a",
+        ):
+            with self.subTest(draft=draft):
+                response = shell.complete(draft)
+                self.assertEqual(response["status"], "rejected")
+                self.assertEqual(response["reason"], "unsupported-dynamic-syntax")
+                self.assertFalse((shell.root / "NEVER").exists())
+        response = shell.complete('touch NEVER; cat zz_no_match')
+        self.assertEqual(response["status"], "ok")
+        self.assertFalse((shell.root / "NEVER").exists())
+
+    def test_completion_validates_utf8_byte_caret_and_payload(self):
+        shell = self.shell
+        for draft, caret, reason in (
+            ("echo 日本", 6, "invalid-caret"),
+            ("echo", 5, "invalid-caret"),
+            (b"cat \xff", 5, "invalid-utf8"),
+            (b"cat a\0b", 5, "nul-in-draft"),
+            ("cat a", "x", "malformed-caret"),
+            ("x" * 1048577, 0, "oversized-draft"),
+        ):
+            with self.subTest(reason=reason):
+                response = shell.complete(draft, caret)
+                self.assertEqual(response["status"], "rejected")
+                self.assertEqual(response["reason"], reason)
+
+    def test_completion_rejects_stale_and_terminal_buffer_requests(self):
+        shell = self.shell
+        old_generation = shell.state()[1]
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        response = shell.complete("pri", generation=old_generation)
+        self.assertEqual(response["reason"], "stale-generation")
+        shell.raw("manual")
+        shell.wait(lambda: shell.state()[0] == "terminal")
+        response = shell.complete("pri")
+        self.assertEqual(response["reason"], "nonempty-buffer")
+        shell.raw(b"\x15")
+        shell.wait(lambda: shell.state()[0] == "ready")
+        self.assertTrue(shell.complete("prin")["items"])
+
+    def test_completion_response_is_immutable_on_duplicate_trigger_or_uuid(self):
+        shell = self.shell
+        identifier = str(uuid.uuid4())
+        response = shell.complete("prin", identifier=identifier)
+        shell.raw(COMPLETION_TRIGGER)
+        shell.pump()
+        self.assertEqual(shell.completion_response(identifier), response)
+        shell.stage_completion("git che", identifier=identifier)
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: not (shell.bridge / "completion-request").exists())
+        self.assertEqual(shell.completion_response(identifier), response)
+
+    def test_prompt_transition_reclaims_unconsumed_completion_responses(self):
+        shell = self.shell
+        response = shell.complete("prin")
+        root = shell.bridge / "completions"
+        self.assertTrue((root / response["identifier"]).is_dir())
+        staging = root / f".pending-{uuid.uuid4()}"
+        staging.mkdir()
+        (staging / "partial").write_text("unfinished")
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        self.assertEqual(list(root.iterdir()), [])
+        self.assertTrue(shell.complete("git che")["items"])
+
+    def test_completion_inflight_duplicate_does_not_race_response_writer(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_slow_candidates() {\n"
+            '  print -rn -- started > "$_PROBE_DIR/completion-started"\n'
+            "  sleep 0.15\n"
+            "  compadd -- candidate\n"
+            "}\ncompdef _patina_slow_candidates patina_slow"
+        )
+        shell.ready_after(generation)
+        identifier = shell.stage_completion("patina_slow ")
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.result("completion-started") is not None)
+        shell.stage_completion("git che", identifier=identifier)
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.completion_response(identifier) is not None)
+        response = shell.completion_response(identifier)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["items"][0]["buffer"], "patina_slow candidate ")
+
+    def test_completion_newer_request_survives_inflight_completion(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_slow_candidates() {\n"
+            '  print -rn -- started > "$_PROBE_DIR/completion-started"\n'
+            "  sleep 0.15\n"
+            "  compadd -- candidate\n"
+            "}\ncompdef _patina_slow_candidates patina_slow"
+        )
+        shell.ready_after(generation)
+        first = shell.stage_completion("patina_slow ")
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.result("completion-started") is not None)
+        second = shell.stage_completion("git che")
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.completion_response(second) is not None)
+        self.assertEqual(shell.completion_response(first)["status"], "ok")
+        self.assertIn(
+            "git checkout", {item["buffer"] for item in shell.completion_response(second)["items"]}
+        )
+
+    def test_completion_caps_candidates_and_reports_truncation(self):
+        shell = self.shell
+        for index in range(205):
+            (shell.root / f"candidate_{index:03}").touch()
+        response = shell.complete("cat candidate_")
+        self.assertEqual(response["count"], "200")
+        self.assertEqual(response["truncated"], "1")
+        self.assertEqual(len({item["buffer"] for item in response["items"]}), 200)
+
+    def test_completion_bounds_total_result_bytes(self):
+        shell = self.shell
+        for index in range(100):
+            (shell.root / f"candidate_{index:03}").touch()
+        draft = "echo " + "x" * 100000 + "\ncat candidate_"
+        response = shell.complete(draft)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["truncated"], "1")
+        total_bytes = sum(len(item["buffer"].encode()) for item in response["items"])
+        self.assertLessEqual(total_bytes, 8388608)
+        self.assertGreater(total_bytes, 8000000)
+        self.assertLess(int(response["count"]), 100)
+
+    def test_completion_continuation_and_foreground_requests_do_not_execute(self):
+        shell = self.shell
+        _, generation = shell.submit("if true; then")
+        shell.wait(lambda: shell.state()[2] == "cont")
+        response = shell.complete("prin")
+        self.assertEqual(response["reason"], "not-primary-prompt")
+        shell.raw(b"\x03")
+        shell.wait(lambda: shell.state()[0] == "ready")
+        old_generation = shell.state()[1]
+        identifier = shell.stage_completion("prin")
+        _, generation = shell.submit("read -r PROBE_READ")
+        shell.wait(lambda: shell.state()[0] == "running")
+        shell.raw("done\r")
+        shell.ready_after(generation)
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.completion_response(identifier) is not None)
+        response = shell.completion_response(identifier)
+        self.assertEqual(response["reason"], "stale-generation")
+        self.assertEqual(response["generation"], old_generation)
+
+    def test_completion_hooks_run_but_parent_environment_is_preserved(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_probe_candidates() {\n"
+            '  print -rn -- hook > "$_PROBE_DIR/hook-ran"\n'
+            "  PROBE_PARENT_VALUE=changed\n"
+            "  compadd -- candidate\n"
+            "}\n"
+            "PROBE_PARENT_VALUE=original\n"
+            "compdef _patina_probe_candidates patina_probe"
+        )
+        shell.ready_after(generation)
+        response = shell.complete("patina_probe ")
+        self.assertEqual(response["items"][0]["buffer"], "patina_probe candidate ")
+        self.assertEqual(shell.result("hook-ran"), b"hook")
+        _, generation = shell.submit(
+            'print -rn -- "$PROBE_PARENT_VALUE" > "$_PROBE_DIR/result"'
+        )
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"original")
+
+    def test_completion_variable_values_are_not_reparsed_as_commands(self):
+        shell = self.shell
+        _, generation = shell.submit("PROBE_LITERAL='$(touch NEVER)'")
+        shell.ready_after(generation)
+        response = shell.complete("cat $PROBE_LITERAL/a")
+        self.assertEqual(response["status"], "ok")
+        self.assertFalse((shell.root / "NEVER").exists())
+
+    def test_submitting_during_completion_retires_old_worker(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_slow_candidates() {\n"
+            '  print -rn -- started > "$_PROBE_DIR/completion-started"\n'
+            "  sleep 0.4\n"
+            "  compadd -- candidate\n"
+            "}\ncompdef _patina_slow_candidates patina_slow"
+        )
+        shell.ready_after(generation)
+        shell.stage_completion("patina_slow ")
+        shell.raw(COMPLETION_TRIGGER)
+        shell.wait(lambda: shell.result("completion-started") is not None)
+        _, generation = shell.submit('print -rn -- submitted > "$_PROBE_DIR/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"submitted")
+        self.assertFalse(list((shell.bridge / "completions").glob(".pending-*")))
+        self.assertTrue(shell.complete("prin")["items"])
 
     def test_multiline_preserves_shell_environment(self):
         shell = self.shell

@@ -43,10 +43,14 @@ final class NativeCommandSurfaceHost: NSView {
         editor.onTextChanged = { [weak session] in session?.setDraft($0) }
         editor.onSubmit = { [weak session] in session?.submit($0) ?? false }
         editor.onUseTerminal = { [weak session] in session?.useTerminal() }
+        editor.onRequestCompletion = { [weak session] in session?.requestCompletion($0) }
+        editor.onCancelCompletion = { [weak session] in session?.cancelCompletion() }
+        session.onCompletion = { [weak self] in self?.editor.receiveCompletions($0) }
         editor.canRequestFocus = { [weak self] in self?.canFocusEditor ?? false }
         editor.onFocusChanged = { [weak self] focused in
             guard focused, let self else { return }
             self.surfaceView.focusDidChange(false)
+            self.surfaceView.setCursorVisibility(true)
             if let controller = self.window?.windowController as? BaseTerminalController,
                controller.focusedSurface !== self.surfaceView {
                 controller.focusedSurfaceDidChange(to: self.surfaceView)
@@ -82,6 +86,8 @@ final class NativeCommandSurfaceHost: NSView {
 
     private func synchronize() {
         guard !synchronizing, bounds.width > 0, bounds.height > 0 else { return }
+        let measurement = CommandInputDiagnostics.begin(.hostSynchronize)
+        defer { CommandInputDiagnostics.end(measurement) }
         synchronizing = true
         defer { synchronizing = false }
         let geometry = session.layout
@@ -127,13 +133,17 @@ final class NativeCommandSurfaceHost: NSView {
         }
         editor.isHidden = !shown
         editor.setAccessibilityHidden(!shown)
-        editor.frame = NSRect(x: x, y: y, width: max(1, bounds.width - x - geometry.paddingLeft), height: height)
+        let editorFrame = NSRect(x: x, y: y, width: max(1, bounds.width - x - geometry.paddingLeft), height: height)
+        if editor.frame != editorFrame {
+            editor.dismissCompletions()
+            editor.frame = editorFrame
+            editor.needsLayout = true
+        }
         editor.configureAppearance(font: session.editorFont, textColor: foreground,
                                    backgroundColor: background, minimumLineHeight: line)
         editor.setDraft(session.draft)
         editor.setEditable(session.isEditable && shown && !recovering && !surfaceView.readonly)
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
-        editor.needsLayout = true
         editor.layoutSubtreeIfNeeded()
         layoutNotice(foreground: foreground)
     }
@@ -174,13 +184,15 @@ final class NativeCommandSurfaceHost: NSView {
 /// gestures continue to the underlying terminal, including output selection.
 @MainActor
 private final class CommandHeaderOverlay: NSView {
-    struct Row {
+    struct Row: Equatable {
         let y: CGFloat
         let metadata: CommandBlockMetadata?
         let current: Bool
         var title: String?
     }
     var rows: [Row] = []
+    private var renderedRows: [Row] = []
+    private var renderedSize: CGSize = .zero
     private var line: CGFloat = 18
     private var padding: CGFloat = 0
     private var foreground = NSColor.textColor
@@ -189,14 +201,21 @@ private final class CommandHeaderOverlay: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func configure(line: CGFloat, padding: CGFloat, foreground: NSColor, background: NSColor) {
+        guard rows != renderedRows || bounds.size != renderedSize || self.line != line
+            || self.padding != padding || self.foreground != foreground || self.background != background else { return }
+        renderedRows = rows
+        renderedSize = bounds.size
         self.line = line
         self.padding = padding
         self.foreground = foreground
         self.background = background
+        CommandInputDiagnostics.record(.headerInvalidation)
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let measurement = CommandInputDiagnostics.begin(.headerDraw)
+        defer { CommandInputDiagnostics.end(measurement) }
         for row in rows where row.y + line > 0 && row.y < bounds.height {
             // Leave the terminal's native overlay scroller above the transcript
             // unobstructed; the headers must not cut its thumb into segments.
