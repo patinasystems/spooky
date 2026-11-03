@@ -38,6 +38,7 @@ final class CommandInputSession {
     private let launchedAt = Date()
     private var focusSequence: UInt64 = 0
     private var geometryRecords = Array(repeating: ghostty_command_block_s(), count: 128)
+    private var submissionTiming: CommandInputDiagnostics.Token?
 
     private(set) var draft = ""
     private(set) var status = "Starting shell…"
@@ -128,12 +129,18 @@ final class CommandInputSession {
             }
         }
         scheduleDeadline(after: max(0.05, 5.05 - Date().timeIntervalSince(launchedAt)))
+        startGeometryUpdates()
+    }
+
+    private func startGeometryUpdates() {
+        geometryTask?.cancel()
         geometryTask = Task { [weak self] in
             while !Task.isCancelled {
                 let active = self?.needsGeometryUpdates == true
                 if active { self?.refreshGeometry() }
                 do {
-                    try await Task.sleep(for: .milliseconds(active ? 33 : 250))
+                    let milliseconds = self?.isTransferringSubmission == true ? 8 : (active ? 33 : 250)
+                    try await Task.sleep(for: .milliseconds(milliseconds))
                 } catch {
                     break
                 }
@@ -217,26 +224,34 @@ final class CommandInputSession {
         }
 
         let request = Pending(id: UUID().uuidString, generation: generation, blockID: blockID, started: Date())
+        let dispatchTiming = CommandInputDiagnostics.begin(.submissionDispatch)
+        submissionTiming = CommandInputDiagnostics.begin(.submissionToBoundary)
         pending = request
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
         // Restore the PTY viewport behind the retained native draft. Keyboard
         // focus stays native until acceptance reaches the terminal transcript.
         changed()
+        // Wake a potentially dormant 250 ms background loop immediately.
+        // Only in-flight ownership transfers use the faster cadence.
+        startGeometryUpdates()
         submissionTask = Task { [weak self, bridge] in
             do {
                 // Return to the live prompt deliberately, then wait until the
                 // terminal thread has applied the editor-driven viewport resize.
                 _ = self?.surfaceView?.surfaceModel?.perform(action: "scroll_to_bottom")
                 var applied = false
-                for _ in 0..<50 {
+                let resizeDeadline = ContinuousClock.now + .seconds(1)
+                var attempts = 0
+                while ContinuousClock.now < resizeDeadline {
                     guard let self, !Task.isCancelled else { return }
                     self.refreshGeometry()
                     if self.layoutMatchesSurfaceSize {
                         applied = true
                         break
                     }
-                    try await Task.sleep(for: .milliseconds(20))
+                    try await Task.sleep(for: .milliseconds(attempts < 8 ? 1 : 4))
+                    attempts += 1
                 }
                 guard applied else {
                     throw BridgeError.unavailable("The terminal is still resizing; submission was not sent.")
@@ -249,9 +264,11 @@ final class CommandInputSession {
                       model.perform(action: "text:\\x1b[99;1~") else {
                     throw BridgeError.unavailable("The terminal rejected the submit trigger.")
                 }
+                CommandInputDiagnostics.end(dispatchTiming)
             } catch {
                 guard let self, self.pending?.id == request.id else { return }
                 self.pending = nil
+                self.submissionTiming = nil
                 self.deadlineTask?.cancel()
                 self.failed = true
                 self.ready = false
@@ -378,7 +395,7 @@ final class CommandInputSession {
         }
         // The dormant pre-startup poll runs slowly. A ready notification can
         // place the first editor immediately instead of waiting for that tick.
-        if ready && layout.rows == 0 { refreshGeometry() }
+        if handoff != nil || (ready && layout.rows == 0) { refreshGeometry() }
         finishHandoffIfReady()
         if presentationKey != previous { changed() }
         if receivedFirstPrompt && pending == nil {
@@ -425,6 +442,8 @@ final class CommandInputSession {
         guard let handoff, handoff.canFinish(layout: layout, readyGeneration: ready ? generation : nil,
                                              context: shellContext) else { return }
         self.handoff = nil
+        CommandInputDiagnostics.end(submissionTiming)
+        submissionTiming = nil
         draft = ""
         editorVisible = ready && !terminalRequested
         if ready {

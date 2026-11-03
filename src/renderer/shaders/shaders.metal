@@ -25,6 +25,8 @@ struct Uniforms {
   bool use_linear_blending;
   bool use_linear_correction;
   float command_pinned_y;
+  float command_gap;
+  float command_caption_scale;
 };
 
 //-------------------------------------------------------------------
@@ -589,7 +591,7 @@ vertex CellTextVertexOut cell_text_vertex(
   if ((in.bools & IS_PINNED_COMMAND) != 0) cell_pos.y = uniforms.command_pinned_y;
   if (in.atlas == ATLAS_SOLID) {
     float2 position = float2(-uniforms.grid_padding.w + uniforms.screen_size.x * corner.x,
-                            cell_pos.y + float(in.glyph_size.y) * corner.y);
+                            cell_pos.y + float(in.bearings.y) + float(in.glyph_size.y) * corner.y);
     out.position = uniforms.projection_matrix * float4(position, 0.0, 1.0);
     out.color = load_color(in.color, uniforms.use_display_p3, uniforms.use_linear_blending);
     out.bg_color = float4(0.0);
@@ -627,6 +629,12 @@ vertex CellTextVertexOut cell_text_vertex(
   float2 offset = float2(in.bearings);
 
   offset.y = uniforms.cell_size.y - offset.y;
+  if ((in.bools & IS_COMMAND_CHROME) != 0) {
+    cell_pos.x *= uniforms.command_caption_scale;
+    cell_pos.y += uniforms.command_gap;
+    size *= uniforms.command_caption_scale;
+    offset *= uniforms.command_caption_scale;
+  }
 
   // Calculate the final position of the cell which uses our glyph size
   // and glyph offset to create the correct bounding box for the glyph.
@@ -647,21 +655,15 @@ vertex CellTextVertexOut cell_text_vertex(
     true
   );
 
-  // Get the BG color
-  out.bg_color = load_color(
-    bg_colors[in.grid_pos.y * uniforms.grid_size.x + in.grid_pos.x],
-    uniforms.use_display_p3,
-    true
-  );
-  // Blend it with the global bg color
-  float4 global_bg = load_color(
-    uniforms.bg_color,
-    uniforms.use_display_p3,
-    true
-  );
-  out.bg_color += global_bg * (1.0 - out.bg_color.a);
+  // Compact captions can have virtual columns beyond the real VT grid.
+  // Their opaque background is global; never index terminal cells with them.
   if ((in.bools & IS_COMMAND_CHROME) != 0) {
     out.bg_color = load_color(uchar4(uniforms.bg_color.rgb, 255), uniforms.use_display_p3, true);
+  } else {
+    out.bg_color = load_color(bg_colors[in.grid_pos.y * uniforms.grid_size.x + in.grid_pos.x],
+                              uniforms.use_display_p3, true);
+    float4 global_bg = load_color(uniforms.bg_color, uniforms.use_display_p3, true);
+    out.bg_color += global_bg * (1.0 - out.bg_color.a);
   }
 
   // If we have a minimum contrast, we need to check if we need to

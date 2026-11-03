@@ -30,6 +30,9 @@ pub const Size = struct {
     cell: CellSize,
     padding: Padding,
 
+    /// Native command gap in physical pixels; does not change VT row height.
+    command_padding: u32 = 0,
+
     /// Return the grid size for this size. The grid size is calculated by
     /// taking the screen size, removing padding, and dividing by the cell
     /// dimensions.
@@ -54,8 +57,24 @@ pub const Size = struct {
         mode: PaddingBalance,
         bottom_inset: u32,
     ) void {
+        self.setPaddingWithNativeInsets(explicit, mode, 0, bottom_inset);
+    }
+
+    /// Apply native margins after configured balancing. They therefore remain
+    /// extra margins instead of being redistributed by grid-cell rounding.
+    pub fn setPaddingWithNativeInsets(
+        self: *Size,
+        explicit: Padding,
+        mode: PaddingBalance,
+        horizontal_inset: u32,
+        bottom_inset: u32,
+    ) void {
         self.padding = explicit;
         if (mode != .false) self.balancePadding(explicit, mode);
+        const horizontal_available = (self.terminal().width -| (self.cell.width *| 2)) / 2;
+        const horizontal = @min(horizontal_inset, horizontal_available);
+        self.padding.left += horizontal;
+        self.padding.right += horizontal;
         const available = self.terminal().height -| (self.cell.height *| 2);
         self.padding.bottom += @min(bottom_inset, available);
     }
@@ -569,5 +588,26 @@ test "coordinate conversion" {
         const expected = pair[0];
         const actual = pair[1].convert(@as(Coordinate.Tag, expected), test_size);
         try testing.expectEqual(expected, actual);
+    }
+}
+
+test "Size native command padding adds symmetric margins without accumulating" {
+    const t = std.testing;
+    for ([_]PaddingBalance{ .false, .true, .equal }) |mode| {
+        var size: Size = .{ .screen = .{ .width = 811, .height = 607 }, .cell = .{ .width = 10, .height = 20 }, .padding = .{} };
+        const explicit: Padding = .{ .left = 2, .right = 6, .top = 3, .bottom = 5 };
+        size.setPaddingWithNativeInsets(explicit, mode, 0, 0);
+        const baseline = size.padding;
+        size.setPaddingWithNativeInsets(explicit, mode, 8, 8);
+        try t.expectEqual(baseline.left + 8, size.padding.left);
+        try t.expectEqual(baseline.right + 8, size.padding.right);
+        try t.expectEqual(baseline.top, size.padding.top);
+        try t.expectEqual(baseline.bottom + 8, size.padding.bottom);
+        const once = size.padding;
+        size.setPaddingWithNativeInsets(explicit, mode, 8, 8);
+        try t.expectEqual(once, size.padding);
+        size.setPaddingWithNativeInsets(explicit, mode, 100_000, 100_000);
+        try t.expect(size.grid().columns >= 2);
+        try t.expect(size.grid().rows >= 2);
     }
 }

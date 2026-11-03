@@ -5,6 +5,7 @@ import Foundation
 enum CommandInputDiagnostics {
     enum Operation: String, CaseIterable, Sendable {
         case geometrySnapshot, bridgeSnapshot, hostSynchronize, headerDraw, textMeasurement
+        case submissionDispatch, submissionToBoundary
     }
 
     enum Counter: String, CaseIterable, Sendable {

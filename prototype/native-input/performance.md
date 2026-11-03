@@ -3,6 +3,74 @@
 These measurements cover the prototype's native input and shell bridge. They do
 not establish terminal rendering throughput or a general efficiency claim.
 
+## Submission latency and padded command UI
+
+The submission path now wakes geometry observation immediately on Enter,
+checks an in-flight transfer every 8 ms, and responds immediately to its receipt.
+The required PTY resize barrier retries at 1–4 ms rather than 20 ms. Directory
+events coalesce for 2 ms rather than 10 ms. Normal visible/occluded observation
+stays at 33/250 ms. These changes retain the parsed-boundary ownership checks;
+they do not clear the draft optimistically or expose the terminal cursor.
+
+The zsh adapter uses the optional `zsh/files` builtins for atomic same-directory
+renames, mkdir, and cleanup, with the original external commands as fallback.
+This removes process-launch overhead without changing the submission protocol
+or user startup. A matched private-PTY run measured 20 builtin `:` submissions
+after five warmups per version, using kqueue and monotonic observation timestamps:
+
+| Trigger → observed event | Before median / p95 | After median / p95 |
+| --- | ---: | ---: |
+| Acceptance receipt | 9.25 / 10.60 ms | 0.99 / 8.01 ms |
+| Matching OSC 133 command-start marker | 26.51 / 29.16 ms | 3.09 / 11.21 ms |
+| Next ready prompt | 57.07 / 62.36 ms | 19.08 / 28.00 ms |
+
+This is shell-bridge latency, **not Enter-to-screen latency**. The fixture excludes
+the app, renderer, user hooks, and repository metadata. Scheduler and filesystem
+outliers were retained; this was not an idle-machine benchmark. Request-file
+publication is separate (median 0.24/0.25 ms). Adapter SHA-256 before:
+`122316cab56dcc619b98be656d05979661f10494339192adad2f9d06b92ed9d8`;
+after: `6b8ddcdabe0dbfcd5a5ca6fb0555b7b6f92fa1b6879577c8d98991d7f36d7532`.
+Raw local artifacts: `/tmp/spooky-submit-kqueue-before.json` and
+`/tmp/spooky-submit-kqueue-after.json`. Reproduce with
+`test/native-input/benchmark_latency.py --adapter <snapshot> --output <result>`.
+The opt-in app recorder now also aggregates submission-to-dispatch and
+submission-to-parsed-boundary time; neither counter measures GPU presentation.
+
+Four logical points of horizontal padding enter the real terminal geometry, so
+selection and pointer coordinates retain their normal mapping. A four-point
+bottom gap uses space in the existing reserved header row, with a compact
+caption below the shifted full-width separator. The AppKit editor has four-point
+insets on all sides. Command chrome remains in Ghostty's text/Metal pass.
+Completion filtering reuses a bounded shell result set and does not launch a
+worker per keystroke; selection scrolling changes the clip origin immediately.
+
+The first padded candidate (`bf06735654cc743506f204ac3e985b8d56d37886984ee5e4cb7c75f109866222`)
+was exercised through computer use with 20 consecutive short submissions and
+20 alternating two-page wheel gestures while preserving a two-line draft.
+The menu was navigated through 31 arrow-key steps, filtered with noncontiguous
+characters, taken to zero matches and back, and used to replace a Unicode token
+before an unchanged command suffix. Completion acceptance and undo preserved
+the surrounding text. Search opened from Cmd+F, found three matches, navigated
+in both directions, and returned focus to the preserved draft. This pass also
+found global paste shortcut interception in the search field, corrected by native
+search key routing and explicit focus ownership. These are correctness
+observations, not measured frame times.
+
+Validation passed 93 focused core tests and all 49 zsh PTY tests. The combined
+native suite passed 77 cases; after the search shortcut correction, its affected
+editor/search suites passed all 53 cases, including two new clipboard/focus
+regressions. Strict Swift lint and diff whitespace checks passed. Build/test
+logs are `/tmp/spooky-padding-coretests.log`, `/tmp/spooky-padding-corebuild.log`,
+`/tmp/spooky-polish-swift-tests.log`, and `/tmp/spooky-search-keys-tests-final.log`.
+
+The final regular Spooky bundle (SHA-256
+`311b4d1db4099e5923afb9dedea633ef10861bdd44f8d98a0e98c73c7f38e39f`)
+built successfully and passed live Cmd+F → Unicode paste → match navigation →
+undo/redo → Escape checks with its native draft preserved. Its completion menu
+filtered `cfr` to `café-report.txt`, and a submitted `read` handed physical key
+events to the terminal and returned to native editing afterward. The app was
+left open at a clean prompt. No high-speed Enter-to-present recording was taken.
+
 ## Metal command chrome
 
 The former header views painted in AppKit above Ghostty's Metal surface. Their

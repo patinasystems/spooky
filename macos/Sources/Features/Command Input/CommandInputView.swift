@@ -5,12 +5,14 @@ import AppKit
 /// content height independently of that viewport.
 @MainActor
 final class CommandInputView: NSView, NSTextViewDelegate {
+    static let padding: CGFloat = 4
     let textView: CommandTextView
     let scrollView: CommandEditorScrollView
 
     var onTextChanged: (String) -> Void = { _ in }
     var onSubmit: (String) -> Bool = { _ in false }
     var onUseTerminal: () -> Void = {}
+    var onFind: () -> Bool = { false }
     var onFocusChanged: (Bool) -> Void = { _ in }
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
@@ -42,6 +44,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.delegate = self
         textView.onSubmit = { [weak self] text in self?.onSubmit(text) ?? false }
         textView.onUseTerminal = { [weak self] in self?.onUseTerminal() }
+        textView.onFind = { [weak self] in self?.onFind() ?? false }
         textView.onFocusChanged = { [weak self] focused in self?.onFocusChanged(focused) }
         textView.onContentHeightChanged = { [weak self] height in self?.contentHeightChanged(height) }
         textView.onRequestCompletion = { [weak self] in self?.onRequestCompletion($0) }
@@ -56,7 +59,9 @@ final class CommandInputView: NSView, NSTextViewDelegate {
 
     override func layout() {
         super.layout()
-        scrollView.frame = bounds
+        scrollView.frame = NSRect(x: Self.padding, y: Self.padding,
+                                  width: max(1, bounds.width - Self.padding * 2),
+                                  height: max(1, bounds.height - Self.padding * 2))
         scrollView.tile()
         textView.updateCompletionPosition()
     }
@@ -133,7 +138,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.heightReportScheduled = false
-            self.onContentHeightChanged(self.latestHeight)
+            self.onContentHeightChanged(self.latestHeight + Self.padding * 2)
         }
     }
 }

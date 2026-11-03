@@ -99,6 +99,8 @@ final class CommandInputFileEvents: @unchecked Sendable {
             self.continuation.yield(())
         }
         scheduled = work
-        queue.asyncAfter(deadline: .now() + .milliseconds(10), execute: work)
+        // Atomic state/receipt publications should become visible within a
+        // frame. A small coalescing window still combines filesystem bursts.
+        queue.asyncAfter(deadline: .now() + .milliseconds(2), execute: work)
     }
 }

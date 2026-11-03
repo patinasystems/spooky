@@ -24,6 +24,8 @@ layout(binding = 1, std140) uniform Globals {
     uniform uint bg_color_packed_4u8;
     uniform uint bools;
     uniform float command_pinned_y;
+    uniform float command_gap;
+    uniform float command_caption_scale;
 };
 
 // Bools

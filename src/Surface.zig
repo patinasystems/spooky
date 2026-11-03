@@ -146,6 +146,8 @@ size: rendererpkg.Size,
 /// and config updates cannot accumulate it. Points preserve it across DPI.
 native_input_inset_bottom: u32 = 0,
 native_input_inset_bottom_points: f64 = 0,
+native_input_inset_horizontal: u32 = 0,
+native_input_inset_horizontal_points: f64 = 0,
 
 /// The configuration derived from the main config. We "derive" it so that
 /// we don't have a shared pointer hanging around that we need to worry about
@@ -2633,14 +2635,21 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
 /// Safe to call from the main thread; ordinary resize messages update the PTY
 /// and renderer together without changing the runtime surface dimensions.
 pub fn setNativeInputInset(self: *Surface, bottom_px: u32) !void {
+    try self.setNativeInputPadding(self.native_input_inset_horizontal, bottom_px);
+}
+
+pub fn setNativeInputPadding(self: *Surface, horizontal_px: u32, bottom_px: u32) !void {
     const content_scale = try self.rt_surface.getContentScale();
     const scale_y = if (content_scale.y > 0 and std.math.isFinite(content_scale.y))
         content_scale.y
     else
         1;
+    const scale_x = if (content_scale.x > 0 and std.math.isFinite(content_scale.x)) content_scale.x else 1;
     self.native_input_inset_bottom_points = @as(f64, @floatFromInt(bottom_px)) / scale_y;
-    if (self.native_input_inset_bottom == bottom_px) return;
+    self.native_input_inset_horizontal_points = @as(f64, @floatFromInt(horizontal_px)) / scale_x;
+    if (self.native_input_inset_bottom == bottom_px and self.native_input_inset_horizontal == horizontal_px) return;
     self.native_input_inset_bottom = bottom_px;
+    self.native_input_inset_horizontal = horizontal_px;
     try self.resize(self.size.screen);
 }
 
@@ -2684,11 +2693,13 @@ fn recomputePadding(self: *Surface) !void {
     const content_scale = try self.rt_surface.getContentScale();
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
-    self.size.setPaddingWithBottomInset(
+    self.size.setPaddingWithNativeInsets(
         self.config.scaledPadding(x_dpi, y_dpi),
         self.config.window_padding_balance,
+        self.native_input_inset_horizontal,
         self.native_input_inset_bottom,
     );
+    self.size.command_padding = rendererpkg.Size.scaledInset(self.native_input_inset_horizontal_points, content_scale.y);
 }
 
 /// Called to set the preedit state for character input. Preedit is used
@@ -3805,8 +3816,10 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
     const inset = rendererpkg.Size.scaledInset(self.native_input_inset_bottom_points, content_scale.y);
-    const inset_changed = self.native_input_inset_bottom != inset;
+    const horizontal = rendererpkg.Size.scaledInset(self.native_input_inset_horizontal_points, content_scale.x);
+    const inset_changed = self.native_input_inset_bottom != inset or self.native_input_inset_horizontal != horizontal;
     self.native_input_inset_bottom = inset;
+    self.native_input_inset_horizontal = horizontal;
 
     // Update our font size which is dependent on the DPI
     const size = size: {

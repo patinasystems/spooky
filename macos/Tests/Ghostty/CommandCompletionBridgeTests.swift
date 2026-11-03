@@ -77,6 +77,8 @@ struct CommandCompletionBridgeTests {
         #expect(candidate.replacementText == result)
         #expect(candidate.replacementRange == NSRange(location: 0, length: request.text.utf16.count))
         #expect(candidate.cursorUTF16 == prefix.utf16.count)
+        #expect(candidate.displayText == "café folder/")
+        #expect(candidate.detail.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: root.path))
     }
 
@@ -95,6 +97,30 @@ struct CommandCompletionBridgeTests {
         try write("5", to: root.appendingPathComponent("items/1/cursor"))
         await #expect(throws: CommandCompletionBridge.CompletionError.self) {
             try await bridge.response(to: request, generation: "123-1")
+        }
+    }
+
+    @Test func displayShowsOnlyTheCompletedOptionAcrossShellContexts() {
+        struct Example {
+            let draft: String
+            let cursor: Int
+            let result: String
+            let resultCursor: Int
+            let expected: String
+        }
+        let examples = [
+            Example(draft: "git ch", cursor: 6, result: "git checkout ", resultCursor: 13, expected: "checkout"),
+            Example(draft: "echo 👋\ncd do --quiet", cursor: 13, result: "echo 👋\ncd documents/ --quiet",
+                    resultCursor: 21, expected: "documents/"),
+            Example(draft: "cat 'ca' tail", cursor: 7, result: "cat 'café folder' tail",
+                    resultCursor: 15, expected: "café folder"),
+            Example(draft: "echo a;git ch", cursor: 13, result: "echo a;git cherry-pick",
+                    resultCursor: 22, expected: "cherry-pick")
+        ]
+        for example in examples {
+            let request = CommandCompletionRequest(id: UUID(), revision: 1, text: example.draft, cursorUTF16: example.cursor)
+            #expect(CommandCompletionToken.label(result: example.result, cursorUTF16: example.resultCursor,
+                                                 request: request) == example.expected)
         }
     }
 

@@ -52,9 +52,22 @@ nonactivating child panel renders an `NSTableView` at the insertion rect.
 Candidates carry display text, detail, replacement text/range, and an optional
 resulting cursor position. The current zsh bridge returns whole-buffer edits;
 acceptance still uses NSTextView's normal edit/undo path rather than assigning
-its `string` property. Draft/selection/focus or editor-frame changes dismiss the
-menu and cancel the app's request. All new UI is AppKit; there is no Lookout or
+its `string` property. While the menu is open, typing and deletion within the
+active token filter the cached candidates immediately using case/diacritic-insensitive
+fuzzy matching, with prefix matches ranked first. Acceptance replaces the current
+UTF-16 token range and preserves surrounding text. Moving the caret, changing
+other command text, losing focus, starting IME composition, or changing editor
+width cancels the request. Height-only growth repositions the menu. All new UI is AppKit; there is no Lookout or
 SwiftUI completion view and no new terminal output renderer.
+
+The rounded menu displays only completion options, uses an accent-tinted selected
+row, and scrolls selection without animation. A zero-match query can recover by
+backspacing. Filtering uses the bounded result set from the initial Tab request;
+it does not discover candidates excluded by the shell's original query. Close
+and press Tab again to refresh the shell result set in a different context.
+Cmd+F opens terminal search from the editor, preserving the draft. The search
+field and result/navigation controls use matching AppKit styling; Escape closes
+search and returns focus to the originating editor when its pane still owns focus.
 
 Implemented keyboard contract: Tab requests completion at a collapsed selection;
 a unique candidate is
@@ -124,7 +137,8 @@ completion parity. The implemented worker runs `_main_complete` through a
 completion widget and enumerates `.menu-complete -n 1`, capturing each resulting
 `BUFFER` and `LBUFFER` byte count. This retains zsh's quoting/insertion result
 without attempting to reconstruct it from display strings. The current popup
-labels the result's cursor line and shows `zsh` as detail; richer descriptions
+extracts the active completed option for display, with no repeated command
+prefix or provider label; richer descriptions
 and completion groups remain future work.
 ([zsh completion widgets](https://zsh.sourceforge.io/Doc/Release/Completion-Widgets.html))
 

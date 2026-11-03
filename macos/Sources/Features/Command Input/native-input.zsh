@@ -82,13 +82,26 @@ _patina_native_apply_prompt() {
     _patina_native_prompt_active=1
 }
 
+# Same-directory moves remain atomic renames. Use zsh's in-process file
+# builtins for the per-submit publications; retain the external-tool fallback
+# for zsh installations without the optional files module.
+if builtin zmodload -F zsh/files b:zf_mv b:zf_mkdir b:zf_rm 2>/dev/null; then
+    _patina_native_move() { builtin zf_mv "$@" }
+    _patina_native_mkdir() { builtin zf_mkdir "$@" }
+    _patina_native_remove() { builtin zf_rm "$@" }
+else
+    _patina_native_move() { command /bin/mv "$@" }
+    _patina_native_mkdir() { command /bin/mkdir "$@" }
+    _patina_native_remove() { command /bin/rm "$@" }
+fi
+
 _patina_native_metadata() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     [[ -n $_patina_native_block_id ]] || return 1
     builtin local destination="$_patina_native_dir/blocks/$_patina_native_block_id/$1"
     builtin local temporary="$destination.tmp.$$"
     builtin print -rn -- "$2" > "$temporary" &&
-        command /bin/mv -f "$temporary" "$destination"
+        _patina_native_move -f "$temporary" "$destination"
 }
 
 _patina_native_record_input() {
@@ -136,7 +149,7 @@ _patina_native_prepare_prompt() {
     (( ++_patina_native_block_counter ))
     _patina_native_block_id="$$-$_patina_native_block_counter"
     _patina_native_input_recorded=0
-    command /bin/mkdir -p "$_patina_native_dir/blocks/$_patina_native_block_id"
+    _patina_native_mkdir -p "$_patina_native_dir/blocks/$_patina_native_block_id"
     _patina_native_block_cwd=$PWD
     _patina_native_metadata cwd "$_patina_native_block_cwd"
     builtin local branch
@@ -182,7 +195,7 @@ _patina_native_publish() {
     [[ $value == $_patina_native_last_state ]] && return 0
     builtin local temporary="$_patina_native_dir/state.tmp.$$"
     builtin print -r -- "$value" > "$temporary" &&
-        command /bin/mv -f "$temporary" "$_patina_native_dir/state" &&
+        _patina_native_move -f "$temporary" "$_patina_native_dir/state" &&
         _patina_native_last_state=$value
 }
 
@@ -192,7 +205,7 @@ _patina_native_receipt() {
     [[ -n $3 ]] && value+=$'\t'"$3"
     builtin local temporary="$_patina_native_dir/receipt.tmp.$$"
     builtin print -r -- "$value" > "$temporary" &&
-        command /bin/mv -f "$temporary" "$_patina_native_dir/receipt"
+        _patina_native_move -f "$temporary" "$_patina_native_dir/receipt"
 }
 
 _patina_native_line_init() {
@@ -250,7 +263,7 @@ _patina_native_submit() {
     builtin local consumed="$_patina_native_dir/consumed.$$"
     # A delayed duplicate trigger must not erase a receipt the app has yet to see.
     [[ -f $request && ! -L $request ]] || return 0
-    command /bin/mv -f "$request" "$consumed" || return 1
+    _patina_native_move -f "$request" "$consumed" || return 1
 
     builtin local generation identifier payload descriptor reason REPLY
     builtin local -A metadata
@@ -312,7 +325,7 @@ _patina_native_submit() {
         builtin zle .accept-line
     } always {
         [[ -n $descriptor ]] && builtin exec {descriptor}<&-
-        command /bin/rm -f "$consumed"
+        _patina_native_remove -f "$consumed"
     }
 }
 

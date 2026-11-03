@@ -10,6 +10,7 @@ final class CommandTextView: NSTextView {
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
     var onCancelCompletion: () -> Void = {}
+    var onFind: () -> Bool = { false }
     var canRequestFocus: () -> Bool = { true }
     private var focusRequestScheduled = false
     private var focusRequestRevision: UInt64 = 0
@@ -26,6 +27,8 @@ final class CommandTextView: NSTextView {
     private(set) var completionItems: [CommandCompletionCandidate] = []
     private(set) var selectedCompletionIndex = 0
     private var completionMessage: String?
+    private var completionFilter: CommandCompletionFilter?
+    private var editingCompletion = false
 
     // Ghostty's window undo manager also owns closing/reopening tabs and panes.
     // Editing or clearing one draft must never undo or erase those operations.
@@ -241,6 +244,9 @@ final class CommandTextView: NSTextView {
         // need not match standard text editing. Keep native editing shortcuts
         // available whenever this text view, rather than the PTY, owns focus.
         switch event.charactersIgnoringModifiers?.lowercased() {
+        case "f" where modifiers == .command:
+            dismissCompletions()
+            return onFind()
         case "a" where modifiers == .command:
             selectAll(nil)
         case "c" where modifiers == .command:
@@ -261,6 +267,11 @@ final class CommandTextView: NSTextView {
             return super.performKeyEquivalent(with: event)
         }
         return true
+    }
+
+    override func performFindPanelAction(_ sender: Any?) {
+        dismissCompletions()
+        if !onFind() { super.performFindPanelAction(sender) }
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -286,7 +297,7 @@ final class CommandTextView: NSTextView {
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
-        if newSize != frame.size { dismissCompletions() }
+        if widthChanged { dismissCompletions() }
         super.setFrameSize(newSize)
         // TextKit can resize its view while laying out. Avoid entering its
         // layout manager recursively from that frame change.
@@ -299,10 +310,17 @@ final class CommandTextView: NSTextView {
         }
     }
 
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        if allowed { editingCompletion = completionFilter != nil }
+        return allowed
+    }
+
     override func didChangeText() {
         completionRevision &+= 1
-        dismissCompletions()
         super.didChangeText()
+        if !filterCompletionsAfterEdit() { dismissCompletions() }
+        editingCompletion = false
         reportContentHeight()
     }
 
@@ -313,6 +331,7 @@ final class CommandTextView: NSTextView {
     }
 
     func completionSelectionDidChange() {
+        guard !editingCompletion else { return }
         if let request = completionRequest, !completionIsCurrent(request) { dismissCompletions() }
     }
 
@@ -326,6 +345,7 @@ final class CommandTextView: NSTextView {
             return
         }
         completionItems = response.items.filter { validCompletion($0, in: request.text) }
+        completionFilter = CommandCompletionFilter(request: request, items: completionItems)
         selectedCompletionIndex = 0
         if completionItems.count == 1 {
             acceptCompletion(at: 0)
@@ -340,6 +360,8 @@ final class CommandTextView: NSTextView {
         completionRequest = nil
         completionItems = []
         completionMessage = nil
+        completionFilter = nil
+        editingCompletion = false
         completionPopup?.dismiss()
         if hadCompletion { onCancelCompletion() }
     }
@@ -399,6 +421,21 @@ final class CommandTextView: NSTextView {
     private func completionIsCurrent(_ request: CommandCompletionRequest) -> Bool {
         request.revision == completionRevision && request.text == string
             && selectedRange() == NSRange(location: request.cursorUTF16, length: 0)
+    }
+
+    private func filterCompletionsAfterEdit() -> Bool {
+        let selection = selectedRange()
+        guard editingCompletion, let filter = completionFilter, let request = completionRequest,
+              isEditable, !hasMarkedText(), selection.length == 0,
+              window?.firstResponder === self, window?.isKeyWindow == true,
+              let items = filter.items(in: string, cursorUTF16: selection.location) else { return false }
+        completionRequest = .init(id: request.id, revision: completionRevision,
+                                  text: string, cursorUTF16: selection.location)
+        completionItems = items
+        selectedCompletionIndex = 0
+        completionMessage = items.isEmpty ? "No matching completions" : nil
+        showCompletionPopup()
+        return true
     }
 
     private func validCompletion(_ candidate: CommandCompletionCandidate, in text: String) -> Bool {

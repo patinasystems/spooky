@@ -255,6 +255,8 @@ pub const Uniforms = extern struct {
     },
 
     command_pinned_y: f32 align(4) = 0,
+    command_gap: f32 align(4) = 0,
+    command_caption_scale: f32 align(4) = 1,
 
     const PaddingExtend = packed struct(u8) {
         left: bool = false,

@@ -53,7 +53,9 @@ actor CommandCompletionBridge {
                 throw CompletionError.invalidResponse
             }
             guard seen.insert(buffer).inserted else { continue }
-            items.append(.init(displayText: Self.label(buffer, cursorUTF16: cursorUTF16), detail: "zsh",
+            items.append(.init(displayText: CommandCompletionToken.label(
+                result: buffer, cursorUTF16: cursorUTF16, request: request
+            ), detail: "",
                                replacementText: buffer,
                                replacementRange: NSRange(location: 0, length: request.text.utf16.count),
                                cursorUTF16: cursorUTF16))
@@ -84,13 +86,6 @@ actor CommandCompletionBridge {
         let offset = text.utf8.index(text.utf8.startIndex, offsetBy: byteOffset)
         guard let index = String.Index(offset, within: text) else { return nil }
         return text[..<index].utf16.count
-    }
-
-    private static func label(_ text: String, cursorUTF16: Int) -> String {
-        let value = text as NSString
-        let line = value.lineRange(for: NSRange(location: cursorUTF16, length: 0))
-        let label = value.substring(with: line).trimmingCharacters(in: .newlines)
-        return label.isEmpty ? "(empty line)" : String(label.prefix(240))
     }
 
     private static func explanation(_ reason: String) -> String {

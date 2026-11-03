@@ -1247,6 +1247,7 @@ GHOSTTY_API uintptr_t ghostty_surface_command_layout(ghostty_surface_t,
 GHOSTTY_API void ghostty_surface_set_command_chrome(ghostty_surface_t, bool enabled,
     double pinned_offset_from_bottom, const ghostty_command_chrome_s*, uintptr_t count);
 GHOSTTY_API void ghostty_surface_set_native_input_inset(ghostty_surface_t, double bottom);
+GHOSTTY_API void ghostty_surface_set_native_input_padding(ghostty_surface_t, double horizontal, double bottom);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

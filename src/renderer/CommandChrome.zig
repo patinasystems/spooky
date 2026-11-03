@@ -212,6 +212,20 @@ const Text = struct {
     }
 };
 
+pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16 };
+
+/// The already-reserved header row contains the preceding block's bottom gap
+/// and a compact caption. VT row positions and the output font never change.
+pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32) CaptionLayout {
+    const gap = @min(requested_gap, cell_height -| 1);
+    const scale = if (cell_height == 0) 1 else @as(f32, @floatFromInt(cell_height - gap)) / @as(f32, @floatFromInt(cell_height));
+    const virtual_columns: u16 = @intFromFloat(@min(
+        @as(f32, @floatFromInt(std.math.maxInt(u16))),
+        @max(1, @floor(@as(f32, @floatFromInt(columns)) / scale)),
+    ));
+    return .{ .gap = gap, .scale = scale, .columns = virtual_columns };
+}
+
 /// Fill a reusable scratch row solely for the existing font shaper. It has no
 /// PTY or escape parser and never changes the real terminal or its selections.
 pub fn writeCaption(term: *terminal.Terminal, metadata: *const Metadata) !void {
@@ -353,4 +367,20 @@ test "command chrome keeps space-padded headers but preserves visible output" {
             try t.expectEqualStrings("label", snapshot_value.headers[0].metadata.label[0..5]);
         }
     }
+}
+
+test "command chrome padding scales captions within the existing header row" {
+    const t = std.testing;
+    const normal = captionLayout(80, 16, 4);
+    const retina = captionLayout(80, 32, 8);
+    try t.expectEqual(@as(u32, 4), normal.gap);
+    try t.expectEqual(@as(u32, 8), retina.gap);
+    try t.expectEqual(normal.scale, retina.scale);
+    try t.expectEqual(normal.columns, retina.columns);
+    try t.expectEqual(@as(f32, 16), @as(f32, @floatFromInt(normal.gap)) + 16 * normal.scale);
+    try t.expect(@as(f32, @floatFromInt(normal.columns)) * normal.scale <= 80);
+    const tiny = captionLayout(80, 3, 4);
+    try t.expect(tiny.scale > 0);
+    try t.expectEqual(@as(u32, 2), tiny.gap);
+    try t.expectEqual(@as(u16, std.math.maxInt(u16)), captionLayout(std.math.maxInt(u16), 10, 9).columns);
 }

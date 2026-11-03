@@ -2166,6 +2166,18 @@ pub const CAPI = struct {
         };
     }
 
+    /// Native command margins plus the editor's bottom reservation, in logical points.
+    export fn ghostty_surface_set_native_input_padding(surface: *Surface, horizontal: f64, bottom: f64) void {
+        if (!std.math.isFinite(horizontal) or horizontal < 0 or
+            !std.math.isFinite(bottom) or bottom < 0) return;
+        surface.core_surface.setNativeInputPadding(
+            renderer.Size.scaledInset(@min(horizontal, 1_000_000), surface.content_scale.x),
+            renderer.Size.scaledInset(@min(bottom, 1_000_000), surface.content_scale.y),
+        ) catch |err| {
+            log.err("error updating native input padding err={}", .{err});
+        };
+    }
+
     /// Returns the PID of the foreground process for the surface PTY.
     export fn ghostty_surface_foreground_pid(surface: *Surface) u64 {
         return surface.core_surface.getProcessInfo(.foreground_pid) orelse 0;

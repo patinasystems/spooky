@@ -45,6 +45,13 @@ padding. The editor and interactive controls remain AppKit objects so native
 text input, selection, undo, IME, menus, and accessibility retain their platform
 behavior. These changes do not remove the upstream SwiftUI application shell.
 
+Native command panes add four logical points of left/right padding to terminal
+geometry and bottom spacing within the reserved block-header row. Captions
+compact into the remainder of that row; output text keeps its normal cell size.
+The multiline editor has four-point padding on every side. Completion and
+terminal search share an AppKit overlay style, and Cmd+F routes from the editor
+to the existing terminal search engine.
+
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
 syntax coloring remains future work. Warp's [editor documentation](https://docs.warp.dev/terminal/editor/)

@@ -48,6 +48,11 @@ final class NativeCommandSurfaceHost: NSView {
         editor.onTextChanged = { [weak session] in session?.setDraft($0) }
         editor.onSubmit = { [weak session] in session?.submit($0) ?? false }
         editor.onUseTerminal = { [weak session] in session?.useTerminal() }
+        editor.onFind = { [weak self] in
+            guard let self, self.surfaceView.surface != nil else { return false }
+            self.surfaceView.find(nil)
+            return true
+        }
         editor.onRequestCompletion = { [weak session] in session?.requestCompletion($0) }
         editor.onCancelCompletion = { [weak session] in session?.cancelCompletion() }
         session.onCompletion = { [weak self] in self?.editor.receiveCompletions($0) }
@@ -107,14 +112,17 @@ final class NativeCommandSurfaceHost: NSView {
         defer { synchronizing = false }
         let geometry = session.layout
         let line = max(1, geometry.cellHeight)
-        let height = min(max(line, measuredHeight), max(line, min(line * 12, bounds.height * 0.45)))
+        let padding = CommandInputView.padding
+        let minimumHeight = line + padding * 2
+        let height = min(max(minimumHeight, measuredHeight),
+                         max(minimumHeight, min(line * 12 + padding * 2, bounds.height * 0.45)))
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission
         let editing = recovering || (session.editorVisible && geometry.primary && session.currentBlockID != nil)
         // Recovery must remain selectable even when no primary prompt exists.
         let browsing = recovering || (editing && !geometry.atBottom)
         let reserved = editing && !transferring ? (browsing ? height + line : max(0, height - line)) : 0
-        let x = browsing ? geometry.paddingLeft : geometry.cursorX
+        let x = max(0, (browsing ? geometry.paddingLeft : geometry.cursorX) - padding)
         let y = browsing ? max(0, bounds.height - height)
             : min(max(geometry.paddingTop, geometry.cursorY), max(0, bounds.height - height))
         let shown = editing && (geometry.cursorValid || browsing)
@@ -129,7 +137,9 @@ final class NativeCommandSurfaceHost: NSView {
                 ghostty_surface_set_native_input_cursor(surface, cursor.enabled, cursor.terminalRequested, cursor.suppressed)
                 cursorPresentation = cursor
             }
-            ghostty_surface_set_native_input_inset(surface, reserved)
+            let integrated = session.hasNativeIntegration
+            ghostty_surface_set_native_input_padding(surface, integrated ? padding : 0,
+                                                     integrated ? reserved + padding : 0)
         }
 
         background = configColor("background", fallback: .black)
@@ -163,9 +173,10 @@ final class NativeCommandSurfaceHost: NSView {
         // behind it. Following the terminal cursor here would expose its block
         // caret before ZLE has redisplayed/accepted the submitted buffer.
         let editorFrame = transferring && !editor.frame.isEmpty ? editor.frame
-            : NSRect(x: x, y: y, width: max(1, bounds.width - x - geometry.paddingLeft), height: height)
+            : NSRect(x: x, y: y,
+                     width: max(1, bounds.width - x - max(0, geometry.paddingLeft - padding)), height: height)
         if editor.frame != editorFrame {
-            editor.dismissCompletions()
+            if editor.frame.width != editorFrame.width { editor.dismissCompletions() }
             editor.frame = editorFrame
             editor.needsLayout = true
         }

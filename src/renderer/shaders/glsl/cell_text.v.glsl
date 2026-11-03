@@ -76,7 +76,7 @@ void main() {
     if ((glyph_bools & IS_PINNED_COMMAND) != 0) cell_pos.y = command_pinned_y;
     if (atlas == ATLAS_SOLID) {
         vec2 position = vec2(-grid_padding.w + screen_size.x * corner.x,
-                             cell_pos.y + float(glyph_size.y) * corner.y);
+                             cell_pos.y + float(bearings.y) + float(glyph_size.y) * corner.y);
         gl_Position = projection_matrix * vec4(position, 0.0, 1.0);
         out_data.color = load_color(color, use_linear_blending);
         out_data.bg_color = vec4(0.0);
@@ -114,6 +114,12 @@ void main() {
     vec2 offset = vec2(bearings);
 
     offset.y = cell_size.y - offset.y;
+    if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
+        cell_pos.x *= command_caption_scale;
+        cell_pos.y += command_gap;
+        size *= command_caption_scale;
+        offset *= command_caption_scale;
+    }
 
     // Calculate the final position of the cell which uses our glyph size
     // and glyph offset to create the correct bounding box for the glyph.
@@ -128,19 +134,13 @@ void main() {
     // Get our color. We always fetch a linearized version to
     // make it easier to handle minimum contrast calculations.
     out_data.color = load_color(color, true);
-    // Get the BG color
-    out_data.bg_color = load_color(
-            unpack4u8(bg_colors[grid_pos.y * grid_size.x + grid_pos.x]),
-            true
-        );
-    // Blend it with the global bg color
-    vec4 global_bg = load_color(
-            unpack4u8(bg_color_packed_4u8),
-            true
-        );
-    out_data.bg_color += global_bg * vec4(1.0 - out_data.bg_color.a);
+    // Virtual caption columns must never index the real VT cell buffer.
     if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
         out_data.bg_color = load_color(uvec4(unpack4u8(bg_color_packed_4u8).rgb, 255u), true);
+    } else {
+        out_data.bg_color = load_color(unpack4u8(bg_colors[grid_pos.y * grid_size.x + grid_pos.x]), true);
+        vec4 global_bg = load_color(unpack4u8(bg_color_packed_4u8), true);
+        out_data.bg_color += global_bg * vec4(1.0 - out_data.bg_color.a);
     }
 
     // If we have a minimum contrast, we need to check if we need to

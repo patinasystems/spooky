@@ -322,219 +322,22 @@ extension Ghostty {
         }
     }
 
-    /// Search overlay view that displays a search bar with input field and navigation buttons.
-    struct SurfaceSearchOverlay: View {
+    /// The upstream wrapper observes search results; AppKit owns the controls.
+    struct SurfaceSearchOverlay: NSViewRepresentable {
         let surfaceView: SurfaceView
         @ObservedObject var searchState: SurfaceView.SearchState
         let onClose: () -> Void
-        @State private var corner: Corner = .topRight
-        @State private var dragOffset: CGSize = .zero
-        @State private var barSize: CGSize = .zero
-        @FocusState private var isSearchFieldFocused: Bool
 
-        private let padding: CGFloat = 8
-
-        var body: some View {
-            GeometryReader { geo in
-                HStack(spacing: 4) {
-                    BackportSelectionTextField(
-                        "Search",
-                        text: $searchState.needle.text,
-                        selection: $searchState.needle.selection
-                    )
-                    .textFieldStyle(.plain)
-                    .frame(width: 180)
-                    .padding(.leading, 8)
-                    .padding(.trailing, 50)
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.1))
-                    .cornerRadius(6)
-                    .focused($isSearchFieldFocused)
-                    .overlay(alignment: .trailing) {
-                        if let selected = searchState.selected {
-                            Text("\(selected + 1)/\(searchState.total, default: "?")")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .monospacedDigit()
-                                .padding(.trailing, 8)
-                        } else if let total = searchState.total {
-                            Text("-/\(total)")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .monospacedDigit()
-                                .padding(.trailing, 8)
-                        }
-                    }
-                    .onChange(of: searchState.needle.text) { _ in
-                        searchState.writePasteboardNeedle()
-                    }
-                    .onReceive(
-                        NotificationCenter.default.publisher(
-                            for: NSApplication.didBecomeActiveNotification
-                        )
-                    ) { _ in
-                        // When the app becomes active, we want to check for external changes
-                        // to our synced needle.
-                        searchState.readPasteboardNeedle()
-                    }
-                    .onSubmit {
-                        _ = surfaceView.navigateSearchToNext()
-                    }
-                    .onExitCommand {
-                        if searchState.needle.text.isEmpty {
-                            onClose()
-                        } else {
-                            Ghostty.moveFocus(to: surfaceView)
-                        }
-                    }
-                    .backport.onKeyPress(.return) { modifiers in
-                        if modifiers.contains(.shift) {
-                            _ = surfaceView.navigateSearchToPrevious()
-                            return .handled
-                        }
-                        return .ignored
-                    }
-
-                    Button(action: {
-                        _ = surfaceView.navigateSearchToNext()
-                    }, label: {
-                        Image(systemName: "chevron.up")
-                    })
-                    .buttonStyle(SearchButtonStyle())
-
-                    Button(action: {
-                        guard let surface = surfaceView.surface else { return }
-                        let action = "navigate_search:previous"
-                        ghostty_surface_binding_action(surface, action, UInt(action.lengthOfBytes(using: .utf8)))
-                    }, label: {
-                        Image(systemName: "chevron.down")
-                    })
-                    .buttonStyle(SearchButtonStyle())
-
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                    }
-                    .buttonStyle(SearchButtonStyle())
-                }
-                .padding(8)
-                .background(.background)
-                .clipShape(clipShape)
-                .shadow(radius: 4)
-                .onAppear {
-                    isSearchFieldFocused = true
-                }
-                .onReceive(NotificationCenter.default.publisher(for: .ghosttySearchFocus)) { notification in
-                    guard notification.object as? SurfaceView === surfaceView else { return }
-                    DispatchQueue.main.async {
-                        isSearchFieldFocused = true
-                    }
-                }
-                .background(
-                    GeometryReader { barGeo in
-                        Color.clear.onAppear {
-                            barSize = barGeo.size
-                        }
-                    }
-                )
-                .padding(padding)
-                .offset(dragOffset)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: corner.alignment)
-                .gesture(
-                    DragGesture()
-                        .onChanged { value in
-                            dragOffset = value.translation
-                        }
-                        .onEnded { value in
-                            let centerPos = centerPosition(for: corner, in: geo.size, barSize: barSize)
-                            let newCenter = CGPoint(
-                                x: centerPos.x + value.translation.width,
-                                y: centerPos.y + value.translation.height
-                            )
-                            let newCorner = closestCorner(to: newCenter, in: geo.size)
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                corner = newCorner
-                                dragOffset = .zero
-                            }
-                        }
-                )
-            }
+        func makeNSView(context: Context) -> SurfaceSearchOverlayView {
+            SurfaceSearchOverlayView(surfaceView: surfaceView, searchState: searchState, onClose: onClose)
         }
 
-        private var clipShape: some Shape {
-            if #available(macOS 26.0, *) {
-                return ConcentricRectangle(corners: .concentric(minimum: 8), isUniform: true)
-            } else {
-                return RoundedRectangle(cornerRadius: 8)
-            }
+        func updateNSView(_ view: SurfaceSearchOverlayView, context: Context) {
+            view.update(searchState: searchState, onClose: onClose)
         }
 
-        enum Corner {
-            case topLeft, topRight, bottomLeft, bottomRight
-
-            var alignment: Alignment {
-                switch self {
-                case .topLeft: return .topLeading
-                case .topRight: return .topTrailing
-                case .bottomLeft: return .bottomLeading
-                case .bottomRight: return .bottomTrailing
-                }
-            }
-        }
-
-        private func centerPosition(for corner: Corner, in containerSize: CGSize, barSize: CGSize) -> CGPoint {
-            let halfWidth = barSize.width / 2 + padding
-            let halfHeight = barSize.height / 2 + padding
-
-            switch corner {
-            case .topLeft:
-                return CGPoint(x: halfWidth, y: halfHeight)
-            case .topRight:
-                return CGPoint(x: containerSize.width - halfWidth, y: halfHeight)
-            case .bottomLeft:
-                return CGPoint(x: halfWidth, y: containerSize.height - halfHeight)
-            case .bottomRight:
-                return CGPoint(x: containerSize.width - halfWidth, y: containerSize.height - halfHeight)
-            }
-        }
-
-        private func closestCorner(to point: CGPoint, in containerSize: CGSize) -> Corner {
-            let midX = containerSize.width / 2
-            let midY = containerSize.height / 2
-
-            if point.x < midX {
-                return point.y < midY ? .topLeft : .bottomLeft
-            } else {
-                return point.y < midY ? .topRight : .bottomRight
-            }
-        }
-
-        struct SearchButtonStyle: ButtonStyle {
-            @State private var isHovered = false
-
-            func makeBody(configuration: Configuration) -> some View {
-                configuration.label
-                    .foregroundStyle(isHovered || configuration.isPressed ? .primary : .secondary)
-                    .padding(.horizontal, 2)
-                    .frame(height: 26)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(backgroundColor(isPressed: configuration.isPressed))
-                    )
-                    .onHover { hovering in
-                        isHovered = hovering
-                    }
-                    .backport.pointerStyle(.link)
-            }
-
-            private func backgroundColor(isPressed: Bool) -> Color {
-                if isPressed {
-                    return Color.primary.opacity(0.2)
-                } else if isHovered {
-                    return Color.primary.opacity(0.1)
-                } else {
-                    return Color.clear
-                }
-            }
+        static func dismantleNSView(_ view: SurfaceSearchOverlayView, coordinator: ()) {
+            view.restoreOriginFocus()
         }
     }
 

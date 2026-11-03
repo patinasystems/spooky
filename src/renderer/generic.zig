@@ -2708,13 +2708,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (columns == 0 or self.cells.size.rows == 0) return;
             const fg = self.terminal_state.colors.foreground;
             const bg = self.terminal_state.colors.background;
+            const caption_layout = renderer.CommandChrome.captionLayout(columns, self.size.cell.height, self.size.command_padding);
+            self.uniforms.command_gap = @floatFromInt(caption_layout.gap);
+            self.uniforms.command_caption_scale = caption_layout.scale;
             // Convert absolute drawable coordinates into the grid-origin
             // coordinate system used by the existing projection matrix.
             self.uniforms.command_pinned_y = @max(0, @as(f32, @floatFromInt(self.size.screen.height)) -
                 snapshot.pinned_offset_from_bottom) - @as(f32, @floatFromInt(self.size.padding.top));
             for (snapshot.headers) |header| {
                 if (!header.pinned and header.row >= self.cells.size.rows) continue;
-                const glyphs = try self.commandCaptionGlyphs(header, columns);
+                const glyphs = try self.commandCaptionGlyphs(header, caption_layout.columns);
                 const flags: @FieldType(shaderpkg.CellText, "bools") = .{
                     .no_min_contrast = true,
                     .is_command_chrome = true,
@@ -2733,6 +2736,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .grid_pos = .{ 0, header.row },
                     .color = .{ fg.r, fg.g, fg.b, 41 },
                     .glyph_size = .{ 0, 1 },
+                    .bearings = .{ 0, @intCast(caption_layout.gap) },
                 });
                 for (glyphs) |original| {
                     var glyph = original;

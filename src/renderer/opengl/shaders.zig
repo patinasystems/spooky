@@ -197,6 +197,8 @@ pub const Uniforms = extern struct {
     /// Various booleans, in a packed struct for space efficiency.
     bools: Bools align(4),
     command_pinned_y: f32 align(4) = 0,
+    command_gap: f32 align(4) = 0,
+    command_caption_scale: f32 align(4) = 1,
 
     const Bools = packed struct(u32) {
         /// Whether the cursor is 2 cells wide.

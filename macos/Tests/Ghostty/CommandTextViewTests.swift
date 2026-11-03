@@ -118,6 +118,21 @@ struct CommandTextViewTests {
         #expect(view.textContainer?.lineFragmentPadding == 0)
     }
 
+    @Test func editorPaddingSurroundsTheViewportWithoutChangingTextMetrics() {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 32))
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 24)
+        editor.layout()
+        #expect(editor.scrollView.frame == NSRect(x: 4, y: 4, width: 392, height: 24))
+        #expect(editor.textView.measuredContentHeight == 24)
+
+        editor.setFrameSize(NSSize(width: 400, height: 104))
+        editor.layout()
+        #expect(editor.scrollView.frame == NSRect(x: 4, y: 4, width: 392, height: 96))
+        #expect(editor.textView.frame.height >= editor.scrollView.contentView.bounds.height)
+        #expect(editor.textView.measuredContentHeight == 24)
+    }
+
     @Test func trailingNewlineReservesTheEmptyInsertionLine() {
         let view = makeSizedEditor(width: 400)
         view.string = "echo hello"
@@ -482,6 +497,103 @@ struct CommandTextViewTests {
         #expect(terminalRequests == 0)
         view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
         #expect(terminalRequests == 1)
+    }
+
+    @Test func typingFiltersCachedCompletionsAndAcceptsTheCurrentTokenRange() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        let request = try requestCompletion(from: view)
+        view.receiveCompletions(completionResponse(to: request))
+        var submissions = 0
+        view.onSubmit = { _ in submissions += 1; return true }
+
+        view.insertText("p", replacementRange: view.selectedRange())
+
+        #expect(view.string == "git chp")
+        #expect(view.completionItems.map(\.displayText) == ["cherry-pick"])
+        #expect(view.completionItems.first?.replacementRange == NSRange(location: 4, length: 3))
+        view.keyDown(with: try returnEvent())
+        #expect(view.string == "git cherry-pick")
+        #expect(submissions == 0)
+    }
+
+    @Test func nativeSelectionDelegateKeepsTheMenuDuringAnEditButCancelsACaretMove() throws {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 24))
+        editor.setDraft("git ch")
+        let window = makeFocusWindow(containing: editor)
+        defer { window.close() }
+        #expect(window.makeFirstResponder(editor.textView))
+        let request = try requestCompletion(from: editor.textView)
+        editor.receiveCompletions(completionResponse(to: request))
+        editor.textView.insertText("p", replacementRange: editor.textView.selectedRange())
+        #expect(editor.textView.completionItems.map(\.displayText) == ["cherry-pick"])
+        editor.textView.setSelectedRange(NSRange(location: 0, length: 0))
+        #expect(editor.textView.completionItems.isEmpty)
+    }
+
+    @Test func filteredCompletionPreservesUnicodePrefixAndCommandSuffix() throws {
+        let prefix = "echo 👋\ncat "
+        let suffix = " --quiet"
+        let (view, window) = makeCompletionEditor(draft: prefix + "ca" + suffix)
+        defer { window.close() }
+        view.setSelectedRange(NSRange(location: prefix.utf16.count + 2, length: 0))
+        let request = try requestCompletion(from: view)
+        let items = ["café\\ folder/", "catalog/"].map { option in
+            CommandCompletionCandidate(displayText: CommandCompletionToken.unquoted(option), detail: "",
+                replacementText: prefix + option + suffix,
+                replacementRange: NSRange(location: 0, length: request.text.utf16.count),
+                cursorUTF16: prefix.utf16.count + option.utf16.count)
+        }
+        view.receiveCompletions(.init(requestID: request.id, revision: request.revision, items: items))
+        view.insertText("fé", replacementRange: view.selectedRange())
+
+        #expect(view.completionItems.count == 1)
+        #expect(view.completionItems.first?.replacementRange == NSRange(location: prefix.utf16.count, length: 4))
+        view.receiveCompletions(completionResponse(to: request)) // An old result cannot replace the live filter.
+        view.keyDown(with: try returnEvent())
+        #expect(view.string == prefix + "café\\ folder/" + suffix)
+        #expect(view.selectedRange().location == prefix.utf16.count + "café\\ folder/".utf16.count)
+    }
+
+    @Test func deletingAQueryRestoresCachedMatchesAndCrossingItsBoundaryDismisses() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        let request = try requestCompletion(from: view)
+        view.receiveCompletions(completionResponse(to: request))
+        view.insertText("zz", replacementRange: view.selectedRange())
+        #expect(view.completionItems.isEmpty)
+        view.insertText("", replacementRange: NSRange(location: 6, length: 2))
+        #expect(view.completionItems.count == 2)
+        view.insertText(" ", replacementRange: view.selectedRange())
+        #expect(view.completionItems.isEmpty)
+        view.keyDown(with: try keyEvent(code: 126, characters: ""))
+        #expect(view.string == "git ch ")
+    }
+
+    @Test func commandFindPreservesDraftAndDismissesCompletions() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        let request = try requestCompletion(from: view)
+        view.receiveCompletions(completionResponse(to: request))
+        var finds = 0
+        view.onFind = { finds += 1; return true }
+        #expect(view.performKeyEquivalent(with: try keyEvent(code: 3, characters: "f", modifiers: .command)))
+        #expect(finds == 1)
+        #expect(view.string == "git ch")
+        #expect(view.completionItems.isEmpty)
+        view.performFindPanelAction(nil)
+        #expect(finds == 2)
+        #expect(view.string == "git ch")
+    }
+
+    @Test func completionSelectionScrollsOnlyEnoughToRevealTheRow() {
+        let viewport = NSRect(x: 0, y: 60, width: 300, height: 90)
+        #expect(CommandCompletionView.scrollOrigin(for: NSRect(x: 0, y: 90, width: 300, height: 30),
+            viewport: viewport, documentHeight: 600).y == 60)
+        #expect(CommandCompletionView.scrollOrigin(for: NSRect(x: 0, y: 150, width: 300, height: 30),
+            viewport: viewport, documentHeight: 600).y == 90)
+        #expect(CommandCompletionView.scrollOrigin(for: NSRect(x: 0, y: 0, width: 300, height: 30),
+            viewport: viewport, documentHeight: 600).y == 0)
     }
 
     private func makeCompletionEditor(draft: String) -> (CommandTextView, CommandFocusTestWindow) {
