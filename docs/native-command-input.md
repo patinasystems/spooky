@@ -26,19 +26,24 @@ position. While the user browses previous output, the current command header and
 composer remain pinned to the bottom. Layout reserves space so the growing draft
 does not cover terminal output.
 
-The new editor, header views, and layout use AppKit and explicit callbacks.
+The native editor, controls, and layout use AppKit and explicit callbacks.
 Ghostty's upstream SwiftUI application shell is retained. This feature does not
 introduce Lookout or Observation frameworks. TextKit owns ordinary edits; host
 updates only replace text for an actual external change, such as acceptance or
 recovery, so presentation updates do not destroy selection and undo.
 
-Block identity and lifecycle are independent of the drawing framework. The
-editor and interactive controls belong in AppKit; the terminal transcript
-already uses Ghostty's Metal renderer. Simple block backgrounds, separators,
-and highlights could eventually join that existing render pass if measured
-scrolling costs justify it. The current AppKit overlays are small and redraw
-only when their content or geometry changes. Full-width backgrounds/separators
-sit below the native scrollbar, while text alone retains padding.
+Block backgrounds, separators, and metadata captions use Ghostty's existing
+Metal text pipeline and font atlas, in the same render pass as the transcript.
+There is no AppKit header painting or second Metal layer. The renderer captures
+header pins with terminal cells under the same lock, then shapes caption text
+outside the lock. Captions are cached by block ID; metadata changes request a
+normal renderer update. Full-width chrome sits below the native scrollbar.
+
+The Metal drawable stays full size. An explicit bottom inset reserves grid space
+for a growing or pinned editor, with pinned block chrome drawn inside that
+padding. The editor and interactive controls remain AppKit objects so native
+text input, selection, undo, IME, menus, and accessibility retain their platform
+behavior. These changes do not remove the upstream SwiftUI application shell.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
@@ -48,7 +53,7 @@ is the behavior reference, not a dependency on Warp's application stack.
 ## One terminal transcript, grouped into blocks
 
 Each primary prompt has a stable block ID. The shell reserves one blank terminal
-row for its AppKit header, then marks the input position. ZLE renders the accepted
+row for its GPU-rendered header, then marks the input position. ZLE renders the accepted
 command through its normal display/acceptance path. The native editor does not
 print a second command copy.
 
@@ -61,7 +66,8 @@ rather than reusing the current directory for older commands.
 The core tracks tagged OSC 133 boundaries with pins that follow terminal cells.
 The embedded API exposes their geometry, terminal cell size, cursor position,
 primary-screen state, and whether the viewport is at the live bottom. The native
-host uses those values for block chrome and editor positioning.
+host uses those values for editor positioning and cold metadata lookup. Header
+positions come directly from the renderer's frame snapshot.
 
 These are groups within a **shared, mutable grid**, not immutable terminal
 instances per command. Erase/reset and scrollback eviction can invalidate
@@ -75,12 +81,13 @@ Do not infer exact per-process output ownership from a block boundary.
 | --- | --- |
 | [`CommandTextView.swift`](../macos/Sources/Features/Command%20Input/CommandTextView.swift) | Native editing, submit/newline/IME handling, independent undo, and text measurement. |
 | [`CommandInputView.swift`](../macos/Sources/Features/Command%20Input/CommandInputView.swift) | AppKit editor/scroll-view ownership and explicit callbacks. |
-| [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | AppKit block/header presentation and inline or pinned editor placement. |
+| [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | Inline or pinned native editor placement, cursor ownership, and bottom inset. |
 | [`CommandBlockLayout.swift`](../macos/Sources/Features/Command%20Input/CommandBlockLayout.swift) | Snapshot of core geometry and immutable block metadata. |
 | [`CommandInputSession.swift`](../macos/Sources/Features/Command%20Input/CommandInputSession.swift) | Per-pane draft, acknowledgement, focus, recovery, and off-main bridge I/O. |
 | [`CommandShellStartup.swift`](../macos/Sources/Features/Command%20Input/CommandShellStartup.swift), [`native-input-startup.zsh`](../macos/Sources/Features/Command%20Input/native-input-startup.zsh) | Private bootstrap resources, normal user startup, and deferred attachment. |
 | [`native-input.zsh`](../macos/Sources/Features/Command%20Input/native-input.zsh) | ZLE submission, block markers, completion, and metadata publication after normal user startup. |
 | [`CommandBlocks.zig`](../src/terminal/CommandBlocks.zig) | ID-associated tracked pins and block lifetime within the terminal screen. |
+| [`CommandChrome.zig`](../src/renderer/CommandChrome.zig), [`generic.zig`](../src/renderer/generic.zig) | Bounded caption cache, frame-aligned header positions, atlas glyphs, and same-pass chrome drawing. |
 | [`embedded.zig`](../src/apprt/embedded.zig), [`ghostty.h`](../include/ghostty.h) | `ghostty_surface_command_layout` geometry boundary between core and host. |
 
 AppKit and session presentation state remain on `MainActor`. Recurring file I/O
@@ -130,7 +137,15 @@ The app retains the draft through that receipt and keeps its native presentation
 until the terminal has parsed this command’s output boundary, entered a
 continuation, or reached the next prompt. The viewport expands behind the draft,
 preventing the terminal block cursor from flashing before the command arrives.
-The parsed boundary survives erased or evicted display anchors. Duplicate
+Native ownership also explicitly suppresses Ghostty's rendered caret, including
+the hollow unfocused cursor and custom-shader cursor visibility. This is a
+presentation override, not a change to terminal DECTCEM. Tagged completion and
+primary-prompt markers suppress the caret before the GUI receives its readiness
+notification, including time spent in the next prompt's hooks. Execution and
+secondary-prompt markers restore normal cursor policy. Secondary editors leave
+this automatic policy armed, so coalesced filesystem events cannot miss the
+transition back to native input. Explicit terminal input remains a persistent
+override. The parsed boundary survives erased or evicted display anchors. Duplicate
 submissions are prevented, and an unknown outcome is never replayed. A ready state from the accepted generation
 cannot re-enable editing. Recovery remains copyable after a failure or shell
 exit. Unfocused panes must not claim first responder when a new prompt arrives.

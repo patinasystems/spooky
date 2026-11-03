@@ -21,6 +21,7 @@ pub const Options = @import("renderer/Options.zig");
 pub const Overlay = @import("renderer/Overlay.zig");
 pub const Thread = @import("renderer/Thread.zig");
 pub const State = @import("renderer/State.zig");
+pub const CommandChrome = @import("renderer/CommandChrome.zig");
 pub const CursorStyle = cursor.Style;
 pub const Message = message.Message;
 pub const Size = size.Size;
@@ -66,4 +67,5 @@ test {
     _ = size;
     _ = Thread;
     _ = State;
+    _ = CommandChrome;
 }

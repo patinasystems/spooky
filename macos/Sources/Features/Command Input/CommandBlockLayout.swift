@@ -30,12 +30,12 @@ struct CommandTerminalLayout: Equatable {
     var blocks: [CommandBlockAnchor] = []
 
     @MainActor
-    static func read(from surface: ghostty_surface_t) -> Self {
+    static func read(from surface: ghostty_surface_t, records: inout [ghostty_command_block_s]) -> Self? {
         var layout = ghostty_command_layout_s()
-        var records = Array(repeating: ghostty_command_block_s(), count: 128)
         let count = records.withUnsafeMutableBufferPointer {
             ghostty_surface_command_layout(surface, &layout, $0.baseAddress, UInt($0.count))
         }
+        guard layout.snapshot_valid else { return nil }
         var result = Self()
         result.primary = layout.primary
         result.atBottom = layout.viewport_at_bottom
@@ -75,4 +75,84 @@ struct CommandBlockMetadata: Equatable, Sendable {
     let elapsed: Double?
 
     var completed: Bool { status == "completed" }
+}
+
+/// Captions cross into Ghostty only when their contents change. The renderer
+/// resolves block positions from its own terminal snapshot, not GUI geometry.
+struct CommandChromePresentation: Equatable {
+    struct Row: Equatable {
+        let id: String
+        let label: String
+        let suffix: String
+        let current: Bool
+        let pinned: Bool
+    }
+
+    let enabled: Bool
+    let pinnedOffset: CGFloat
+    let backingScale: CGFloat
+    let rows: [Row]
+
+    init(layout: CommandTerminalLayout, metadata: [String: CommandBlockMetadata], currentID: String?,
+         pinnedOffset: CGFloat, recovering: Bool, backingScale: CGFloat = 1) {
+        enabled = layout.primary
+        self.pinnedOffset = pinnedOffset
+        self.backingScale = backingScale
+        var ids = Array(layout.blocks.map(\.id).prefix(127))
+        if let currentID, !ids.contains(currentID) { ids.append(currentID) }
+        rows = ids.map { id in
+            let block = metadata[id]
+            let current = id == currentID
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let cwd = block?.workingDirectory ?? "local zsh"
+            var label = cwd == home ? "~" : (cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd)
+            label = label.replacingOccurrences(of: "\n", with: "↵")
+            if let branch = block?.branch, !branch.isEmpty { label += "  ⎇ \(branch)" }
+            if recovering && current { label = "Retained draft (read only)" }
+            var suffix = ""
+            if let status = block?.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
+            if let elapsed = block?.elapsed {
+                suffix += String(format: "  %.3fs", elapsed)
+            } else if block?.status == "running" { suffix = "running" }
+            return Row(id: id, label: label, suffix: suffix, current: current,
+                       pinned: current && pinnedOffset >= 0)
+        }
+    }
+
+    @MainActor
+    func publish(to surface: ghostty_surface_t) {
+        var bytes: [UInt8] = []
+        var ranges: [(label: Range<Int>, suffix: Range<Int>)] = []
+        for row in rows {
+            let labelStart = bytes.count
+            bytes.append(contentsOf: row.label.utf8)
+            let labelEnd = bytes.count
+            bytes.append(contentsOf: row.suffix.utf8)
+            ranges.append((labelStart..<labelEnd, labelEnd..<bytes.count))
+        }
+        // Keep an address available even when every caption is empty.
+        bytes.append(0)
+        bytes.withUnsafeBufferPointer { buffer in
+            var records = rows.enumerated().map { index, row in
+                var record = ghostty_command_chrome_s()
+                withUnsafeMutableBytes(of: &record.id) { destination in
+                    for (offset, byte) in row.id.utf8.prefix(64).enumerated() { destination[offset] = byte }
+                }
+                let range = ranges[index]
+                record.label = UnsafeRawPointer(buffer.baseAddress!.advanced(by: range.label.lowerBound))
+                    .assumingMemoryBound(to: CChar.self)
+                record.label_len = UInt(range.label.count)
+                record.suffix = UnsafeRawPointer(buffer.baseAddress!.advanced(by: range.suffix.lowerBound))
+                    .assumingMemoryBound(to: CChar.self)
+                record.suffix_len = UInt(range.suffix.count)
+                record.current = row.current
+                record.pinned = row.pinned
+                return record
+            }
+            records.withUnsafeMutableBufferPointer {
+                ghostty_surface_set_command_chrome(surface, enabled, pinnedOffset, $0.baseAddress, UInt($0.count))
+            }
+        }
+        CommandInputDiagnostics.record(.chromePublication)
+    }
 }

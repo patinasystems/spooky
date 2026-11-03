@@ -76,6 +76,13 @@ pwd: std.ArrayList(u8),
 /// leave the native editor holding keyboard focus. A new Terminal starts empty.
 last_started_command_id: [65]u8 = @splat(0),
 
+/// Parsed prompt/between-command ownership for native input presentation. This
+/// closes the gaps before precmd finishes and the ready file reaches the app.
+/// It never changes terminal cursor modes, and the renderer separately gates
+/// it on the native feature and an explicit request to use terminal input.
+native_prompt_active: bool = false,
+native_prompt_id: [65]u8 = @splat(0),
+
 /// The title of the terminal as set by escape sequences (e.g. OSC 0/2).
 title: std.ArrayList(u8),
 
@@ -2844,6 +2851,15 @@ pub fn semanticPrompt(
     // Native command chrome only participates in the primary screen and only
     // for markers with an explicit identity. N already delegated to A above.
     if (self.screens.active_key == .primary) {
+        // Continuation prompts belong to the terminal even though the adapter
+        // deliberately keeps the primary command's block ID. Its P marker is
+        // untagged, so handle this before requiring an identity below.
+        if (cmd.action == .prompt_start) {
+            switch (cmd.readOption(.prompt_kind) orelse .initial) {
+                .continuation, .secondary => self.native_prompt_active = false,
+                else => {},
+            }
+        }
         const kind: @import("CommandBlocks.zig").Kind = switch (cmd.action) {
             .fresh_line_new_prompt => .header,
             .end_prompt_start_input, .end_prompt_start_input_terminate_eol => .input,
@@ -2854,6 +2870,21 @@ pub fn semanticPrompt(
         if (cmd.readOption(.aid)) |id| {
             const Blocks = @import("CommandBlocks.zig");
             if (!Blocks.validID(id)) return;
+            switch (kind) {
+                .header => {
+                    self.native_prompt_active = (cmd.readOption(.prompt_kind) orelse .initial) == .initial;
+                    self.native_prompt_id = @splat(0);
+                    @memcpy(self.native_prompt_id[0..id.len], id);
+                },
+                .output, .end => {
+                    if (std.mem.eql(u8, id, std.mem.sliceTo(&self.native_prompt_id, 0))) {
+                        // C yields to a foreground program. D returns ownership
+                        // before expensive precmd work can delay the next A.
+                        self.native_prompt_active = kind == .end;
+                    }
+                },
+                .input => {},
+            }
             if (kind == .output) {
                 self.last_started_command_id = @splat(0);
                 @memcpy(self.last_started_command_id[0..id.len], id);
@@ -5865,6 +5896,8 @@ pub fn fullReset(self: *Terminal) void {
         .xt_checksum = self.default_xt_checksum,
     };
     self.modes.reset();
+    self.native_prompt_active = false;
+    self.native_prompt_id = @splat(0);
     self.tabstops.reset(TABSTOP_INTERVAL);
     self.previous_char = null;
     self.pwd.clearRetainingCapacity();
@@ -17842,6 +17875,108 @@ test "Terminal: command blocks parsed start survives complete history eviction" 
     screen.command_blocks.prune(&screen.pages);
     try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
     try testing.expectEqualStrings("evicted", std.mem.sliceTo(&t.last_started_command_id, 0));
+}
+
+test "Terminal: native prompt ownership follows tagged primary lifecycle" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    try testing.expect(!t.native_prompt_active);
+    stream.nextSlice("\x1b]133;A;aid=prompt-1\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expectEqualStrings("prompt-1", std.mem.sliceTo(&t.native_prompt_id, 0));
+    stream.nextSlice("\x1b]133;B;aid=prompt-1\x07");
+    try testing.expect(t.native_prompt_active);
+    stream.nextSlice("\x1b]133;C;aid=prompt-1\x07");
+    try testing.expect(!t.native_prompt_active);
+    try testing.expect(t.modes.get(.cursor_visible));
+
+    // Empty commands can complete without C. D keeps native ownership across
+    // precmd without overwriting a cursor mode selected by an application.
+    stream.nextSlice("\x1b[?25l\x1b]133;A;aid=empty\x07\x1b]133;B;aid=empty\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expect(!t.modes.get(.cursor_visible));
+    stream.nextSlice("\x1b]133;D;0;aid=empty\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expect(!t.modes.get(.cursor_visible));
+}
+
+test "Terminal: native prompt ownership spans matching completion until next prompt" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=first\x07\x1b]133;C;aid=first\x07");
+    try testing.expect(!t.native_prompt_active);
+    stream.nextSlice("\x1b]133;D;0;aid=unrelated\x07");
+    try testing.expect(!t.native_prompt_active);
+    try testing.expect(t.modes.get(.cursor_visible));
+    stream.nextSlice("\x1b]133;D;0;aid=first\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expect(t.modes.get(.cursor_visible));
+    stream.nextSlice("expensive precmd output\r\n\x1b]133;A;aid=second\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expectEqualStrings("second", std.mem.sliceTo(&t.native_prompt_id, 0));
+    stream.nextSlice("\x1b]133;C;aid=second\x07");
+    try testing.expect(!t.native_prompt_active);
+    try testing.expect(t.modes.get(.cursor_visible));
+}
+
+test "Terminal: native prompt ownership yields to untagged continuation" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    for ([_][]const u8{ "s", "c" }) |kind| {
+        stream.nextSlice("\x1b]133;A;aid=continued\x07\x1b]133;B;aid=continued\x07");
+        try testing.expect(t.native_prompt_active);
+        stream.nextSlice("\x1b]133;P;k=");
+        stream.nextSlice(kind);
+        stream.nextSlice("\x07");
+        try testing.expect(!t.native_prompt_active);
+        stream.nextSlice("\x1b]133;B;aid=continued\x07");
+        try testing.expect(!t.native_prompt_active);
+    }
+    stream.nextSlice("\x1b]133;A;aid=primary\x07\x1b]133;P;k=r\x07\x1b]133;P;k=i\x07");
+    try testing.expect(t.native_prompt_active);
+}
+
+test "Terminal: native prompt ownership ignores invalid mismatched and alternate markers" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A\x07\x1b]133;A;aid=" ++ @as([65]u8, @splat('x')) ++ "\x07");
+    try testing.expect(!t.native_prompt_active);
+    stream.nextSlice("\x1b]133;A;aid=primary\x07\x1b]133;C;aid=wrong\x07\x1b]133;D;0;aid=wrong\x07");
+    try testing.expect(t.native_prompt_active);
+    stream.nextSlice("\x1b]133;C\x07\x1b]133;D;0\x07");
+    try testing.expect(t.native_prompt_active);
+
+    stream.nextSlice("\x1b[?1049h\x1b]133;A;aid=alternate\x07\x1b]133;C;aid=primary\x07\x1b]133;P;k=s\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expectEqualStrings("primary", std.mem.sliceTo(&t.native_prompt_id, 0));
+    stream.nextSlice("\x1b[?1049l\x1b]133;A;aid=new\x07\x1b]133;C;aid=primary\x07");
+    try testing.expect(t.native_prompt_active);
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.native_prompt_id, 0));
+    stream.nextSlice("\x1b]133;C;aid=new\x07");
+    try testing.expect(!t.native_prompt_active);
+}
+
+test "Terminal: native prompt ownership clears on RIS without discarding handoff receipt" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=running\x07\x1b]133;C;aid=running\x07\x1b]133;A;aid=next\x07");
+    try testing.expect(t.native_prompt_active);
+    stream.nextSlice("\x1bc");
+    try testing.expect(!t.native_prompt_active);
+    try testing.expectEqualStrings("", std.mem.sliceTo(&t.native_prompt_id, 0));
+    try testing.expectEqualStrings("running", std.mem.sliceTo(&t.last_started_command_id, 0));
+    stream.nextSlice("\x1b]133;B;aid=next\x07");
+    try testing.expect(!t.native_prompt_active);
 }
 
 test "Terminal: semantic prompt" {

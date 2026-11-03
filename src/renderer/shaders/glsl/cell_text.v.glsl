@@ -24,10 +24,13 @@ layout(location = 6) in uint glyph_bools;
 // Values `atlas` can take.
 const uint ATLAS_GRAYSCALE = 0u;
 const uint ATLAS_COLOR = 1u;
+const uint ATLAS_SOLID = 2u;
 
 // Masks for the `glyph_bools` attribute
 const uint NO_MIN_CONTRAST = 1u;
 const uint IS_CURSOR_GLYPH = 2u;
+const uint IS_COMMAND_CHROME = 4u;
+const uint IS_PINNED_COMMAND = 8u;
 
 out CellTextVertexOut {
     flat uint atlas;
@@ -70,6 +73,16 @@ void main() {
     corner.y = float(vid == 2 || vid == 3);
 
     out_data.atlas = atlas;
+    if ((glyph_bools & IS_PINNED_COMMAND) != 0) cell_pos.y = command_pinned_y;
+    if (atlas == ATLAS_SOLID) {
+        vec2 position = vec2(-grid_padding.w + screen_size.x * corner.x,
+                             cell_pos.y + float(glyph_size.y) * corner.y);
+        gl_Position = projection_matrix * vec4(position, 0.0, 1.0);
+        out_data.color = load_color(color, use_linear_blending);
+        out_data.bg_color = vec4(0.0);
+        out_data.tex_coord = vec2(0.0);
+        return;
+    }
 
     //              === Grid Cell ===
     //      +X
@@ -126,6 +139,9 @@ void main() {
             true
         );
     out_data.bg_color += global_bg * vec4(1.0 - out_data.bg_color.a);
+    if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
+        out_data.bg_color = load_color(uvec4(unpack4u8(bg_color_packed_4u8).rgb, 255u), true);
+    }
 
     // If we have a minimum contrast, we need to check if we need to
     // change the color of the text to ensure it has enough contrast
@@ -140,7 +156,7 @@ void main() {
 
     // If this cell is the cursor cell, but we're not processing
     // the cursor glyph itself, then we need to change the color.
-    if ((glyph_bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
+    if ((glyph_bools & (IS_CURSOR_GLYPH | IS_COMMAND_CHROME)) == 0 && is_cursor_pos) {
         out_data.color = load_color(unpack4u8(cursor_color_packed_4u8), use_linear_blending);
     }
 }

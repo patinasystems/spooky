@@ -43,6 +43,34 @@ pub const Size = struct {
         return self.screen.subPadding(self.padding);
     }
 
+    /// Rebuild padding from the configured values, then reserve a bottom strip
+    /// for native input. The reservation must not participate in balancing:
+    /// otherwise half of it can move above the terminal grid. The drawable
+    /// remains full size, and at least two rows remain whenever the configured
+    /// padding leaves enough room for them.
+    pub fn setPaddingWithBottomInset(
+        self: *Size,
+        explicit: Padding,
+        mode: PaddingBalance,
+        bottom_inset: u32,
+    ) void {
+        self.padding = explicit;
+        if (mode != .false) self.balancePadding(explicit, mode);
+        const available = self.terminal().height -| (self.cell.height *| 2);
+        self.padding.bottom += @min(bottom_inset, available);
+    }
+
+    /// Convert the retained logical inset at the current display scale. Keeping
+    /// logical points avoids accumulating rounding on repeated display moves.
+    pub fn scaledInset(points: f64, scale: f64) u32 {
+        if (!std.math.isFinite(points) or !std.math.isFinite(scale) or
+            points <= 0 or scale <= 0) return 0;
+        return @intFromFloat(@min(
+            @round(points * scale),
+            @as(f64, @floatFromInt(std.math.maxInt(u32))),
+        ));
+    }
+
     /// Set the padding to be balanced around the grid. The balanced
     /// padding is calculated AFTER the explicit padding is taken
     /// into account.
@@ -361,6 +389,93 @@ test "Size.balancePadding true shifts excess top to bottom" {
     try testing.expect(size.padding.top < size.padding.bottom);
     try testing.expectEqual(@as(u32, 10), size.padding.top);
     try testing.expectEqual(@as(u32, 20), size.padding.bottom);
+}
+
+test "Size native input inset follows balancing without moving top or sides" {
+    const testing = std.testing;
+    const original: Size = .{
+        .screen = .{ .width = 1090, .height = 1070 },
+        .cell = .{ .width = 20, .height = 40 },
+        .padding = .{},
+    };
+    const explicit: Padding = .{ .top = 7, .bottom = 11, .left = 2, .right = 4 };
+    for ([_]PaddingBalance{ .false, .true, .equal }) |mode| {
+        var baseline = original;
+        baseline.padding = explicit;
+        if (mode != .false) baseline.balancePadding(explicit, mode);
+        var without_inset = original;
+        without_inset.setPaddingWithBottomInset(explicit, mode, 0);
+        try testing.expectEqual(baseline, without_inset);
+        var inset = original;
+        inset.setPaddingWithBottomInset(explicit, mode, 121);
+        try testing.expectEqual(baseline.screen, inset.screen);
+        try testing.expectEqual(baseline.padding.top, inset.padding.top);
+        try testing.expectEqual(baseline.padding.left, inset.padding.left);
+        try testing.expectEqual(baseline.padding.right, inset.padding.right);
+        try testing.expectEqual(baseline.padding.bottom + 121, inset.padding.bottom);
+        try testing.expectEqual(baseline.grid().columns, inset.grid().columns);
+        try testing.expectEqual(@as(GridSize.Unit, if (mode == .false) 23 else 22), inset.grid().rows);
+
+        // Repeated layout updates must not accumulate the reservation.
+        const first = inset;
+        inset.setPaddingWithBottomInset(explicit, mode, 121);
+        try testing.expectEqual(first, inset);
+        inset.setPaddingWithBottomInset(explicit, mode, 0);
+        try testing.expectEqual(baseline, inset);
+    }
+}
+
+test "Size native input inset clamps at two rows and preserves explicit padding" {
+    const testing = std.testing;
+    var size: Size = .{
+        .screen = .{ .width = 100, .height = 100 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    const explicit: Padding = .{ .top = 11, .bottom = 17, .left = 5, .right = 9 };
+    size.setPaddingWithBottomInset(explicit, .false, std.math.maxInt(u32));
+    try testing.expectEqual(@as(u32, 49), size.padding.bottom);
+    try testing.expectEqual(@as(u32, 11), size.padding.top);
+    try testing.expectEqual(@as(GridSize.Unit, 2), size.grid().rows);
+
+    // A tiny view may already have less than two rows. The native inset does
+    // not worsen this by consuming more of the configured content area.
+    size.screen.height = 50;
+    size.setPaddingWithBottomInset(explicit, .false, 100);
+    try testing.expectEqual(explicit, size.padding);
+    try testing.expectEqual(@as(GridSize.Unit, 1), size.grid().rows);
+    size.screen.height = 0;
+    size.setPaddingWithBottomInset(explicit, .false, 100);
+    try testing.expectEqual(explicit, size.padding);
+}
+
+test "Size native input inset refreshes font config and display scale" {
+    const testing = std.testing;
+    var size: Size = .{
+        .screen = .{ .width = 1000, .height = 800 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    const points: f64 = 41.25;
+    size.setPaddingWithBottomInset(.{ .top = 4, .bottom = 6 }, .equal, Size.scaledInset(points, 1));
+    try testing.expectEqual(Padding{ .top = 10, .bottom = 51 }, size.padding);
+    try testing.expectEqual(@as(GridSize.Unit, 36), size.grid().rows);
+
+    // Retina changes every pixel dimension, including explicit padding and the
+    // requested inset. The full drawable is preserved and rows stay stable.
+    size.screen = .{ .width = 2000, .height = 1600 };
+    size.cell = .{ .width = 20, .height = 40 };
+    size.setPaddingWithBottomInset(.{ .top = 8, .bottom = 12 }, .equal, Size.scaledInset(points, 2));
+    try testing.expectEqual(Padding{ .top = 20, .bottom = 103 }, size.padding);
+    try testing.expectEqual(@as(GridSize.Unit, 36), size.grid().rows);
+    try testing.expectEqual(@as(u32, 41), Size.scaledInset(points, 1));
+
+    // A font/config update recomputes from new explicit padding rather than
+    // retaining the previously balanced inset-bearing padding.
+    size.cell.height = 50;
+    size.setPaddingWithBottomInset(.{ .top = 3, .bottom = 9 }, .false, Size.scaledInset(points, 2));
+    try testing.expectEqual(Padding{ .top = 3, .bottom = 92 }, size.padding);
+    try testing.expectEqual(@as(GridSize.Unit, 30), size.grid().rows);
 }
 
 test "Padding balanced on zero" {

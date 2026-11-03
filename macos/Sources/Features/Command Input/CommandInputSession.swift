@@ -28,13 +28,16 @@ final class CommandInputSession {
     private var pending: Pending?
     private var handoff: CommandInputHandoff?
     private var shellContext = "start"
+    private var shellOwnsInput = false
     private var terminalRequested = false
     private var recoveryVisible = false
     private var receivedFirstPrompt = false
+    private var bridgeAvailable = false
     private var failed = false
     private var ready = false
     private let launchedAt = Date()
     private var focusSequence: UInt64 = 0
+    private var geometryRecords = Array(repeating: ghostty_command_block_s(), count: 128)
 
     private(set) var draft = ""
     private(set) var status = "Starting shell…"
@@ -57,6 +60,16 @@ final class CommandInputSession {
     var canReturnToEditor: Bool { ready && pending == nil && handoff == nil && !failed }
     var isRecoveringDraft: Bool { recoveryVisible }
     var isTransferringSubmission: Bool { !failed && (pending != nil || handoff != nil) }
+    var hasNativeIntegration: Bool {
+        receivedFirstPrompt && bridgeAvailable && !failed && surfaceView?.childExitedMessage == nil
+    }
+    var prefersNativeInput: Bool {
+        // Primary ZLE can contain text entered directly through terminal input.
+        // Secondary editors already yield via parsed C/P markers. Their D/A
+        // transition must not depend on observing an intermediate state file.
+        let primaryShellEditor = shellOwnsInput && shellContext == "start"
+        return hasNativeIntegration && !terminalRequested && !primaryShellEditor
+    }
 
     private struct Pending {
         let id: String
@@ -117,9 +130,10 @@ final class CommandInputSession {
         scheduleDeadline(after: max(0.05, 5.05 - Date().timeIntervalSince(launchedAt)))
         geometryTask = Task { [weak self] in
             while !Task.isCancelled {
-                self?.refreshGeometry()
+                let active = self?.needsGeometryUpdates == true
+                if active { self?.refreshGeometry() }
                 do {
-                    try await Task.sleep(for: .milliseconds(33))
+                    try await Task.sleep(for: .milliseconds(active ? 33 : 250))
                 } catch {
                     break
                 }
@@ -283,7 +297,7 @@ final class CommandInputSession {
         return true
     }
 
-    private func receive(_ snapshot: CommandInputBridge.Snapshot) {
+    func receive(_ snapshot: CommandInputBridge.Snapshot) {
         let previous = presentationKey
         if blockMetadata != snapshot.metadata {
             blockMetadata = snapshot.metadata
@@ -319,6 +333,8 @@ final class CommandInputSession {
         }
 
         if let state = snapshot.state {
+            bridgeAvailable = true
+            shellOwnsInput = state.kind == "terminal"
             shellContext = state.context
             currentBlockID = state.blockID
             let newGeneration = generation != state.generation
@@ -348,6 +364,7 @@ final class CommandInputSession {
                     : "Terminal input · a program or shell editor owns the keyboard"
             }
         } else if receivedFirstPrompt {
+            bridgeAvailable = false
             handoff = nil
             ready = false
             editorVisible = recoveryVisible
@@ -359,6 +376,9 @@ final class CommandInputSession {
             // Slow user startup files can still attach when their prompt arrives.
             status = "Terminal input"
         }
+        // The dormant pre-startup poll runs slowly. A ready notification can
+        // place the first editor immediately instead of waiting for that tick.
+        if ready && layout.rows == 0 { refreshGeometry() }
         finishHandoffIfReady()
         if presentationKey != previous { changed() }
         if receivedFirstPrompt && pending == nil {
@@ -375,12 +395,15 @@ final class CommandInputSession {
         let draft: String
         let currentBlockID: String?
         let transferring: Bool
+        let nativeIntegration: Bool
+        let prefersNativeInput: Bool
     }
 
     private var presentationKey: Presentation {
         Presentation(status: status, editable: isEditable, visible: editorVisible,
                      focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID,
-                     transferring: isTransferringSubmission)
+                     transferring: isTransferringSubmission,
+                     nativeIntegration: hasNativeIntegration, prefersNativeInput: prefersNativeInput)
     }
 
     private func focusTerminal() {
@@ -430,11 +453,28 @@ final class CommandInputSession {
         return layout.rows > 0 && layout.rows == desired.rows && layout.columns == desired.columns
     }
 
+    private var needsGeometryUpdates: Bool {
+        Self.requiresGeometryUpdates(
+            receivedFirstPrompt: receivedFirstPrompt,
+            transferring: isTransferringSubmission,
+            windowVisible: surfaceView?.window?.occlusionState.contains(.visible) == true)
+    }
+
+    static func requiresGeometryUpdates(receivedFirstPrompt: Bool, transferring: Bool, windowVisible: Bool) -> Bool {
+        // An accepted receipt precedes the parsed command boundary. Keep
+        // observing that boundary even if the user hides the window during
+        // submission, so foreground programs receive the keyboard on return.
+        receivedFirstPrompt && (transferring || windowVisible)
+    }
+
     private func refreshGeometry() {
         guard let surface = surfaceView?.surface else { return }
         let diagnostic = CommandInputDiagnostics.begin(.geometrySnapshot)
         defer { CommandInputDiagnostics.end(diagnostic) }
-        let updated = CommandTerminalLayout.read(from: surface)
+        guard let updated = CommandTerminalLayout.read(from: surface, records: &geometryRecords) else {
+            CommandInputDiagnostics.record(.geometryBusy)
+            return
+        }
         guard updated != layout || !hasEditorFont else { return }
         CommandInputDiagnostics.record(.geometryChanged)
         if updated.blocks.map(\.id) != layout.blocks.map(\.id) {
@@ -482,7 +522,7 @@ private enum BridgeError: LocalizedError {
 
 /// All recurring file I/O is off MainActor. Same-directory atomic renames publish
 /// complete records. The directory is private and unique to one launched shell.
-private actor CommandInputBridge {
+actor CommandInputBridge {
     struct State: Sendable {
         let kind: String
         let generation: String

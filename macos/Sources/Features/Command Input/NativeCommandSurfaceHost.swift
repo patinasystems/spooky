@@ -1,16 +1,21 @@
 import AppKit
 import GhosttyKit
 
-/// AppKit layout around one real terminal surface. Headers occupy shell-reserved
-/// rows; output, ANSI handling, selection, and alternate screens stay in Ghostty.
+/// AppKit input layout around one full-size Metal surface. Ghostty renders
+/// command chrome and output together; TextKit owns native editing.
 @MainActor
 final class NativeCommandSurfaceHost: NSView {
     private let surfaceView: Ghostty.SurfaceView
     private let terminalView: SurfaceScrollView
     private let session: CommandInputSession
     private let editor = CommandInputView(frame: .zero)
-    private let headers = CommandHeaderOverlay(frame: .zero)
-    private let pinnedHeader = CommandHeaderOverlay(frame: .zero)
+    private var chromePresentation: CommandChromePresentation?
+    private struct CursorPresentation: Equatable {
+        let enabled: Bool
+        let terminalRequested: Bool
+        let suppressed: Bool
+    }
+    private var cursorPresentation: CursorPresentation?
     private let notice = NSTextField(wrappingLabelWithString: "")
     private let editButton = NSButton(title: "Edit Command", target: nil, action: nil)
     private let terminalButton = NSButton(title: "Use Terminal", target: nil, action: nil)
@@ -28,9 +33,8 @@ final class NativeCommandSurfaceHost: NSView {
         super.init(frame: NSRect(origin: .zero, size: size))
         wantsLayer = true
         clipsToBounds = true
-        [terminalView, pinnedHeader, editor, notice, editButton, terminalButton, draftButton]
+        [terminalView, editor, notice, editButton, terminalButton, draftButton]
             .forEach { addSubview($0) }
-        terminalView.installViewportOverlay(headers)
         notice.font = .systemFont(ofSize: 11)
         notice.isSelectable = true
         for button in [editButton, terminalButton, draftButton] {
@@ -78,6 +82,16 @@ final class NativeCommandSurfaceHost: NSView {
         synchronize()
     }
 
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        // Let the child surface publish its new core scale first. Logical
+        // bounds may be unchanged when moving between 1x and 2x displays.
+        DispatchQueue.main.async { [weak self] in
+            self?.chromePresentation = nil
+            self?.synchronize()
+        }
+    }
+
     private var canFocusEditor: Bool {
         guard let window, window.isKeyWindow else { return false }
         if let controller = window.windowController as? BaseTerminalController,
@@ -100,16 +114,28 @@ final class NativeCommandSurfaceHost: NSView {
         // Recovery must remain selectable even when no primary prompt exists.
         let browsing = recovering || (editing && !geometry.atBottom)
         let reserved = editing && !transferring ? (browsing ? height + line : max(0, height - line)) : 0
-        let terminalHeight = max(line * 2, bounds.height - reserved)
         let x = browsing ? geometry.paddingLeft : geometry.cursorX
         let y = browsing ? max(0, bounds.height - height)
             : min(max(geometry.paddingTop, geometry.cursorY), max(0, bounds.height - height))
         let shown = editing && (geometry.cursorValid || browsing)
 
+        // Set before resizing/focusing: an unfocused terminal otherwise draws
+        // a hollow caret that can move beyond the editor during PTY expansion.
+        if let surface = surfaceView.surface {
+            let cursor = CursorPresentation(enabled: session.hasNativeIntegration,
+                                            terminalRequested: !session.prefersNativeInput,
+                                            suppressed: session.prefersNativeInput && ((shown && !recovering) || transferring))
+            if cursor != cursorPresentation {
+                ghostty_surface_set_native_input_cursor(surface, cursor.enabled, cursor.terminalRequested, cursor.suppressed)
+                cursorPresentation = cursor
+            }
+            ghostty_surface_set_native_input_inset(surface, reserved)
+        }
+
         background = configColor("background", fallback: .black)
         let foreground = configColor("foreground", fallback: .textColor)
         layer?.backgroundColor = background.cgColor
-        let terminalFrame = NSRect(x: 0, y: 0, width: bounds.width, height: terminalHeight)
+        let terminalFrame = bounds
         if terminalView.frame != terminalFrame {
             terminalView.frame = terminalFrame
             terminalView.needsLayout = true
@@ -118,17 +144,15 @@ final class NativeCommandSurfaceHost: NSView {
         // compare applied terminal dimensions with the requested surface size.
         terminalView.layoutSubtreeIfNeeded()
 
-        headers.frame = NSRect(x: 0, y: 0, width: bounds.width, height: terminalHeight)
-        headers.rows = geometry.primary ? geometry.blocks.filter(\.hasHeader).map {
-            CommandHeaderOverlay.Row(y: $0.headerY, metadata: session.blockMetadata[$0.id],
-                                     current: $0.id == session.currentBlockID)
-        } : []
-        headers.configure(line: line, padding: geometry.paddingLeft, foreground: foreground, background: background)
-        pinnedHeader.frame = NSRect(x: 0, y: max(0, y - line), width: bounds.width, height: line)
-        pinnedHeader.isHidden = !browsing
-        pinnedHeader.rows = [.init(y: 0, metadata: session.currentBlockID.flatMap { session.blockMetadata[$0] },
-                                  current: true, title: recovering ? "Retained draft (read only)" : nil)]
-        pinnedHeader.configure(line: line, padding: geometry.paddingLeft, foreground: foreground, background: background)
+        let chrome = CommandChromePresentation(
+            layout: geometry, metadata: session.blockMetadata, currentID: session.currentBlockID,
+            pinnedOffset: browsing && !transferring ? height + line : -1,
+            recovering: recovering,
+            backingScale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)).height)
+        if chrome != chromePresentation, let surface = surfaceView.surface {
+            chrome.publish(to: surface)
+            chromePresentation = chrome
+        }
 
         if !shown && window?.firstResponder === editor.textView {
             window?.makeFirstResponder(surfaceView)
@@ -184,82 +208,4 @@ final class NativeCommandSurfaceHost: NSView {
     @objc private func editCommand() { session.useEditor() }
     @objc private func useTerminal() { session.useTerminal() }
     @objc private func viewDraft() { session.showRecoveryDraft() }
-}
-
-/// Non-interactive paint over the deliberately blank prompt-header rows. Mouse
-/// gestures continue to the underlying terminal, including output selection.
-@MainActor
-private final class CommandHeaderOverlay: NSView {
-    struct Row: Equatable {
-        let y: CGFloat
-        let metadata: CommandBlockMetadata?
-        let current: Bool
-        var title: String?
-    }
-    var rows: [Row] = []
-    private var renderedRows: [Row] = []
-    private var renderedSize: CGSize = .zero
-    private var line: CGFloat = 18
-    private var padding: CGFloat = 0
-    private var foreground = NSColor.textColor
-    private var background = NSColor.black
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func configure(line: CGFloat, padding: CGFloat, foreground: NSColor, background: NSColor) {
-        guard rows != renderedRows || bounds.size != renderedSize || self.line != line
-            || self.padding != padding || self.foreground != foreground || self.background != background else { return }
-        renderedRows = rows
-        renderedSize = bounds.size
-        self.line = line
-        self.padding = padding
-        self.foreground = foreground
-        self.background = background
-        CommandInputDiagnostics.record(.headerInvalidation)
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let measurement = CommandInputDiagnostics.begin(.headerDraw)
-        defer { CommandInputDiagnostics.end(measurement) }
-        for row in rows where row.y + line > 0 && row.y < bounds.height {
-            // The background and separator are full bleed. Only text reserves
-            // padding and scrollbar space; the scroll view draws its scroller
-            // above this overlay so the thumb remains uninterrupted.
-            let rightInset = max(padding, NSScroller.scrollerWidth(for: .regular, scrollerStyle: .overlay))
-            let rect = NSRect(x: padding, y: row.y,
-                              width: max(0, bounds.width - padding - rightInset), height: line)
-            background.setFill()
-            NSRect(x: 0, y: row.y, width: bounds.width, height: line).fill()
-            foreground.withAlphaComponent(0.16).setFill()
-            NSRect(x: 0, y: row.y, width: bounds.width, height: 0.5).fill()
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.lineBreakMode = .byTruncatingMiddle
-            let font = NSFont.monospacedSystemFont(ofSize: max(9, line * 0.66), weight: .regular)
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: font, .foregroundColor: foreground.withAlphaComponent(row.current ? 0.7 : 0.5),
-                .paragraphStyle: paragraph
-            ]
-            var suffix = ""
-            if let status = row.metadata?.exitStatus { suffix += status == 0 ? "✓" : "exit \(status)" }
-            if let elapsed = row.metadata?.elapsed {
-                suffix += String(format: "  %.3fs", elapsed)
-            } else if row.metadata?.status == "running" { suffix = "running" }
-            let rightWidth = (suffix as NSString).size(withAttributes: attributes).width
-            let textY = rect.minY + max(1, (line - font.ascender + font.descender) / 2)
-            (suffix as NSString).draw(at: NSPoint(x: rect.maxX - rightWidth - 2, y: textY), withAttributes: attributes)
-            var label = row.title ?? directoryLabel(row.metadata?.workingDirectory)
-            if let branch = row.metadata?.branch, !branch.isEmpty { label += "  ⎇ \(branch)" }
-            (label as NSString).draw(in: NSRect(x: rect.minX + 2, y: textY,
-                                               width: max(0, rect.width - rightWidth - 14), height: line),
-                                    withAttributes: attributes)
-        }
-    }
-
-    private func directoryLabel(_ cwd: String?) -> String {
-        guard let cwd, !cwd.isEmpty else { return "local zsh" }
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let display = cwd == home ? "~" : (cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd)
-        return display.replacingOccurrences(of: "\n", with: "↵")
-    }
 }

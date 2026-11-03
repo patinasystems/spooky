@@ -546,6 +546,7 @@ typedef struct {
 } ghostty_command_block_s;
 
 typedef struct {
+  bool snapshot_valid; // False when the parser owns the mutex; retry later.
   bool primary;
   bool viewport_at_bottom;
   bool cursor_valid; // Cursor is within the visible primary grid.
@@ -561,6 +562,18 @@ typedef struct {
   // Empty before any C; preserved across screen clear, history eviction, RIS.
   char last_started_id[65];
 } ghostty_command_layout_s;
+
+// Metadata is copied synchronously and bounded by the implementation. Header
+// positions always come from terminal pins, never GUI pixel coordinates.
+typedef struct {
+  char id[65];
+  const char* label;
+  uintptr_t label_len;
+  const char* suffix;
+  uintptr_t suffix_len;
+  bool current;
+  bool pinned;
+} ghostty_command_chrome_s;
 
 // Config types
 
@@ -1221,6 +1234,9 @@ GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);
 GHOSTTY_API void ghostty_surface_set_focus(ghostty_surface_t, bool);
+// Suppress the terminal caret without changing terminal modes or focus.
+GHOSTTY_API void ghostty_surface_set_native_input_cursor(ghostty_surface_t,
+    bool enabled, bool terminal_requested, bool suppressed);
 GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
@@ -1228,6 +1244,9 @@ GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
 // always filled; blocks may be NULL when capacity is zero. No borrowed pointers.
 GHOSTTY_API uintptr_t ghostty_surface_command_layout(ghostty_surface_t,
     ghostty_command_layout_s*, ghostty_command_block_s*, uintptr_t capacity);
+GHOSTTY_API void ghostty_surface_set_command_chrome(ghostty_surface_t, bool enabled,
+    double pinned_offset_from_bottom, const ghostty_command_chrome_s*, uintptr_t count);
+GHOSTTY_API void ghostty_surface_set_native_input_inset(ghostty_surface_t, double bottom);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,

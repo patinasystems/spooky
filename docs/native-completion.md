@@ -245,12 +245,12 @@ dialog to every Tab press.
 [zsh completion functions](https://zsh.sourceforge.io/Doc/Release/Completion-System.html))
 
 **Verification status.** The recorded milestone checks passed 49 PTY tests and
-45 targeted Swift tests. The PTY suite covers normal startup files, user
+55 targeted Swift test cases. The PTY suite covers normal startup files, user
 completion configuration and hooks, history, shell-state inheritance, paths
 and quoting, multiline Unicode and middle-caret completion, request identity,
 dynamic-syntax rejection, output isolation, bounds, and ordinary submission.
 The Swift suite includes 30 native editor tests, six completion bridge tests,
-four file-event tests, three submission-handoff tests, and two startup-resource
+four file-event tests, thirteen submission-handoff/chrome cases, and two startup-resource
 tests. It covers undoable acceptance, menu key routing,
 Unicode boundaries, stale replies, cancellation, and focus. Live app checks
 passed for unique path completion and undo, multiple-candidate keyboard

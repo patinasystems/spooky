@@ -3,6 +3,96 @@
 These measurements cover the prototype's native input and shell bridge. They do
 not establish terminal rendering throughput or a general efficiency claim.
 
+## Metal command chrome
+
+The former header views painted in AppKit above Ghostty's Metal surface. Their
+equality guard avoided idle and typing redraws, but their positions arrived from
+a 33 ms GUI poll, independently of the terminal frame. That could make header
+motion lag terminal scrolling. The editor also relied on covering Ghostty's
+unfocused hollow cursor; it never disabled that rendered caret.
+
+Command chrome now uses the existing renderer snapshot, text pipeline, and font
+atlas. Metadata crosses the API only when captions or presentation change; core
+pins determine header positions. Native input reserves bottom padding inside
+the same drawable. Explicit native cursor ownership masks both regular cursor
+instances and custom-shader visibility, without rewriting terminal modes.
+
+This removes AppKit header painting and independent header positioning. It does
+not make custom UI free: caption shaping/cache maintenance, an additional text
+batch, native TextKit layout, and shell-bridge I/O remain. No general throughput
+or stock-Ghostty parity claim follows from sharing its renderer.
+
+The remaining GUI geometry snapshot uses `tryLock` and retries a busy parser
+later, reuses its C record buffer, and skips the fast loop in idle occluded windows
+or before native shell integration attaches. An in-flight submission keeps
+geometry checks active until the parsed handoff completes, even while hidden.
+Visible metadata discovery still
+uses bounded block traversal; completed captions are cached by the renderer.
+
+Before this change, the running normal-startup Spooky build (`5e80220c7` sources,
+executable SHA-256
+`9f8702f5b300a48a7dcc6798386762f80dce4e711a13f0c92a55be030c87cce9`)
+was sampled for 15 intervals on the same M4 Max. Median CPU was 0.5% of one core,
+maximum 0.8%, RSS 166,416 KiB, and sampled footprint 84.5 MiB. Window visibility
+and workload were not controlled; this is context, not a matched benchmark.
+Local evidence:
+`/var/folders/3b/r63l28p928v2brw79bnfzv9m0000gn/T/ghostty-blocks-diagnostics-f4_twe4j/summary.json`.
+
+### Computer-use stress observations
+
+The first Metal candidate was exercised through its actual native window with
+12,000 ANSI-colored, Unicode output lines that wrapped to roughly 24,000 screen
+rows, then 20 separate native-editor submissions producing 40 output lines each.
+Large wheel-scroll changes preserved a pinned multiline draft. Primary `read`,
+alternate-screen input, incomplete syntax, cancellation, and returning to native
+editing were also exercised. These are correctness observations, not frame-time
+measurements. The user continued using the Mac; unavailable-window errors and
+occluded/cached screenshots interrupted attempts at sustained wheel scrolling.
+Those interrupted attempts are not counted as completed stress tests.
+
+The sampled candidate executable SHA-256 was
+`251680d01ce8e68da95e19579eb84a4057066e08c9d08c5a095f82b3cc551a6c`.
+It predates the final Swift ownership-notification corrections discovered during
+review. Each completed capture contains 30 CPU intervals; values are percentages
+of one CPU core. Foreground visibility and pauses between actions were uncontrolled.
+
+| Capture | CPU median / mean / peak | RSS start → end |
+| --- | --- | --- |
+| Hidden/activation | 0.7 / 1.81 / 14.2% | 187.9 → 193.9 MiB |
+| Quiet interval between actions | 0.2 / 0.147 / 0.4% | 220.0 → 220.0 MiB |
+| UI submission/scroll bursts | 0.7 / 2.497 / 12.5% | 235.2 → 229.8 MiB |
+
+Sampled stacks showed no renderer deadlock. These captures do not establish
+scrolling throughput, latency percentiles, leak freedom, or stock-Ghostty parity.
+Local evidence is under `/tmp/spooky-rendercheck-stress-first`,
+`/tmp/spooky-rendercheck-stress-visible`, and `/tmp/spooky-rendercheck-stress-bursts`.
+A later idle capture was interrupted by quitting the test app for a rebuild and
+is excluded from the table. The original user terminal was preserved throughout.
+
+A subsequent live pass exercised an 80-line native draft, replacement across
+three lines, undo, redo, copy/paste, submission, and unique-path Tab completion.
+Continuation completion and Ctrl+C cancellation returned to native editing.
+It also exposed a real occlusion bug: a submitted `vared` kept its disabled native
+draft while background polling waited for visibility before observing the parsed
+command boundary. In-flight transfers now continue geometry checks while hidden;
+the fast loop becomes dormant again after the handoff. Regression tests cover
+the owning command boundary, secondary editors, and alternate-screen handoff.
+
+After that correction, `vared` and alternate-screen input completed without
+manual mode switching. A dense run verified 20 additional short command blocks
+and completed 40 alternating three-page wheel gestures with a two-line draft
+preserved. Its screenshot exposed space-padded history rows being mistaken for
+visible output, which hid their headers. Header visibility now accepts plain
+spaces while preserving actual glyphs, combining clusters, backgrounds, and
+decorations. A terminal-driven core regression covers these distinctions.
+
+The corrected candidate (`c17546f66eae2de443d27d836a6cbc53fb038a1604c1bdce9c3df41b5b66998a`)
+then verified 21 fresh command blocks, another 40 alternating three-page wheel
+gestures, and successful submission of the preserved multiline draft. Captures
+showed the completed headers, metadata, and full-width separators restored.
+All 104 targeted core tests and 55 native Swift test cases passed. No high-speed
+frame recording or matched stock-Ghostty performance comparison was taken.
+
 ## Instrumented bridge baseline
 
 2026-11-02, macOS 27.0.1, Apple M4 Max, 16 CPU cores, 128 GiB RAM. Candidate

@@ -29,6 +29,17 @@ inspector: ?*Inspector = null,
 /// a future exercise.
 preedit: ?Preedit = null,
 
+/// The native command editor owns the insertion caret. This presentation state
+/// is independent of focus and DECTCEM, and protected by the frame mutex.
+native_input_cursor_suppressed: bool = false,
+/// Native prompt ownership can suppress the cursor as soon as OSC A arrives,
+/// before the asynchronous GUI readiness notification. Explicit terminal input
+/// disables that policy without changing the shell's cursor modes.
+native_input_enabled: bool = false,
+native_input_terminal_requested: bool = false,
+/// Captions only; positions are resolved from terminal pins by the renderer.
+command_chrome: renderer.CommandChrome = .{},
+
 /// Mouse state. This only contains state relevant to what renderers
 /// need about the mouse.
 mouse: Mouse = .{},

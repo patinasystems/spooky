@@ -1560,6 +1560,7 @@ pub const CAPI = struct {
     };
 
     const CommandLayout = extern struct {
+        snapshot_valid: bool,
         primary: bool,
         viewport_at_bottom: bool,
         cursor_valid: bool,
@@ -1572,6 +1573,16 @@ pub const CAPI = struct {
         cursor_x: f64,
         cursor_y: f64,
         last_started_id: [65]u8,
+    };
+
+    const CommandChrome = extern struct {
+        id: [65]u8,
+        label: ?[*]const u8,
+        label_len: usize,
+        suffix: ?[*]const u8,
+        suffix_len: usize,
+        current: bool,
+        pinned: bool,
     };
 
     // ghostty_clipboard_content_s
@@ -2051,11 +2062,15 @@ pub const CAPI = struct {
         const padding_left = @as(f64, @floatFromInt(size.padding.left)) / scale.x;
         const padding_top = @as(f64, @floatFromInt(size.padding.top)) / scale.y;
 
-        core.renderer_state.mutex.lockUncancelable(global.io());
+        layout.snapshot_valid = false;
+        // Geometry is advisory. Never block the GUI behind a hot PTY parser;
+        // terminal chrome itself is snapshotted by the renderer's normal path.
+        if (!core.renderer_state.mutex.tryLock()) return 0;
         defer core.renderer_state.mutex.unlock(global.io());
         const term = core.renderer_state.terminal;
         const screen = term.screens.active;
         layout.* = .{
+            .snapshot_valid = true,
             .primary = term.screens.active_key == .primary,
             .viewport_at_bottom = screen.viewportIsBottom(),
             .cursor_valid = false,
@@ -2105,6 +2120,52 @@ pub const CAPI = struct {
         return written;
     }
 
+    /// Captions cross the GUI boundary only when metadata changes. The normal
+    /// renderer snapshot resolves their terminal anchors in the same frame.
+    export fn ghostty_surface_set_command_chrome(
+        surface: *Surface,
+        enabled: bool,
+        pinned_offset_from_bottom: f64,
+        entries: ?[*]const CommandChrome,
+        count: usize,
+    ) void {
+        if (count > 128 or (count > 0 and entries == null)) return;
+        if (!std.math.isFinite(pinned_offset_from_bottom)) return;
+        var inputs: [128]renderer.CommandChrome.Input = undefined;
+        for (0..count) |i| {
+            const entry = entries.?[i];
+            if ((entry.label_len > 0 and entry.label == null) or
+                (entry.suffix_len > 0 and entry.suffix == null)) return;
+            inputs[i] = .{
+                .id = std.mem.sliceTo(&entries.?[i].id, 0),
+                .label = if (entry.label) |p| p[0..@min(entry.label_len, 512)] else "",
+                .suffix = if (entry.suffix) |p| p[0..@min(entry.suffix_len, 128)] else "",
+                .current = entry.current,
+                .pinned = entry.pinned,
+            };
+        }
+        const core = &surface.core_surface;
+        const state = &core.renderer_state;
+        const offset: f32 = @floatCast(@min(pinned_offset_from_bottom, 1_000_000) * surface.content_scale.y);
+        state.mutex.lockUncancelable(global.io());
+        const changed = state.command_chrome.update(core.alloc, enabled, offset, inputs[0..count]) catch |err| {
+            state.mutex.unlock(global.io());
+            log.err("error updating command chrome err={}", .{err});
+            return;
+        };
+        state.mutex.unlock(global.io());
+        if (changed) surface.refresh();
+    }
+
+    /// Reserve native UI inside the existing Metal drawable's bottom padding.
+    export fn ghostty_surface_set_native_input_inset(surface: *Surface, bottom: f64) void {
+        if (!std.math.isFinite(bottom) or bottom < 0) return;
+        const pixels: u32 = @intFromFloat(@min(bottom * surface.content_scale.y, 1_000_000));
+        surface.core_surface.setNativeInputInset(pixels) catch |err| {
+            log.err("error updating native input inset err={}", .{err});
+        };
+    }
+
     /// Returns the PID of the foreground process for the surface PTY.
     export fn ghostty_surface_foreground_pid(surface: *Surface) u64 {
         return surface.core_surface.getProcessInfo(.foreground_pid) orelse 0;
@@ -2136,6 +2197,21 @@ pub const CAPI = struct {
     /// Update the focused state of a surface.
     export fn ghostty_surface_set_focus(surface: *Surface, focused: bool) void {
         surface.focusCallback(focused);
+    }
+
+    /// Focus loss alone draws a hollow terminal cursor. Native editing instead
+    /// overrides presentation without altering the application's DECTCEM mode.
+    export fn ghostty_surface_set_native_input_cursor(surface: *Surface, enabled: bool, terminal_requested: bool, suppressed: bool) void {
+        const state = &surface.core_surface.renderer_state;
+        state.mutex.lockUncancelable(global.io());
+        const changed = state.native_input_cursor_suppressed != suppressed or
+            state.native_input_enabled != enabled or
+            state.native_input_terminal_requested != terminal_requested;
+        state.native_input_cursor_suppressed = suppressed;
+        state.native_input_enabled = enabled;
+        state.native_input_terminal_requested = terminal_requested;
+        state.mutex.unlock(global.io());
+        if (changed) surface.refresh();
     }
 
     /// Update the occlusion state of a surface.

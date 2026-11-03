@@ -24,6 +24,7 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  float command_pinned_y;
 };
 
 //-------------------------------------------------------------------
@@ -512,6 +513,7 @@ fragment float4 cell_bg_fragment(
 enum CellTextAtlas : uint8_t {
   ATLAS_GRAYSCALE = 0u,
   ATLAS_COLOR = 1u,
+  ATLAS_SOLID = 2u,
 };
 
 // We use a packed struct of bools for misc properties of the glyph.
@@ -520,6 +522,8 @@ enum CellTextBools : uint8_t {
   NO_MIN_CONTRAST = 1u,
   // This is the cursor glyph.
   IS_CURSOR_GLYPH = 2u,
+  IS_COMMAND_CHROME = 4u,
+  IS_PINNED_COMMAND = 8u,
 };
 
 struct CellTextVertexIn {
@@ -582,6 +586,16 @@ vertex CellTextVertexOut cell_text_vertex(
 
   CellTextVertexOut out;
   out.atlas = in.atlas;
+  if ((in.bools & IS_PINNED_COMMAND) != 0) cell_pos.y = uniforms.command_pinned_y;
+  if (in.atlas == ATLAS_SOLID) {
+    float2 position = float2(-uniforms.grid_padding.w + uniforms.screen_size.x * corner.x,
+                            cell_pos.y + float(in.glyph_size.y) * corner.y);
+    out.position = uniforms.projection_matrix * float4(position, 0.0, 1.0);
+    out.color = load_color(in.color, uniforms.use_display_p3, uniforms.use_linear_blending);
+    out.bg_color = float4(0.0);
+    out.tex_coord = float2(0.0);
+    return out;
+  }
 
   //              === Grid Cell ===
   //      +X
@@ -646,6 +660,9 @@ vertex CellTextVertexOut cell_text_vertex(
     true
   );
   out.bg_color += global_bg * (1.0 - out.bg_color.a);
+  if ((in.bools & IS_COMMAND_CHROME) != 0) {
+    out.bg_color = load_color(uchar4(uniforms.bg_color.rgb, 255), uniforms.use_display_p3, true);
+  }
 
   // If we have a minimum contrast, we need to check if we need to
   // change the color of the text to ensure it has enough contrast
@@ -664,7 +681,7 @@ vertex CellTextVertexOut cell_text_vertex(
 
   // If this cell is the cursor cell, but we're not processing
   // the cursor glyph itself, then we need to change the color.
-  if ((in.bools & IS_CURSOR_GLYPH) == 0 && is_cursor_pos) {
+  if ((in.bools & (IS_CURSOR_GLYPH | IS_COMMAND_CHROME)) == 0 && is_cursor_pos) {
     out.color = load_color(
       uniforms.cursor_color,
       uniforms.use_display_p3,
@@ -688,6 +705,7 @@ fragment float4 cell_text_fragment(
   );
 
   switch (in.atlas) {
+    case ATLAS_SOLID: return in.color;
     default:
     case ATLAS_GRAYSCALE: {
       // Our input color is always linear.

@@ -5,7 +5,8 @@ blocks, native selection and undo, and zsh-backed Tab completion.
 
 Spooky loads your normal terminal configuration and zsh startup files. The
 native editor is enabled by default; other configured shells and explicit
-commands retain ordinary terminal input. All custom UI uses AppKit.
+commands retain ordinary terminal input. Block chrome uses Ghostty's Metal
+renderer; editing and interactive controls use AppKit.
 
 [Build and run Spooky](prototype/native-input/README.md) ·
 [Implementation](docs/native-command-input.md) ·

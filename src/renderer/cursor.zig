@@ -29,6 +29,7 @@ pub const StyleOptions = struct {
     preedit: bool = false,
     focused: bool = false,
     blink_visible: bool = false,
+    native_input_suppressed: bool = false,
 };
 
 /// Returns the cursor style to use for the current render state or null
@@ -40,6 +41,11 @@ pub fn style(
     // Note the order of conditionals below is important. It represents
     // a priority system of how we determine what state overrides cursor
     // visibility and style.
+
+    // The native command editor owns the caret while its input is visible.
+    // This is presentation state, independent of terminal cursor modes, and
+    // takes priority even over the preedit and password-input indicators.
+    if (opts.native_input_suppressed) return null;
 
     // The cursor must be visible in the viewport to be rendered.
     if (state.cursor.viewport == null) return null;
@@ -65,6 +71,69 @@ pub fn style(
 
     // Otherwise, we use whatever style the terminal wants.
     return .fromTerminal(state.cursor.visual_style);
+}
+
+test "cursor: native input suppression overrides all visual states" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var term: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 10, .rows = 10 });
+    defer term.deinit(alloc);
+    term.modes.set(.cursor_visible, true);
+    term.modes.set(.cursor_blinking, true);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    for ([_]bool{ false, true }) |password_input| {
+        term.flags.password_input = password_input;
+        try state.update(alloc, &term);
+        for ([_]bool{ false, true }) |preedit| {
+            for ([_]bool{ false, true }) |focused| {
+                for ([_]bool{ false, true }) |blink_visible| {
+                    try testing.expect(style(&state, .{
+                        .preedit = preedit,
+                        .focused = focused,
+                        .blink_visible = blink_visible,
+                        .native_input_suppressed = true,
+                    }) == null);
+                }
+            }
+        }
+    }
+}
+
+test "cursor: releasing native suppression preserves terminal cursor modes" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var term: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 10, .rows = 10 });
+    defer term.deinit(alloc);
+    term.screens.active.cursor.cursor_style = .bar;
+    term.modes.set(.cursor_visible, true);
+    term.modes.set(.cursor_blinking, true);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &term);
+    const suppressed: StyleOptions = .{
+        .focused = true,
+        .blink_visible = true,
+        .native_input_suppressed = true,
+    };
+    const released: StyleOptions = .{ .focused = true, .blink_visible = true };
+    try testing.expect(style(&state, released) == .bar);
+    try testing.expect(style(&state, suppressed) == null);
+    try testing.expect(term.modes.get(.cursor_visible));
+    try testing.expect(term.modes.get(.cursor_blinking));
+    try testing.expect(state.cursor.visible);
+    try testing.expect(style(&state, released) == .bar);
+    try testing.expect(style(&state, .{ .focused = false }) == .block_hollow);
+
+    // An application that hid its own cursor must keep it hidden when native
+    // presentation releases ownership. Suppression never rewrites DECTCEM.
+    term.modes.set(.cursor_visible, false);
+    try state.update(alloc, &term);
+    try testing.expect(style(&state, suppressed) == null);
+    try testing.expect(style(&state, released) == null);
+    try testing.expect(!term.modes.get(.cursor_visible));
 }
 
 test "cursor: default uses configured style" {

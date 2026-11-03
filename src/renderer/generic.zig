@@ -174,6 +174,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells goes into a separate shader.
         cells: cellpkg.Contents,
 
+        // Command decoration uses the same atlas/pipeline as terminal glyphs,
+        // but owns a separate buffer so it never alters cached VT cell rows.
+        command_cells: std.ArrayList(shaderpkg.CellText) = .empty,
+        command_cells_rebuilt: bool = false,
+        command_chrome_dirty: bool = true,
+        command_chrome_revision: u64 = 0,
+        native_input_cursor_suppressed: bool = false,
+        command_caption_cache: std.AutoArrayHashMapUnmanaged([65]u8, CommandCaption) = .{},
+        command_scratch: ?terminal.Terminal = null,
+        command_scratch_state: terminal.RenderState = .empty,
+
         /// Set to true after rebuildCells is called. This can be used
         /// to determine if any possible changes have been made to the
         /// cells for the draw call.
@@ -353,6 +364,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         };
 
+        const CommandCaption = struct {
+            metadata: renderer.CommandChrome.Metadata,
+            columns: u16,
+            glyphs: std.ArrayList(shaderpkg.CellText),
+        };
+
         /// State we need duplicated for every frame. Any state that could be
         /// in a data race between the GPU and CPU while a frame is being drawn
         /// should be in this struct.
@@ -365,6 +382,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         const FrameState = struct {
             uniforms: UniformBuffer,
             cells: CellTextBuffer,
+            command_cells: CellTextBuffer,
             cells_bg: CellBgBuffer,
 
             grayscale: Texture,
@@ -407,6 +425,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // huge concern.
                 var cells = try CellTextBuffer.init(api.fgBufferOptions(), 1);
                 errdefer cells.deinit();
+                var command_cells = try CellTextBuffer.init(api.fgBufferOptions(), 1);
+                errdefer command_cells.deinit();
                 var cells_bg = try CellBgBuffer.init(api.bgBufferOptions(), 1);
                 errdefer cells_bg.deinit();
 
@@ -448,6 +468,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return .{
                     .uniforms = uniforms,
                     .cells = cells,
+                    .command_cells = command_cells,
                     .cells_bg = cells_bg,
                     .bg_image_buffer = bg_image_buffer,
                     .grayscale = grayscale,
@@ -461,6 +482,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.target.deinit();
                 self.uniforms.deinit();
                 self.cells.deinit();
+                self.command_cells.deinit();
                 self.cells_bg.deinit();
                 self.grayscale.deinit();
                 self.color.deinit();
@@ -863,6 +885,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             self.cells.deinit(self.alloc);
+            self.command_cells.deinit(self.alloc);
+            self.clearCommandCaptionCache();
+            self.command_caption_cache.deinit(self.alloc);
+            self.command_scratch_state.deinit(self.alloc);
+            if (self.command_scratch) |*scratch| scratch.deinit(self.alloc);
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
@@ -1305,6 +1332,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.visible and
                 // Only vsync if we have cell or image changes or animation
                 (self.cells_rebuilt or
+                    self.command_cells_rebuilt or
                     self.images_rebuilt or
                     self.animationWake() != null);
 
@@ -1361,6 +1389,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Caller must hold the draw mutex.
         fn updateFontGridUniforms(self: *Self) void {
+            self.clearCommandCaptionCache();
             self.uniforms.cell_size = .{
                 @floatFromInt(self.grid_metrics.cell_width),
                 @floatFromInt(self.grid_metrics.cell_height),
@@ -1403,6 +1432,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
+                command_chrome: ?renderer.CommandChrome.Snapshot,
+                native_input_cursor_suppressed: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1558,6 +1589,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
+                    .command_chrome = if (self.command_chrome_dirty or
+                        state.command_chrome.revision != self.command_chrome_revision or
+                        self.terminal_state.dirty != .false)
+                        try state.command_chrome.snapshot(arena_alloc, state.terminal)
+                    else
+                        null,
+                    .native_input_cursor_suppressed = state.terminal.screens.active_key == .primary and
+                        (state.native_input_cursor_suppressed or
+                            (state.native_input_enabled and !state.native_input_terminal_requested and
+                                state.terminal.native_prompt_active)),
                 };
             };
 
@@ -1647,6 +1688,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
+                if (self.has_custom_shaders and self.native_input_cursor_suppressed != critical.native_input_cursor_suppressed)
+                    self.cells_rebuilt = true;
+                self.native_input_cursor_suppressed = critical.native_input_cursor_suppressed;
+                // Clear before any fallible row rebuild: an allocation failure
+                // must never leave a cached hollow terminal caret over NSTextView.
+                if (critical.native_input_cursor_suppressed) {
+                    const hidden_pos: [2]u16 = @splat(std.math.maxInt(u16));
+                    if (self.cells.getCursorGlyph() != null or !std.meta.eql(self.uniforms.cursor_pos, hidden_pos)) {
+                        self.cells.setCursor(null, null);
+                        self.uniforms.cursor_pos = hidden_pos;
+                        self.cells_rebuilt = true;
+                    }
+                }
+
                 // Build our GPU cells
                 self.rebuildCells(
                     critical.preedit,
@@ -1654,6 +1709,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .preedit = critical.preedit != null,
                         .focused = self.focused,
                         .blink_visible = cursor_blink_visible,
+                        .native_input_suppressed = critical.native_input_cursor_suppressed,
                     }),
                     &critical.links,
                 ) catch |err| {
@@ -1663,6 +1719,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     comptime assert(@TypeOf(err) == error{OutOfMemory});
                     log.warn("error rebuilding GPU cells err={}", .{err});
                 };
+
+                if (critical.native_input_cursor_suppressed) assert(self.cells.getCursorGlyph() == null);
+                if (critical.command_chrome) |snapshot| {
+                    self.rebuildCommandChrome(snapshot) catch |err| {
+                        self.command_cells.clearRetainingCapacity();
+                        self.command_cells_rebuilt = true;
+                        self.command_chrome_dirty = true;
+                        log.warn("error rebuilding command chrome err={}", .{err});
+                    };
+                }
 
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
@@ -1795,6 +1861,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 size_changed or
                 swap_chain_rebuilt or
                 self.cells_rebuilt or
+                self.command_cells_rebuilt or
                 self.images_rebuilt or
                 self.animationWake() != null or
                 sync;
@@ -1806,6 +1873,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return true;
             }
             self.cells_rebuilt = false;
+            self.command_cells_rebuilt = false;
             self.images_rebuilt = false;
 
             // Wait for a frame to be available.
@@ -1878,6 +1946,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try frame.uniforms.sync(&.{self.uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
+            try frame.command_cells.sync(self.command_cells.items);
 
             // If our background image buffer has changed, sync it.
             if (frame.bg_image_buffer_modified != self.bg_image_buffer_modified) {
@@ -1998,6 +2067,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     &pass,
                     .kitty_above_text,
                 );
+
+                // Native block chrome participates in this same frame and
+                // render pass, using the same glyph atlas and text pipeline.
+                if (self.command_cells.items.len > 0) pass.step(.{
+                    .pipeline = self.shaders.pipelines.cell_text,
+                    .uniforms = frame.uniforms.buffer,
+                    .buffers = &.{ frame.command_cells.buffer, frame.cells_bg.buffer },
+                    .textures = &.{ frame.grayscale, frame.color },
+                    .draw = .{
+                        .type = .triangle_strip,
+                        .vertex_count = 4,
+                        .instance_count = self.command_cells.items.len,
+                    },
+                });
 
                 // Debug overlay. We do this before any custom shader state
                 // because our debug overlay is aligned with the grid.
@@ -2172,6 +2255,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.draw_mutex.lockUncancelable(global.io());
             defer self.draw_mutex.unlock(global.io());
 
+            self.clearCommandCaptionCache();
+
             // We always redo the font shaper in case font features changed. We
             // could check to see if there was an actual config change but this is
             // easier and rare enough to not cause performance issues.
@@ -2254,6 +2339,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             defer self.draw_mutex.unlock(global.io());
 
             self.size = size;
+            self.command_chrome_dirty = true;
             self.updateScreenSizeUniforms();
 
             // Some graphics APIs need to manually update their viewport,
@@ -2420,9 +2506,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            // Cursor visibility
-            uniforms.cursor_visible = @intFromBool(self.terminal_state.cursor.visible);
-
             // Cursor style
             const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
@@ -2437,6 +2520,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (!self.has_custom_shaders) return;
 
             const uniforms: *shadertoy.Uniforms = &self.custom_shader_uniforms;
+
+            // Cursor visibility
+            uniforms.cursor_visible = @intFromBool(self.terminal_state.cursor.visible and !self.native_input_cursor_suppressed);
+            if (self.native_input_cursor_suppressed) {
+                uniforms.current_cursor = @splat(0);
+                uniforms.previous_cursor = @splat(0);
+                uniforms.current_cursor_color = @splat(0);
+                uniforms.previous_cursor_color = @splat(0);
+            }
 
             const now: std.Io.Timestamp = .now(global.io(), .awake);
             defer self.last_frame_time = now;
@@ -2552,6 +2644,106 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 uniforms.time_focus = uniforms.time;
                 self.custom_shader_focused_changed = false;
             }
+        }
+
+        fn clearCommandCaptionCache(self: *Self) void {
+            for (self.command_caption_cache.values()) |*caption| caption.glyphs.deinit(self.alloc);
+            self.command_caption_cache.clearRetainingCapacity();
+            self.command_chrome_dirty = true;
+        }
+
+        /// Resolve captions outside the terminal mutex. A bounded glyph cache
+        /// makes scrolling reposition existing glyphs without repeated shaping.
+        fn commandCaptionGlyphs(
+            self: *Self,
+            header: renderer.CommandChrome.Header,
+            columns: u16,
+        ) ![]const shaderpkg.CellText {
+            if (self.command_caption_cache.get(header.id)) |caption| {
+                if (caption.columns == columns and std.meta.eql(caption.metadata, header.metadata))
+                    return caption.glyphs.items;
+            }
+            if (self.command_scratch == null) {
+                self.command_scratch = try terminal.Terminal.init(global.io(), self.alloc, .{ .cols = columns, .rows = 1 });
+            }
+            const scratch = &self.command_scratch.?;
+            if (scratch.cols != columns) try scratch.resize(self.alloc, .{ .cols = columns, .rows = 1 });
+            try renderer.CommandChrome.writeCaption(scratch, &header.metadata);
+            try self.command_scratch_state.update(self.alloc, scratch);
+            const cells = self.command_scratch_state.row_data.items(.cells)[0].slice();
+            var opts: font.shape.RunOptions = .{ .grid = self.font_grid, .cells = cells, .selection = null, .cursor_x = null };
+            opts.applyBreakConfig(self.config.font_shaping_break);
+            var iter = self.font_shaper.runIterator(opts);
+            var glyphs: std.ArrayList(shaderpkg.CellText) = .empty;
+            errdefer glyphs.deinit(self.alloc);
+            while (try iter.next(self.alloc)) |run| {
+                const shaped = try self.font_shaper.shape(run);
+                for (shaped) |cell| {
+                    const x = run.offset + cell.x;
+                    if (x >= columns) continue;
+                    if (try self.glyphCell(@intCast(x), 0, columns, cells.items(.raw), cell, run, .{ .r = 255, .g = 255, .b = 255 }, 255)) |glyph|
+                        try glyphs.append(self.alloc, glyph);
+                }
+            }
+            try self.command_caption_cache.ensureTotalCapacity(self.alloc, @min(256, self.command_caption_cache.count() + 1));
+            if (self.command_caption_cache.getPtr(header.id)) |old| {
+                old.glyphs.deinit(self.alloc);
+            } else if (self.command_caption_cache.count() == 256) {
+                self.command_caption_cache.values()[0].glyphs.deinit(self.alloc);
+                _ = self.command_caption_cache.orderedRemove(self.command_caption_cache.keys()[0]);
+            }
+            self.command_caption_cache.putAssumeCapacity(header.id, .{
+                .metadata = header.metadata,
+                .columns = columns,
+                .glyphs = glyphs,
+            });
+            return glyphs.items;
+        }
+
+        fn rebuildCommandChrome(self: *Self, snapshot: renderer.CommandChrome.Snapshot) !void {
+            self.command_cells.clearRetainingCapacity();
+            self.command_cells_rebuilt = true;
+            self.command_chrome_dirty = true;
+            const columns = self.terminal_state.cols;
+            if (columns == 0 or self.cells.size.rows == 0) return;
+            const fg = self.terminal_state.colors.foreground;
+            const bg = self.terminal_state.colors.background;
+            // Convert absolute drawable coordinates into the grid-origin
+            // coordinate system used by the existing projection matrix.
+            self.uniforms.command_pinned_y = @max(0, @as(f32, @floatFromInt(self.size.screen.height)) -
+                snapshot.pinned_offset_from_bottom) - @as(f32, @floatFromInt(self.size.padding.top));
+            for (snapshot.headers) |header| {
+                if (!header.pinned and header.row >= self.cells.size.rows) continue;
+                const glyphs = try self.commandCaptionGlyphs(header, columns);
+                const flags: @FieldType(shaderpkg.CellText, "bools") = .{
+                    .no_min_contrast = true,
+                    .is_command_chrome = true,
+                    .is_pinned_command = header.pinned,
+                };
+                try self.command_cells.append(self.alloc, .{
+                    .atlas = .solid,
+                    .bools = flags,
+                    .grid_pos = .{ 0, header.row },
+                    .color = .{ bg.r, bg.g, bg.b, 255 },
+                    .glyph_size = .{ 0, self.size.cell.height },
+                });
+                try self.command_cells.append(self.alloc, .{
+                    .atlas = .solid,
+                    .bools = flags,
+                    .grid_pos = .{ 0, header.row },
+                    .color = .{ fg.r, fg.g, fg.b, 41 },
+                    .glyph_size = .{ 0, 1 },
+                });
+                for (glyphs) |original| {
+                    var glyph = original;
+                    glyph.grid_pos[1] = header.row;
+                    glyph.bools = flags;
+                    glyph.color = .{ fg.r, fg.g, fg.b, if (header.current) 204 else 153 };
+                    try self.command_cells.append(self.alloc, glyph);
+                }
+            }
+            self.command_chrome_revision = snapshot.revision;
+            self.command_chrome_dirty = false;
         }
 
         /// Build the overlay as configured. Returns null if there is no
@@ -3485,6 +3677,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             color: terminal.color.RGB,
             alpha: u8,
         ) !void {
+            if (try self.glyphCell(x, y, cols, cell_raws, shaper_cell, shaper_run, color, alpha)) |cell|
+                try self.cells.add(self.alloc, .text, cell);
+        }
+
+        fn glyphCell(
+            self: *Self,
+            x: terminal.size.CellCountInt,
+            y: terminal.size.CellCountInt,
+            cols: usize,
+            cell_raws: []const terminal.page.Cell,
+            shaper_cell: font.shape.Cell,
+            shaper_run: font.shape.TextRun,
+            color: terminal.color.RGB,
+            alpha: u8,
+        ) !?shaderpkg.CellText {
             const cell = cell_raws[x];
             const cp = cell.codepoint();
 
@@ -3516,10 +3723,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // If the glyph is 0 width or height, it will be invisible
             // when drawn, so don't bother adding it to the buffer.
             if (render.glyph.width == 0 or render.glyph.height == 0) {
-                return;
+                return null;
             }
 
-            try self.cells.add(self.alloc, .text, .{
+            return .{
                 .atlas = switch (render.presentation) {
                     .emoji => .color,
                     .text => .grayscale,
@@ -3533,7 +3740,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @intCast(render.glyph.offset_x + shaper_cell.x_offset),
                     @intCast(render.glyph.offset_y + shaper_cell.y_offset),
                 },
-            });
+            };
         }
 
         fn addCursor(

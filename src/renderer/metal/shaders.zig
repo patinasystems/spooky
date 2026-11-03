@@ -254,6 +254,8 @@ pub const Uniforms = extern struct {
         use_linear_correction: bool align(1) = false,
     },
 
+    command_pinned_y: f32 align(4) = 0,
+
     const PaddingExtend = packed struct(u8) {
         left: bool = false,
         right: bool = false,
@@ -274,12 +276,15 @@ pub const CellText = extern struct {
     bools: packed struct(u8) {
         no_min_contrast: bool = false,
         is_cursor_glyph: bool = false,
-        _padding: u6 = 0,
+        is_command_chrome: bool = false,
+        is_pinned_command: bool = false,
+        _padding: u4 = 0,
     } align(1) = .{},
 
     pub const Atlas = enum(u8) {
         grayscale = 0,
         color = 1,
+        solid = 2,
     };
 
     test {

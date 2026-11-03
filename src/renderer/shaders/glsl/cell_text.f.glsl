@@ -13,6 +13,7 @@ in CellTextVertexOut {
 // Values `atlas` can take.
 const uint ATLAS_GRAYSCALE = 0u;
 const uint ATLAS_COLOR = 1u;
+const uint ATLAS_SOLID = 2u;
 
 // Must declare this output for some versions of OpenGL.
 layout(location = 0) out vec4 out_FragColor;
@@ -22,6 +23,7 @@ void main() {
     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
 
     switch (in_data.atlas) {
+        case ATLAS_SOLID: out_FragColor = in_data.color; return;
         default:
         case ATLAS_GRAYSCALE:
         {

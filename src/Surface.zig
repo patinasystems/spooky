@@ -141,6 +141,12 @@ inspector: ?*inspectorpkg.Inspector = null,
 /// All our sizing information.
 size: rendererpkg.Size,
 
+/// Native input reserves grid space without shrinking the renderer drawable.
+/// Keep the requested inset separate from computed padding so resize, font,
+/// and config updates cannot accumulate it. Points preserve it across DPI.
+native_input_inset_bottom: u32 = 0,
+native_input_inset_bottom_points: f64 = 0,
+
 /// The configuration derived from the main config. We "derive" it so that
 /// we don't have a shared pointer hanging around that we need to worry about
 /// the lifetime of. This makes updating config at runtime easier.
@@ -872,6 +878,7 @@ pub fn deinit(self: *Surface) void {
 
     // Clean up our render state
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
+    self.renderer_state.command_chrome.deinit(self.alloc);
     self.alloc.destroy(self.renderer_state.mutex);
     self.config.deinit();
 
@@ -2510,9 +2517,10 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     // Update our cell size within our size struct
     self.size.cell = size;
-    self.balancePaddingIfNeeded();
+    try self.recomputePadding();
 
-    // Notify the terminal
+    // Notify the PTY now. setFontSize queues the renderer resize after its new
+    // font grid, then wakes the renderer once both messages are present.
     self.queueIo(.{ .resize = self.size }, .unlocked);
 
     // Update our terminal default size if necessary.
@@ -2561,6 +2569,11 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
             .old_key = self.font_grid_key,
             .new_key = font_grid_key,
         },
+    }, .{ .forever = {} });
+    // Font/config/scale changes can also alter padding and the native inset.
+    // A font-grid message alone only updates cell dimensions in the renderer.
+    _ = self.renderer_thread.mailbox.push(global.io(), .{
+        .resize = self.size,
     }, .{ .forever = {} });
 
     // Once we've sent the key we can replace our key
@@ -2615,10 +2628,26 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
     try self.resize(new_screen_size);
 }
 
+/// Reserve physical pixels at the bottom of the full drawable for native
+/// input. The application runtime converts its logical layout to pixels.
+/// Safe to call from the main thread; ordinary resize messages update the PTY
+/// and renderer together without changing the runtime surface dimensions.
+pub fn setNativeInputInset(self: *Surface, bottom_px: u32) !void {
+    const content_scale = try self.rt_surface.getContentScale();
+    const scale_y = if (content_scale.y > 0 and std.math.isFinite(content_scale.y))
+        content_scale.y
+    else
+        1;
+    self.native_input_inset_bottom_points = @as(f64, @floatFromInt(bottom_px)) / scale_y;
+    if (self.native_input_inset_bottom == bottom_px) return;
+    self.native_input_inset_bottom = bottom_px;
+    try self.resize(self.size.screen);
+}
+
 fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     // Save our screen size
     self.size.screen = size;
-    self.balancePaddingIfNeeded();
+    try self.recomputePadding();
 
     // Recalculate our grid size. Because Ghostty supports fluid resizing,
     // its possible the grid doesn't change at all even if the screen size changes.
@@ -2648,13 +2677,18 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     };
 }
 
-/// Recalculate the balanced padding if needed.
-fn balancePaddingIfNeeded(self: *Surface) void {
-    if (self.config.window_padding_balance == .false) return;
+/// Rebuild configured padding before adding the native reservation. This runs
+/// even with balancing disabled so config and DPI changes refresh explicit
+/// padding and never add a second copy of the inset.
+fn recomputePadding(self: *Surface) !void {
     const content_scale = try self.rt_surface.getContentScale();
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
-    self.size.balancePadding(self.config.scaledPadding(x_dpi, y_dpi), self.config.window_padding_balance);
+    self.size.setPaddingWithBottomInset(
+        self.config.scaledPadding(x_dpi, y_dpi),
+        self.config.window_padding_balance,
+        self.native_input_inset_bottom,
+    );
 }
 
 /// Called to set the preedit state for character input. Preedit is used
@@ -3770,6 +3804,9 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
     // Calculate the new DPI
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
+    const inset = rendererpkg.Size.scaledInset(self.native_input_inset_bottom_points, content_scale.y);
+    const inset_changed = self.native_input_inset_bottom != inset;
+    self.native_input_inset_bottom = inset;
 
     // Update our font size which is dependent on the DPI
     const size = size: {
@@ -3781,20 +3818,13 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
 
     // If our DPI didn't actually change, save a lot of work by doing nothing.
     if (size.xdpi == self.font_size.xdpi and size.ydpi == self.font_size.ydpi) {
+        if (inset_changed) try self.resize(self.size.screen);
         return;
     }
 
+    // setFontSize also recomputes configured padding and sends the resulting
+    // size to the PTY and renderer, including the freshly scaled native inset.
     try self.setFontSize(size);
-
-    // Update our padding which is dependent on DPI. We only do this for
-    // unbalanced padding since balanced padding is not dependent on DPI.
-    if (self.config.window_padding_balance == .false) {
-        self.size.padding = self.config.scaledPadding(x_dpi, y_dpi);
-    }
-
-    // Force a resize event because the change in padding will affect
-    // pixel-level changes to the renderer and viewport.
-    try self.resize(self.size.screen);
 }
 
 /// Returns true if mouse reporting is enabled both in the config and

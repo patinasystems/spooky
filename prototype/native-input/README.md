@@ -2,8 +2,9 @@
 
 A macOS Ghostty fork with an inline AppKit command editor and grouped
 command/output history. One real Ghostty terminal grid renders the transcript;
-AppKit places block headers and the native editor using positions tracked by the
-terminal core. Output is not captured through pipes or replayed as plain text.
+Ghostty's Metal renderer draws block headers from core-tracked positions, and
+AppKit hosts the native editor. Output is not captured through pipes or replayed
+as plain text.
 
 The editor starts at one line, grows with hard and soft wraps, and stops growing
 at the smaller of 12 terminal lines or 45% of the pane. Longer drafts scroll
@@ -85,7 +86,8 @@ shell retains exports and working-directory changes between commands.
 
 ## What the prototype does
 
-- Custom block headers, layout, and editing use AppKit and explicit callbacks.
+- Block backgrounds, separators, and captions use Ghostty's existing Metal
+  render pass and font atlas. Native editing and controls use AppKit callbacks.
   The upstream application's existing SwiftUI shell remains in place; this
   feature adds no Lookout or Observation framework dependency.
 - A real `NSTextView` owns text, selection, marked input, and its own undo manager.
@@ -167,8 +169,20 @@ As of 2026-11-02:
 - Six completion-transport tests and four real filesystem notification tests
   pass. Completion shell tests cover live context, quoting, Unicode/multiline
   carets, unchanged visible input, unsafe contexts, and response bounds.
-- Three submission-handoff tests and two startup-resource tests pass, bringing
-  the targeted native total to 45.
+- Thirteen submission-handoff/chrome-presentation test cases and two startup-resource
+  tests pass, bringing the targeted native total to 55. Caption identity,
+  offscreen pinning, metadata publication, display-scale invalidation, and
+  coalesced secondary-shell ownership transitions, and hidden-window submission
+  progress are covered.
+- The Metal integration passes 104 targeted core tests, including native cursor
+  ownership, prompt transitions, caption bounds/Unicode, space-padded and
+  overwritten headers, and editor insets. Metal shaders compile as part of the core build. Renderer
+  assertions check that suppressed frames retain no terminal cursor glyph.
+- Computer-use stress on the first Metal candidate exercised 12,000 colored,
+  wrapped Unicode output lines, 20 separate native submissions, and large
+  scrollback movements with a pinned draft. Foreground changes interrupted
+  sustained wheel-scroll attempts; these are not frame-time benchmarks. See
+  [the measurement notes](performance.md) for the exact scope and limitations.
 - The native arm64 `ReleaseLocal` app builds successfully and passes
   strict/deep code-signature verification. Spooky uses its own bundle and build
   directory, preserving the earlier development apps.

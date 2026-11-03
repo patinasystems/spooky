@@ -10,6 +10,7 @@ enum CommandInputDiagnostics {
     enum Counter: String, CaseIterable, Sendable {
         case bridgeFileRead, bridgeFileBytes, geometryChanged, headerInvalidation
         case bridgeSnapshotRequested, bridgeWatchEvent, bridgeWatchdog, bridgeCacheHit
+        case chromePublication, geometryBusy
     }
 
     struct Token: Sendable {
