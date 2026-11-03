@@ -36,6 +36,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         scrollView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
@@ -50,7 +51,8 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.onRequestCompletion = { [weak self] in self?.onRequestCompletion($0) }
         textView.onCancelCompletion = { [weak self] in self?.onCancelCompletion() }
         textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
-        toolTip = "Tab completes. Option Tab inserts a tab. Return runs the command. Shift Return adds a line."
+        toolTip = "Right accepts a suggestion. Tab or Down opens options; Tab or Return accepts. "
+            + "Option Tab inserts a tab. Shift Return adds a line."
     }
 
     required init?(coder: NSCoder) {

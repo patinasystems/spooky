@@ -31,9 +31,12 @@ const uint NO_MIN_CONTRAST = 1u;
 const uint IS_CURSOR_GLYPH = 2u;
 const uint IS_COMMAND_CHROME = 4u;
 const uint IS_PINNED_COMMAND = 8u;
+const uint COMMAND_TOP_GAP = 16u;
+const uint COMMAND_ABOVE_VIEWPORT = 32u;
 
 out CellTextVertexOut {
     flat uint atlas;
+    flat uint chrome_flags;
     flat vec4 color;
     flat vec4 bg_color;
     vec2 tex_coord;
@@ -73,6 +76,8 @@ void main() {
     corner.y = float(vid == 2 || vid == 3);
 
     out_data.atlas = atlas;
+    out_data.chrome_flags = glyph_bools;
+    if ((glyph_bools & COMMAND_ABOVE_VIEWPORT) != 0) cell_pos.y -= cell_size.y;
     if ((glyph_bools & IS_PINNED_COMMAND) != 0) cell_pos.y = command_pinned_y;
     if (atlas == ATLAS_SOLID) {
         vec2 position = vec2(-grid_padding.w + screen_size.x * corner.x,
@@ -116,7 +121,7 @@ void main() {
     offset.y = cell_size.y - offset.y;
     if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
         cell_pos.x *= command_caption_scale;
-        cell_pos.y += command_gap;
+        cell_pos.y += command_gap * ((glyph_bools & COMMAND_TOP_GAP) != 0 ? 2.0 : 1.0);
         size *= command_caption_scale;
         offset *= command_caption_scale;
     }

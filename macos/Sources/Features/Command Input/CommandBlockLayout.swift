@@ -17,6 +17,7 @@ struct CommandBlockAnchor: Equatable, Identifiable {
 struct CommandTerminalLayout: Equatable {
     var primary = true
     var atBottom = true
+    var hasScrollback = false
     var cursorValid = false
     var columns: UInt32 = 0
     var rows: UInt32 = 0
@@ -39,6 +40,7 @@ struct CommandTerminalLayout: Equatable {
         var result = Self()
         result.primary = layout.primary
         result.atBottom = layout.viewport_at_bottom
+        result.hasScrollback = layout.has_scrollback
         result.cursorValid = layout.cursor_valid
         result.columns = layout.columns
         result.rows = layout.rows
@@ -83,6 +85,7 @@ struct CommandChromePresentation: Equatable {
     struct Row: Equatable {
         let id: String
         let label: String
+        let pathByteCount: Int
         let suffix: String
         let current: Bool
         let pinned: Bool
@@ -103,10 +106,9 @@ struct CommandChromePresentation: Equatable {
         rows = ids.map { id in
             let block = metadata[id]
             let current = id == currentID
-            let home = FileManager.default.homeDirectoryForCurrentUser.path
             let cwd = block?.workingDirectory ?? "local zsh"
-            var label = cwd == home ? "~" : (cwd.hasPrefix(home + "/") ? "~" + cwd.dropFirst(home.count) : cwd)
-            label = label.replacingOccurrences(of: "\n", with: "↵")
+            var label = Self.displayPath(cwd)
+            let pathByteCount = cwd.hasPrefix("/") && !(recovering && current) ? label.utf8.count : 0
             if let branch = block?.branch, !branch.isEmpty { label += "  ⎇ \(branch)" }
             if recovering && current { label = "Retained draft (read only)" }
             var suffix = ""
@@ -114,9 +116,14 @@ struct CommandChromePresentation: Equatable {
             if let elapsed = block?.elapsed {
                 suffix += String(format: "  %.3fs", elapsed)
             } else if block?.status == "running" { suffix = "running" }
-            return Row(id: id, label: label, suffix: suffix, current: current,
+            return Row(id: id, label: label, pathByteCount: pathByteCount, suffix: suffix, current: current,
                        pinned: current && pinnedOffset >= 0)
         }
+    }
+
+    static func displayPath(_ path: String, home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        let label = path == home ? "~" : (path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path)
+        return label.replacingOccurrences(of: "\n", with: "↵")
     }
 
     @MainActor
@@ -142,6 +149,7 @@ struct CommandChromePresentation: Equatable {
                 record.label = UnsafeRawPointer(buffer.baseAddress!.advanced(by: range.label.lowerBound))
                     .assumingMemoryBound(to: CChar.self)
                 record.label_len = UInt(range.label.count)
+                record.path_len = UInt(row.pathByteCount)
                 record.suffix = UnsafeRawPointer(buffer.baseAddress!.advanced(by: range.suffix.lowerBound))
                     .assumingMemoryBound(to: CChar.self)
                 record.suffix_len = UInt(range.suffix.count)

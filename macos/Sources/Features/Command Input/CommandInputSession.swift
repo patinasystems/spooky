@@ -181,17 +181,10 @@ final class CommandInputSession {
                 guard surfaceView.surfaceModel?.perform(action: "text:\\x1b[99;2~") == true else {
                     throw BridgeError.unavailable("The terminal rejected the completion request.")
                 }
-                for _ in 0..<150 {
-                    try Task.checkCancellation()
-                    if let response = try await completionBridge.response(to: request, generation: generation) {
-                        guard !Task.isCancelled, self.isEditable,
-                              self.generation == generation, self.draft == request.text else { return }
-                        self.onCompletion?(response)
-                        return
-                    }
-                    try await Task.sleep(for: .milliseconds(20))
-                }
-                throw BridgeError.unavailable("Completion timed out. Press Tab to try again.")
+                let response = try await completionBridge.waitForResponse(to: request, generation: generation)
+                guard !Task.isCancelled, self.isEditable,
+                      self.generation == generation, self.draft == request.text else { return }
+                self.onCompletion?(response)
             } catch {
                 await completionBridge.cancel(request.id)
                 guard !Task.isCancelled, let self, self.draft == request.text else { return }

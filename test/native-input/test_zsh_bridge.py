@@ -152,13 +152,23 @@ class Shell:
             name: (path / name).read_text()
             for name in ("generation", "identifier", "status", "reason", "count", "truncated")
         }
-        result["items"] = [
-            {
-                "buffer": (path / "items" / str(index) / "buffer").read_text(),
-                "cursor": int((path / "items" / str(index) / "cursor").read_text()),
-            }
-            for index in range(1, int(result["count"]) + 1)
-        ]
+        packed = path / "items-v1"
+        if packed.exists():
+            records = packed.read_bytes().split(b"\0")
+            count = int(result["count"])
+            assert len(records) == count * 2 + 1 and records[-1] == b""
+            result["items"] = [
+                {"cursor": int(records[index * 2]), "buffer": records[index * 2 + 1].decode("utf-8")}
+                for index in range(count)
+            ]
+        else:
+            result["items"] = [
+                {
+                    "buffer": (path / "items" / str(index) / "buffer").read_text(),
+                    "cursor": int((path / "items" / str(index) / "cursor").read_text()),
+                }
+                for index in range(1, int(result["count"]) + 1)
+            ]
         return result
 
     def complete(self, draft, caret=None, generation=None, identifier=None):
@@ -322,6 +332,25 @@ class NativeInputBridgeTests(unittest.TestCase):
                 response = shell.complete(draft, caret)
                 self.assertEqual(response["status"], "rejected")
                 self.assertEqual(response["reason"], reason)
+
+    def test_completion_reuses_prompt_worker_and_reclaims_rejected_claim(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_probe_counter=0\n"
+            "_patina_probe_completion() { compadd -- worker-$(( ++_patina_probe_counter )); }\n"
+            "compdef _patina_probe_completion patina_probe"
+        )
+        shell.ready_after(generation)
+        rejected = shell.complete(b"cat \xff", 5)
+        self.assertEqual(rejected["reason"], "invalid-utf8")
+        shell.wait(lambda: not list(shell.bridge.glob("completion-worker-request.*")))
+        first = shell.complete("patina_probe ")
+        second = shell.complete("patina_probe ")
+        self.assertEqual(first["items"][0]["buffer"], "patina_probe worker-1 ")
+        self.assertEqual(second["items"][0]["buffer"], "patina_probe worker-2 ")
+        _, generation = shell.submit('print -rn -- "$_patina_probe_counter" > "$_PROBE_DIR/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"0")
 
     def test_completion_rejects_stale_and_terminal_buffer_requests(self):
         shell = self.shell
@@ -547,7 +576,7 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertIn(b"continued", shell.metadata(block, "executed-input"))
         self.assertEqual(shell.metadata(block, "status"), b"completed")
 
-    def test_primary_block_reserves_one_header_row_and_finishes_in_order(self):
+    def test_primary_block_reserves_two_header_rows_and_finishes_in_order(self):
         shell = self.shell
         self.assertEqual(len(shell.state()), 4)
         block = shell.state()[3]
@@ -562,7 +591,7 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertLess(markers.index(("B", block)), markers.index(("C", block)))
         self.assertLess(markers.index(("C", block)), markers.index(("D", block)))
         self.assertLess(markers.index(("D", block)), markers.index(("A", next_block)))
-        self.assertIn(f"\x1b]133;A;aid={block}\x07\r\n".encode(), shell.output)
+        self.assertIn(f"\x1b]133;A;aid={block}\x07\r\n\r\n".encode(), shell.output)
         self.assertEqual(shell.metadata(block, "status"), b"completed")
         self.assertEqual(shell.metadata(block, "exit-status"), b"0")
         self.assertEqual(shell.metadata(next_block, "status"), b"editing")

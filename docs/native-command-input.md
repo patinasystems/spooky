@@ -21,10 +21,16 @@ smart dashes, and automatic substitutions are disabled.
 
 The composer starts at one terminal line and grows with hard and soft wraps.
 It is capped at the smaller of 12 terminal lines or 45% of the pane; larger drafts
-scroll within the editor. At the live prompt it aligns with the terminal's input
-position. While the user browses previous output, the current command header and
-composer remain pinned to the bottom. Layout reserves space so the growing draft
-does not cover terminal output.
+scroll within the editor. Short sessions align it with the terminal's input
+position. Once the pane has scrollback, the current command header and composer
+remain docked at the bottom, including when scrolling returns to the live end.
+Docking is remembered per pane and does not toggle with the viewport's current
+position. Its reserved height therefore stays constant while scrolling, so the
+terminal grid and scrollbar do not resize during a gesture. Layout reserves
+space so the growing draft does not cover terminal output. The native scrollbar
+track ends above the docked header/editor through scroller insets; its thumb
+cannot slide behind the editor. Those track insets do not resize the drawable,
+clip view, or PTY.
 
 The native editor, controls, and layout use AppKit and explicit callbacks.
 Ghostty's upstream SwiftUI application shell is retained. This feature does not
@@ -46,11 +52,17 @@ text input, selection, undo, IME, menus, and accessibility retain their platform
 behavior. These changes do not remove the upstream SwiftUI application shell.
 
 Native command panes add four logical points of left/right padding to terminal
-geometry and bottom spacing within the reserved block-header row. Captions
-compact into the remainder of that row; output text keeps its normal cell size.
+geometry, plus four-point bottom and top gaps around each block separator.
+New prompts reserve two header rows so the caption keeps its readable scale;
+one-row scrollback retains its original layout. Output text keeps its normal
+cell size and selection coordinates.
 The multiline editor has four-point padding on every side. Completion and
 terminal search share an AppKit overlay style, and Cmd+F routes from the editor
-to the existing terminal search engine.
+to the existing terminal search engine. Clicking the printed directory opens an
+AppKit file-tree popover with lazy folder expansion and Copy Path. The click
+region comes from the renderer's caption geometry; branch/status text is not a
+directory target. Each folder lists at most 1,000 entries and shows a truncation
+message if more exist; symbolic links are shown without recursive traversal.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
@@ -59,8 +71,10 @@ is the behavior reference, not a dependency on Warp's application stack.
 
 ## One terminal transcript, grouped into blocks
 
-Each primary prompt has a stable block ID. The shell reserves one blank terminal
-row for its GPU-rendered header, then marks the input position. ZLE renders the accepted
+Each primary prompt has a stable block ID. The shell reserves two blank terminal
+rows for its GPU-rendered header, then marks the input position. A docked current
+header replaces its in-grid caption instead of drawing a second copy.
+ZLE renders the accepted
 command through its normal display/acceptance path. The native editor does not
 print a second command copy.
 
@@ -72,7 +86,7 @@ rather than reusing the current directory for older commands.
 
 The core tracks tagged OSC 133 boundaries with pins that follow terminal cells.
 The embedded API exposes their geometry, terminal cell size, cursor position,
-primary-screen state, and whether the viewport is at the live bottom. The native
+primary-screen state, actual scrollback presence, and whether the viewport is at the live bottom. The native
 host uses those values for editor positioning and cold metadata lookup. Header
 positions come directly from the renderer's frame snapshot.
 
@@ -88,6 +102,9 @@ Do not infer exact per-process output ownership from a block boundary.
 | --- | --- |
 | [`CommandTextView.swift`](../macos/Sources/Features/Command%20Input/CommandTextView.swift) | Native editing, submit/newline/IME handling, independent undo, and text measurement. |
 | [`CommandInputView.swift`](../macos/Sources/Features/Command%20Input/CommandInputView.swift) | AppKit editor/scroll-view ownership and explicit callbacks. |
+| [`CommandCompletionController.swift`](../macos/Sources/Features/Command%20Input/CommandCompletionController.swift) | Debounced predictions, cached filtering, keyboard acceptance, and inline/list lifetime. |
+| [`CommandDirectoryPopover.swift`](../macos/Sources/Features/Command%20Input/CommandDirectoryPopover.swift) | Lazy AppKit file tree, bounded filesystem reader, and Copy Path. |
+| [`CommandInputDocking.swift`](../macos/Sources/Features/Command%20Input/CommandInputDocking.swift) | Stable per-pane inline-to-docked placement and reserved height. |
 | [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | Inline or pinned native editor placement, cursor ownership, and bottom inset. |
 | [`CommandBlockLayout.swift`](../macos/Sources/Features/Command%20Input/CommandBlockLayout.swift) | Snapshot of core geometry and immutable block metadata. |
 | [`CommandInputSession.swift`](../macos/Sources/Features/Command%20Input/CommandInputSession.swift) | Per-pane draft, acknowledgement, focus, recovery, and off-main bridge I/O. |

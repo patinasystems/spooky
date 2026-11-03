@@ -10,10 +10,10 @@ actor CommandCompletionBridge {
     init(directory: URL) { self.directory = directory }
 
     func prepare(_ request: CommandCompletionRequest, generation: String) throws {
-        guard request.text.utf8.count <= Self.maximumDraftBytes,
-              !request.text.unicodeScalars.contains(where: {
-                  ($0.value < 32 && $0.value != 9 && $0.value != 10) || $0.value == 127
-              }), let caret = Self.byteOffset(in: request.text, cursorUTF16: request.cursorUTF16) else {
+        try Task.checkCancellation()
+        guard Self.validText(request.text), Self.validText(request.shellText),
+              Self.byteOffset(in: request.text, cursorUTF16: request.cursorUTF16) != nil,
+              let caret = Self.byteOffset(in: request.shellText, cursorUTF16: request.shellCursorUTF16) else {
             throw CompletionError.invalidRequest
         }
         let state = try read(directory.appendingPathComponent("state"), maximum: 4096)
@@ -22,8 +22,37 @@ actor CommandCompletionBridge {
             throw CompletionError.promptChanged
         }
         pruneResponses(except: request.id)
-        let payload = "\(generation)\n\(request.id.uuidString)\n\(caret)\n\(request.text)"
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent("completions", isDirectory: true), withIntermediateDirectories: true)
+        try Task.checkCancellation()
+        let payload = "\(generation)\n\(request.id.uuidString)\n\(caret)\n\(request.shellText)"
         try Data(payload.utf8).write(to: directory.appendingPathComponent("completion-request"), options: .atomic)
+    }
+
+    /// Directory notifications observe the worker's atomic response rename.
+    /// Check immediately as well: completion may finish before the watch is
+    /// installed. Cancellation tears down both the watch and deadline task.
+    func waitForResponse(to request: CommandCompletionRequest, generation: String,
+                         timeout: Duration = .seconds(3)) async throws -> CommandCompletionResponse {
+        try Task.checkCancellation()
+        if let response = try response(to: request, generation: generation) { return response }
+        let events = CommandInputFileEvents(directory: directory.appendingPathComponent("completions", isDirectory: true))
+        return try await withThrowingTaskGroup(of: CommandCompletionResponse.self) { group in
+            defer { group.cancelAll() }
+            group.addTask {
+                for await _ in events.events {
+                    try Task.checkCancellation()
+                    if let response = try await self.response(to: request, generation: generation) { return response }
+                }
+                throw CancellationError()
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw CompletionError.timedOut
+            }
+            guard let response = try await group.next() else { throw CancellationError() }
+            return response
+        }
     }
 
     func response(to request: CommandCompletionRequest, generation: String) throws -> CommandCompletionResponse? {
@@ -43,12 +72,9 @@ actor CommandCompletionBridge {
         var items: [CommandCompletionCandidate] = []
         var seen: Set<String> = []
         var bytes = 0
-        for index in 0..<count {
-            let item = root.appendingPathComponent("items/\(index + 1)", isDirectory: true)
-            let buffer = try read(item.appendingPathComponent("buffer"), maximum: Self.maximumDraftBytes)
+        for (buffer, caret) in try buffers(root, count: count) {
             bytes += buffer.utf8.count
-            guard bytes <= Self.maximumResponseBytes,
-                  let caret = Int(try field(item, "cursor")),
+            guard buffer.utf8.count <= Self.maximumDraftBytes, bytes <= Self.maximumResponseBytes,
                   let cursorUTF16 = Self.utf16Offset(in: buffer, byteOffset: caret) else {
                 throw CompletionError.invalidResponse
             }
@@ -120,6 +146,47 @@ actor CommandCompletionBridge {
         try read(root.appendingPathComponent(name), maximum: 4096).trimmingCharacters(in: .newlines)
     }
 
+    private func buffers(_ root: URL, count: Int) throws -> [(String, Int)] {
+        let packed = root.appendingPathComponent("items-v1")
+        if FileManager.default.fileExists(atPath: packed.path) {
+            // cursor NUL exact UTF-8 buffer NUL, repeated count times. Bound
+            // both bytes and split count before allocating individual records.
+            let text = try read(packed, maximum: Self.maximumResponseBytes + 200 * 32)
+            let fields = text.split(separator: "\0", maxSplits: count * 2, omittingEmptySubsequences: false)
+            guard fields.count == count * 2 + 1, fields.last?.isEmpty == true else {
+                throw CompletionError.invalidResponse
+            }
+            return try (0..<count).map { index in
+                let cursor = fields[index * 2]
+                guard !cursor.isEmpty, cursor.utf8.count <= 7,
+                      cursor.utf8.allSatisfy({ (48...57).contains($0) }), let offset = Int(cursor) else {
+                    throw CompletionError.invalidResponse
+                }
+                let buffer = String(fields[index * 2 + 1])
+                guard buffer.utf8.count <= Self.maximumDraftBytes else { throw CompletionError.invalidResponse }
+                return (buffer, offset)
+            }
+        }
+        // Keep the original representation readable for existing workers and
+        // fixtures; new workers publish one bounded payload instead of hundreds
+        // of tiny files and directories.
+        var bytes = 0
+        return try (0..<count).map { index in
+            let item = root.appendingPathComponent("items/\(index + 1)", isDirectory: true)
+            guard let cursor = Int(try field(item, "cursor")) else { throw CompletionError.invalidResponse }
+            let buffer = try read(item.appendingPathComponent("buffer"), maximum: Self.maximumDraftBytes)
+            bytes += buffer.utf8.count
+            guard bytes <= Self.maximumResponseBytes else { throw CompletionError.invalidResponse }
+            return (buffer, cursor)
+        }
+    }
+
+    private static func validText(_ text: String) -> Bool {
+        text.utf8.count <= maximumDraftBytes && !text.unicodeScalars.contains(where: {
+            ($0.value < 32 && $0.value != 9 && $0.value != 10) || $0.value == 127
+        })
+    }
+
     private func read(_ url: URL, maximum: Int) throws -> String {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         guard let size = attributes[.size] as? NSNumber, size.intValue <= maximum,
@@ -130,12 +197,13 @@ actor CommandCompletionBridge {
     }
 
     enum CompletionError: LocalizedError {
-        case invalidRequest, promptChanged, invalidResponse
+        case invalidRequest, promptChanged, invalidResponse, timedOut
         var errorDescription: String? {
             switch self {
             case .invalidRequest: return "Completion requires valid UTF-8 text and a valid insertion point."
             case .promptChanged: return "The shell is no longer at the same empty prompt."
             case .invalidResponse: return "The shell returned an invalid completion response."
+            case .timedOut: return "Completion timed out. Press Tab to try again."
             }
         }
     }

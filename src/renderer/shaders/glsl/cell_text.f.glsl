@@ -5,6 +5,7 @@ layout(binding = 1) uniform sampler2DRect atlas_color;
 
 in CellTextVertexOut {
     flat uint atlas;
+    flat uint chrome_flags;
     flat vec4 color;
     flat vec4 bg_color;
     vec2 tex_coord;
@@ -19,6 +20,11 @@ const uint ATLAS_SOLID = 2u;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
+    if ((in_data.chrome_flags & 4u) != 0 && (in_data.chrome_flags & 8u) == 0) {
+        float y = screen_size.y - gl_FragCoord.y;
+        float bottom = grid_padding.x + float(unpack2u16(grid_size_packed_2u16).y) * cell_size.y;
+        if (y < grid_padding.x || y >= bottom) discard;
+    }
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
 

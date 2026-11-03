@@ -18,12 +18,13 @@ class SurfaceScrollView: NSView {
     private let surfaceView: Ghostty.SurfaceView
     private var observers: [NSObjectProtocol] = []
     private var cancellables: Set<AnyCancellable> = []
-    private var isLiveScrolling = false
+    private var scrollSynchronization = SurfaceScrollSynchronization()
+    private var isSynchronizingScrollView = false
 
     /// The last row position sent via scroll_to_row action. Used to avoid
     /// sending redundant actions when the user drags the scrollbar but stays
     /// on the same row.
-    private var lastSentRow: Int?
+    private var lastSentRow: UInt64?
 
     init(contentSize: CGSize, surfaceView: Ghostty.SurfaceView) {
         self.surfaceView = surfaceView
@@ -90,7 +91,8 @@ class SurfaceScrollView: NSView {
             object: scrollView,
             queue: .main
         ) { [weak self] _ in
-            self?.isLiveScrolling = true
+            guard let self else { return }
+            self.scrollSynchronization.begin(originY: self.scrollView.contentView.documentVisibleRect.origin.y)
         })
 
         observers.append(NotificationCenter.default.addObserver(
@@ -98,7 +100,11 @@ class SurfaceScrollView: NSView {
             object: scrollView,
             queue: .main
         ) { [weak self] _ in
-            self?.isLiveScrolling = false
+            guard let self else { return }
+            let finalRow = self.scrollSynchronization.end()
+            // Round the drag to the row already requested from the terminal.
+            // Its asynchronous renderer acknowledgment may still be behind.
+            self.synchronizeScrollView(releaseRow: finalRow)
         })
 
         observers.append(NotificationCenter.default.addObserver(
@@ -181,6 +187,14 @@ class SurfaceScrollView: NSView {
         synchronizeCoreSurface()
     }
 
+    /// Keep the history scroller above native footer controls without changing
+    /// the clip view, Metal drawable, document range, or subprocess dimensions.
+    func setNativeFooterHeight(_ height: CGFloat) {
+        if SurfaceScrollerTrack.applyBottomInset(height, to: scrollView) {
+            updateTrackingAreas()
+        }
+    }
+
     // MARK: Scrolling
 
     private func synchronizeAppearance() {
@@ -217,24 +231,28 @@ class SurfaceScrollView: NSView {
     }
 
     /// Sizes the document view and scrolls the content view according to the scrollbar state
-    private func synchronizeScrollView() {
+    private func synchronizeScrollView(releaseRow: UInt64? = nil) {
+        guard !isSynchronizingScrollView else { return }
+        isSynchronizingScrollView = true
+        defer { isSynchronizingScrollView = false }
+
+        let geometry = surfaceView.scrollbar.flatMap {
+            SurfaceScrollSynchronization.Geometry(
+                total: $0.total, visibleRows: $0.len,
+                cellHeight: surfaceView.cellSize.height,
+                viewportHeight: scrollView.contentSize.height)
+        }
+        let coreRow = releaseRow ?? surfaceView.scrollbar?.offset ?? 0
+        let originY = scrollSynchronization.synchronize(geometry: geometry, coreRow: coreRow)
+
         // Update the document height to give our scroller the correct proportions
-        documentView.frame.size.height = documentHeight()
+        documentView.frame.size.height = geometry?.documentHeight ?? scrollView.contentSize.height
 
-        // Only update our actual scroll position if we're not actively scrolling.
-        if !isLiveScrolling {
-            // Convert row units to pixels using cell height, ignore zero height.
-            let cellHeight = surfaceView.cellSize.height
-            if cellHeight > 0, let scrollbar = surfaceView.scrollbar {
-                // Invert coordinate system: terminal offset is from top, AppKit position from bottom
-                let offsetY =
-                    CGFloat(scrollbar.total - scrollbar.offset - scrollbar.len) * cellHeight
-                scrollView.contentView.scroll(to: CGPoint(x: 0, y: offsetY))
-
-                // Track the current row position to avoid redundant movements when we
-                // move the scrollbar.
-                lastSentRow = Int(scrollbar.offset)
-            }
+        if let originY {
+            scrollView.contentView.scroll(to: CGPoint(x: 0, y: originY))
+        }
+        if !scrollSynchronization.isLiveScrolling, let geometry {
+            lastSentRow = min(coreRow, geometry.maximumRow)
         }
 
         // Always update our scrolled view with the latest dimensions
@@ -265,17 +283,11 @@ class SurfaceScrollView: NSView {
     /// Converts the current scroll position to a row number and sends a `scroll_to_row` action
     /// to the terminal core. Only sends actions when the row changes to avoid IPC spam.
     private func handleLiveScroll() {
-        // If our cell height is currently zero then we avoid a div by zero below
-        // and just don't scroll (there's no where to scroll anyways). This can
-        // happen with a tiny terminal.
-        let cellHeight = surfaceView.cellSize.height
-        guard cellHeight > 0 else { return }
-
-        // AppKit views are +Y going up, so we calculate from the bottom
-        let visibleRect = scrollView.contentView.documentVisibleRect
-        let documentHeight = documentView.frame.height
-        let scrollOffset = documentHeight - visibleRect.origin.y - visibleRect.height
-        let row = Int(scrollOffset / cellHeight)
+        // Resizing or rebasing the document can synchronously notify AppKit
+        // observers. Only an actual drag should send a new terminal scroll.
+        guard !isSynchronizingScrollView,
+              let row = scrollSynchronization.scroll(
+                originY: scrollView.contentView.documentVisibleRect.origin.y) else { return }
 
         // Only send action if the row changed to avoid action spam
         guard row != lastSentRow else { return }
@@ -288,8 +300,8 @@ class SurfaceScrollView: NSView {
     /// Handles scrollbar state updates from the terminal core.
     ///
     /// Updates the document view size to reflect total scrollback and adjusts scroll position
-    /// to match the terminal's viewport. During live scrolling, updates document size but skips
-    /// programmatic position changes to avoid fighting the user's drag.
+    /// to match the terminal's viewport. During live scrolling, preserves the user's logical
+    /// row when the document geometry changes instead of applying renderer acknowledgments.
     ///
     /// ## Scrollbar State
     /// The scrollbar struct contains:
@@ -348,23 +360,6 @@ class SurfaceScrollView: NSView {
         view.postsFrameChangedNotifications = true
     }
 
-    // MARK: Calculations
-
-    /// Calculate the appropriate document view height given a scrollbar state
-    private func documentHeight() -> CGFloat {
-        let contentHeight = scrollView.contentSize.height
-        let cellHeight = surfaceView.cellSize.height
-        if cellHeight > 0, let scrollbar = surfaceView.scrollbar {
-            // The document view must have the same vertical padding around the
-            // scrollback grid as the content view has around the terminal grid
-            // otherwise the content view loses alignment with the surface.
-            let documentGridHeight = CGFloat(scrollbar.total) * cellHeight
-            let padding = contentHeight - (CGFloat(scrollbar.len) * cellHeight)
-            return documentGridHeight + padding
-        }
-        return contentHeight
-    }
-
     // MARK: Mouse events
 
     override func mouseMoved(with: NSEvent) {
@@ -391,5 +386,98 @@ class SurfaceScrollView: NSView {
             ],
             owner: self,
             userInfo: nil))
+    }
+}
+
+enum SurfaceScrollerTrack {
+    @MainActor
+    @discardableResult
+    static func applyBottomInset(_ height: CGFloat, to scrollView: NSScrollView) -> Bool {
+        let bottom = height.isFinite ? min(max(0, height), max(0, scrollView.bounds.height)) : 0
+        var insets = scrollView.scrollerInsets
+        guard insets.bottom != bottom else { return false }
+        insets.bottom = bottom
+        scrollView.scrollerInsets = insets
+        scrollView.tile()
+        return true
+    }
+}
+
+/// Keeps a native scrollbar drag in terminal row coordinates while output,
+/// font changes, or editor reservations change its document's pixel geometry.
+struct SurfaceScrollSynchronization {
+    struct Geometry: Equatable {
+        let maximumRow: UInt64
+        let cellHeight: CGFloat
+        let viewportHeight: CGFloat
+        let documentHeight: CGFloat
+
+        init?(total: UInt64, visibleRows: UInt64, cellHeight: CGFloat, viewportHeight: CGFloat) {
+            guard cellHeight.isFinite, cellHeight > 0,
+                  viewportHeight.isFinite, viewportHeight >= 0 else { return nil }
+            let maximumRow = total > visibleRows ? total - visibleRows : 0
+            let documentHeight = CGFloat(maximumRow) * cellHeight + viewportHeight
+            guard documentHeight.isFinite else { return nil }
+            self.maximumRow = maximumRow
+            self.cellHeight = cellHeight
+            self.viewportHeight = viewportHeight
+            self.documentHeight = documentHeight
+        }
+
+        func clampedRow(_ row: CGFloat) -> CGFloat {
+            guard row.isFinite else { return 0 }
+            return min(max(row, 0), CGFloat(maximumRow))
+        }
+
+        func row(at originY: CGFloat) -> CGFloat {
+            clampedRow((documentHeight - viewportHeight - originY) / cellHeight)
+        }
+
+        func origin(for row: CGFloat) -> CGFloat {
+            (CGFloat(maximumRow) - clampedRow(row)) * cellHeight
+        }
+
+        func integerRow(_ row: CGFloat) -> UInt64 {
+            let clamped = clampedRow(row)
+            // CGFloat rounds UInt64.max upward, so handle the endpoint before
+            // converting back to avoid overflow even for an invalid snapshot.
+            return clamped >= CGFloat(maximumRow) ? maximumRow : UInt64(clamped)
+        }
+    }
+
+    private(set) var isLiveScrolling = false
+    private var geometry: Geometry?
+    private var liveRow: CGFloat?
+
+    mutating func begin(originY: CGFloat) {
+        isLiveScrolling = true
+        liveRow = geometry?.row(at: originY)
+    }
+
+    mutating func end() -> UInt64? {
+        let finalRow = liveRow.flatMap { geometry?.integerRow($0) }
+        isLiveScrolling = false
+        liveRow = nil
+        return finalRow
+    }
+
+    /// Returns a new clip origin only for a core update outside a drag or a
+    /// geometry change during one. Ordinary acknowledgments cannot move a drag.
+    mutating func synchronize(geometry: Geometry?, coreRow: UInt64) -> CGFloat? {
+        let previous = self.geometry
+        self.geometry = geometry
+        guard let geometry else { return nil }
+        if !isLiveScrolling { return geometry.origin(for: CGFloat(coreRow)) }
+        guard previous != geometry else { return nil }
+        let row = geometry.clampedRow(liveRow ?? CGFloat(coreRow))
+        liveRow = row
+        return geometry.origin(for: row)
+    }
+
+    mutating func scroll(originY: CGFloat) -> UInt64? {
+        guard isLiveScrolling, let geometry else { return nil }
+        let row = geometry.row(at: originY)
+        liveRow = row
+        return geometry.integerRow(row)
     }
 }

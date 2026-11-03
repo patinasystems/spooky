@@ -23,6 +23,20 @@ final class NativeCommandSurfaceHost: NSView {
     private var measuredHeight: CGFloat = 0
     private var synchronizing = false
     private var background = NSColor.black
+    private var docking = CommandInputDocking()
+    private let directoryPopover = CommandDirectoryPopover()
+    private struct DirectoryAnchor: Equatable {
+        let id: String
+        let directory: URL
+        let rect: NSRect
+    }
+    private struct DirectoryContext: Equatable {
+        let layout: CommandTerminalLayout
+        let chrome: CommandChromePresentation
+        let bounds: NSRect
+    }
+    private var directoryAnchor: DirectoryAnchor?
+    private var directoryContext: DirectoryContext?
 
     override var isFlipped: Bool { true }
 
@@ -84,11 +98,13 @@ final class NativeCommandSurfaceHost: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        dismissDirectory()
         synchronize()
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        dismissDirectory()
         // Let the child surface publish its new core scale first. Logical
         // bounds may be unchanged when moving between 1x and 2x displays.
         DispatchQueue.main.async { [weak self] in
@@ -119,13 +135,10 @@ final class NativeCommandSurfaceHost: NSView {
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission
         let editing = recovering || (session.editorVisible && geometry.primary && session.currentBlockID != nil)
-        // Recovery must remain selectable even when no primary prompt exists.
-        let browsing = recovering || (editing && !geometry.atBottom)
-        let reserved = editing && !transferring ? (browsing ? height + line : max(0, height - line)) : 0
-        let x = max(0, (browsing ? geometry.paddingLeft : geometry.cursorX) - padding)
-        let y = browsing ? max(0, bounds.height - height)
-            : min(max(geometry.paddingTop, geometry.cursorY), max(0, bounds.height - height))
-        let shown = editing && (geometry.cursorValid || browsing)
+        let placement = docking.placement(layout: geometry, editing: editing, recovering: recovering,
+                                           transferring: transferring,
+                                           metrics: .init(editorHeight: height, containerHeight: bounds.height, padding: padding))
+        let shown = placement.shown
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
         // a hollow caret that can move beyond the editor during PTY expansion.
@@ -139,7 +152,7 @@ final class NativeCommandSurfaceHost: NSView {
             }
             let integrated = session.hasNativeIntegration
             ghostty_surface_set_native_input_padding(surface, integrated ? padding : 0,
-                                                     integrated ? reserved + padding : 0)
+                                                     integrated ? placement.reservedHeight + padding : 0)
         }
 
         background = configColor("background", fallback: .black)
@@ -156,13 +169,14 @@ final class NativeCommandSurfaceHost: NSView {
 
         let chrome = CommandChromePresentation(
             layout: geometry, metadata: session.blockMetadata, currentID: session.currentBlockID,
-            pinnedOffset: browsing && !transferring ? height + line : -1,
+            pinnedOffset: placement.pinnedOffset,
             recovering: recovering,
             backingScale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)).height)
         if chrome != chromePresentation, let surface = surfaceView.surface {
             chrome.publish(to: surface)
             chromePresentation = chrome
         }
+        validateDirectoryAnchor(chrome: chrome)
 
         if !shown && window?.firstResponder === editor.textView {
             window?.makeFirstResponder(surfaceView)
@@ -173,13 +187,18 @@ final class NativeCommandSurfaceHost: NSView {
         // behind it. Following the terminal cursor here would expose its block
         // caret before ZLE has redisplayed/accepted the submitted buffer.
         let editorFrame = transferring && !editor.frame.isEmpty ? editor.frame
-            : NSRect(x: x, y: y,
-                     width: max(1, bounds.width - x - max(0, geometry.paddingLeft - padding)), height: height)
+            : NSRect(x: placement.origin.x, y: placement.origin.y,
+                     width: max(1, bounds.width - placement.origin.x - max(0, geometry.paddingLeft - padding)), height: height)
         if editor.frame != editorFrame {
             if editor.frame.width != editorFrame.width { editor.dismissCompletions() }
             editor.frame = editorFrame
             editor.needsLayout = true
         }
+        // The scroll view retains its full drawable. Only its track ends above
+        // the dock, so the live-end thumb cannot hide behind native controls.
+        let footerHeight = shown && placement.pinned
+            ? max(placement.pinnedOffset, bounds.maxY - editorFrame.minY) : 0
+        terminalView.setNativeFooterHeight(footerHeight)
         editor.configureAppearance(font: session.editorFont, textColor: foreground,
                                    backgroundColor: background, minimumLineHeight: line)
         editor.setDraft(session.draft)
@@ -187,6 +206,55 @@ final class NativeCommandSurfaceHost: NSView {
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
         layoutNotice(foreground: foreground)
+    }
+
+    // Intercept only a real directory-label click on the terminal itself.
+    // Scrollbars, branch/status captions, native controls, and terminal text
+    // retain their existing event handling. Geometry is resolved at the click.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let target = super.hitTest(point)
+        guard target === surfaceView, let event = NSApp.currentEvent,
+              event.type == .leftMouseDown, event.window === window,
+              directory(at: convert(event.locationInWindow, from: nil)) != nil else { return target }
+        return self
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let anchor = directory(at: convert(event.locationInWindow, from: nil)) else { return }
+        directoryAnchor = anchor
+        if let chrome = chromePresentation {
+            directoryContext = DirectoryContext(layout: session.layout, chrome: chrome, bounds: bounds)
+        }
+        directoryPopover.show(directory: anchor.directory, anchorRect: anchor.rect, in: self)
+    }
+
+    private func directory(at point: NSPoint) -> DirectoryAnchor? {
+        guard bounds.contains(point), let surface = surfaceView.surface else { return nil }
+        var hit = ghostty_command_path_hit_s()
+        guard ghostty_surface_command_path_at(surface, point.x, point.y, &hit) else { return nil }
+        let id = withUnsafeBytes(of: hit.id) { String(bytes: $0.prefix { $0 != 0 }, encoding: .utf8) }
+        guard let id, let path = session.blockMetadata[id]?.workingDirectory,
+              path.hasPrefix("/") else { return nil }
+        return DirectoryAnchor(id: id, directory: URL(fileURLWithPath: path, isDirectory: true),
+                               rect: NSRect(x: hit.x, y: hit.y, width: hit.width, height: hit.height))
+    }
+
+    private func validateDirectoryAnchor(chrome: CommandChromePresentation) {
+        guard directoryPopover.isShown, let anchor = directoryAnchor else { return }
+        let context = DirectoryContext(layout: session.layout, chrome: chrome, bounds: bounds)
+        guard context != directoryContext else { return }
+        let center = NSPoint(x: anchor.rect.midX, y: anchor.rect.midY)
+        guard directory(at: center) == anchor else {
+            dismissDirectory()
+            return
+        }
+        directoryContext = context
+    }
+
+    private func dismissDirectory() {
+        directoryPopover.dismiss()
+        directoryAnchor = nil
+        directoryContext = nil
     }
 
     private func layoutNotice(foreground: NSColor) {

@@ -526,6 +526,8 @@ enum CellTextBools : uint8_t {
   IS_CURSOR_GLYPH = 2u,
   IS_COMMAND_CHROME = 4u,
   IS_PINNED_COMMAND = 8u,
+  COMMAND_TOP_GAP = 16u,
+  COMMAND_ABOVE_VIEWPORT = 32u,
 };
 
 struct CellTextVertexIn {
@@ -554,6 +556,7 @@ struct CellTextVertexIn {
 struct CellTextVertexOut {
   float4 position [[position]];
   uint8_t atlas [[flat]];
+  uint8_t chrome_flags [[flat]];
   float4 color [[flat]];
   float4 bg_color [[flat]];
   float2 tex_coord;
@@ -588,6 +591,8 @@ vertex CellTextVertexOut cell_text_vertex(
 
   CellTextVertexOut out;
   out.atlas = in.atlas;
+  out.chrome_flags = in.bools;
+  if ((in.bools & COMMAND_ABOVE_VIEWPORT) != 0) cell_pos.y -= uniforms.cell_size.y;
   if ((in.bools & IS_PINNED_COMMAND) != 0) cell_pos.y = uniforms.command_pinned_y;
   if (in.atlas == ATLAS_SOLID) {
     float2 position = float2(-uniforms.grid_padding.w + uniforms.screen_size.x * corner.x,
@@ -631,7 +636,7 @@ vertex CellTextVertexOut cell_text_vertex(
   offset.y = uniforms.cell_size.y - offset.y;
   if ((in.bools & IS_COMMAND_CHROME) != 0) {
     cell_pos.x *= uniforms.command_caption_scale;
-    cell_pos.y += uniforms.command_gap;
+    cell_pos.y += uniforms.command_gap * ((in.bools & COMMAND_TOP_GAP) != 0 ? 2.0 : 1.0);
     size *= uniforms.command_caption_scale;
     offset *= uniforms.command_caption_scale;
   }
@@ -700,6 +705,12 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if ((in.chrome_flags & IS_COMMAND_CHROME) != 0 &&
+      (in.chrome_flags & IS_PINNED_COMMAND) == 0) {
+    const float top = uniforms.grid_padding.x;
+    const float bottom = top + float(uniforms.grid_size.y) * uniforms.cell_size.y;
+    if (in.position.y < top || in.position.y >= bottom) discard_fragment();
+  }
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,

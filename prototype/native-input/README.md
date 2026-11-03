@@ -8,9 +8,9 @@ as plain text.
 
 The editor starts at one line, grows with hard and soft wraps, and stops growing
 at the smaller of 12 terminal lines or 45% of the pane. Longer drafts scroll
-inside the editor. While browsing terminal history, the current header and draft
-remain pinned at the bottom. At the live prompt, the editor sits inline at the
-terminal input position.
+inside the editor. Short sessions start inline at the terminal input position.
+Once scrollback exists, the current header and draft remain docked at the bottom,
+including when scrolling returns to the live end.
 
 Native input integrates with your normal local zsh startup and configuration. See the
 [design and implementation notes](../../docs/native-command-input.md) for the
@@ -58,14 +58,19 @@ local executor when this separate checkout is only on this Mac.
    completion metadata.
 4. Scroll upward through previous commands. The current header and editor stay
    at the bottom while the transcript scrolls independently.
-5. Press Tab for zsh-backed completion in the native input. A unique match is
-   inserted directly; multiple matches open an AppKit menu. Tab/Shift+Tab or
-   arrows select, Return accepts without executing, and Escape dismisses the
-   menu. Option+Tab inserts a literal tab.
-6. Use the terminal-input control or Escape (with no completion menu open) for
+5. Typing previews the best zsh-backed completion as faint text. Right accepts
+   it. Tab or Down opens the list; arrows navigate, and Tab or Return accepts
+   without executing. Typing filters the list with fuzzy matching. Escape
+   dismisses suggestions, and Option+Tab inserts a literal tab. Return with only
+   an inline preview executes exactly the typed draft.
+6. Click a block's directory to browse its file tree. Expand folders on demand
+   and use Copy Path to copy that directory's absolute path. Each folder loads
+   at most 1,000 entries and shows a notice if more exist; symbolic links do not
+   expand recursively.
+7. Use the terminal-input control or Escape (with no suggestions pending) for
    shell history and unsupported completion contexts. Native editing can resume
    at an empty primary prompt; clear or run any partially edited shell line.
-7. Try `read answer; print -r -- "$answer"` or a terminal application. Running
+8. Try `read answer; print -r -- "$answer"` or a terminal application. Running
    programs receive ordinary terminal input. Incomplete input such as
    `if true; then` uses the terminal continuation prompt; finish it there or
    cancel with Ctrl+C.
@@ -152,41 +157,56 @@ files include accepted commands and are not a permanent history service.
 
 As of 2026-11-02:
 
-- All 49 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
+- All 50 PTY tests pass on system zsh 5.9. They cover exact multiline and Unicode
   transfer, retained shell state, ownership, stale/duplicate rejection, block
   markers, stable continuation IDs, completion metadata, and exit/cancellation.
   Startup fixtures exercise normal interactive/login startup order, custom
   ZDOTDIR, aliases/PATH/history, existing completions/fpath/styles, hooks,
   keymaps, options, prompt restoration, and ordinary-terminal fallback when
   required hook support is unavailable.
-- Eight focused command-block core regressions pass, including durable
-  submission markers across erase, hard reset, and scrollback eviction. The
-  selected-command/startup-environment core test also passes.
-- All 30 AppKit editor tests pass, covering selection/replacement, newline and
-  submission behavior, retained drafts, IME-Return handling, independent undo,
-  editor sizing, deferred-focus ownership, completion menus, cancellation,
-  stale-result rejection, and Unicode edit boundaries.
-- Six completion-transport tests and four real filesystem notification tests
-  pass. Completion shell tests cover live context, quoting, Unicode/multiline
-  carets, unchanged visible input, unsafe contexts, and response bounds.
-- Thirteen submission-handoff/chrome-presentation test cases and two startup-resource
-  tests pass, bringing the targeted native total to 55. Caption identity,
-  offscreen pinning, metadata publication, display-scale invalidation, and
-  coalesced secondary-shell ownership transitions, and hidden-window submission
-  progress are covered.
-- The Metal integration passes 104 targeted core tests, including native cursor
-  ownership, prompt transitions, caption bounds/Unicode, space-padded and
-  overwritten headers, and editor insets. Metal shaders compile as part of the core build. Renderer
-  assertions check that suppressed frames retain no terminal cursor glyph.
+- All 98 selected core tests pass. Coverage includes native cursor ownership,
+  command markers, caption geometry and hit bounds, header deduplication, and
+  terminal padding. The native `ReleaseFast` core build completed all 243 steps.
+- Native validation covers 136 cases across the combined and final targeted
+  runs. The combined run passed 135 cases; after correcting the new geometry
+  test's flipped-coordinate assumption, both scrollbar-track tests passed.
+  Coverage includes native editing
+  and IME-Return, automatic completion and keyboard acceptance, Unicode/current-token
+  replacement, filesystem response observation, search, bounded directory-tree
+  loading and visible filename layout, startup, handoff, stable docking, and
+  fractional scrollbar synchronization, and actual track/knob geometry with an
+  unchanged terminal content area. Logs are
+  `/tmp/spooky-final-native-tests-footer.log` and
+  `/tmp/spooky-final-scroller-track-tests.log`.
+- A separate normal arm64 `ReleaseLocal` app was built at
+  `macos/build-spooky/delivery/ReleaseLocal/Spooky.app` and its signature verified.
+  Its executable SHA-256 is
+  `7724b66d8e7d7dfa6997404ccba51f68155efd49cc254523d32701825c143f19`.
+  The user's earlier running app was preserved; building this bundle did not
+  replace that process.
+- A live candidate rendered 1,500 Unicode lines. Repeated wheel scrolling into
+  history and back kept the draft/current header fixed, with no duplicate
+  caption observed. This did not qualify physical scrollbar-thumb dragging:
+  automation missed the thumb, and setting its accessibility value did not
+  dispatch the scroll action.
+- Live checks confirmed readable tree labels, expansion, Escape dismissal,
+  placement above the docked input, and Cmd+F Unicode search with the draft
+  preserved. The Mac locked before the final physical thumb-drag recheck;
+  the footer track correction has AppKit geometry coverage. Automated results
+  do not establish end-to-end latency, physical IME support, or rendering
+  parity with stock Ghostty.
+
+### Earlier interactive observations
+
+These checks describe preceding builds. They are retained as historical evidence,
+not as a completed live qualification of the new delivery bundle.
+
 - Computer-use stress on the first Metal candidate exercised 12,000 colored,
   wrapped Unicode output lines, 20 separate native submissions, and large
   scrollback movements with a pinned draft. Foreground changes interrupted
   sustained wheel-scroll attempts; these are not frame-time benchmarks. See
   [the measurement notes](performance.md) for the exact scope and limitations.
-- The native arm64 `ReleaseLocal` app builds successfully and passes
-  strict/deep code-signature verification. Spooky uses its own bundle and build
-  directory, preserving the earlier development apps.
-- The delivered Spooky app was opened normally through Finder. Its live shell
+- An earlier Spooky build was opened normally through Finder. Its live shell
   reported login and interactive mode, configured history, and loaded user
   aliases and completions. Unique-path Tab completion, multiline submission,
   and fresh-editor focus passed. A command that erased the screen before `read`

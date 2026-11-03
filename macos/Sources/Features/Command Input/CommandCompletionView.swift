@@ -5,6 +5,12 @@ struct CommandCompletionRequest: Sendable {
     let revision: UInt64
     let text: String
     let cursorUTF16: Int
+    var automatic = false
+    var queryText: String?
+    var queryCursorUTF16: Int?
+
+    var shellText: String { queryText ?? text }
+    var shellCursorUTF16: Int { queryCursorUTF16 ?? cursorUTF16 }
 }
 
 struct CommandCompletionCandidate: Sendable {

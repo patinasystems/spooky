@@ -1,7 +1,7 @@
 # Spooky
 
 A macOS Ghostty fork with an AppKit multiline command editor, command/output
-blocks, native selection and undo, and zsh-backed Tab completion.
+blocks, native selection and undo, and zsh-backed predictive completion.
 
 Spooky loads your normal terminal configuration and zsh startup files. The
 native editor is enabled by default; other configured shells and explicit

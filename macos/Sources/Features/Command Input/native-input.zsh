@@ -157,10 +157,11 @@ _patina_native_prepare_prompt() {
     _patina_native_metadata branch "$branch"
     _patina_native_metadata status editing
 
-    # A starts the header on a fresh line; the LF reserves exactly one row.
+    # A starts the header on a fresh line. Two explicit chrome rows keep
+    # four-point top/bottom gaps and the caption readable on a fixed VT grid.
     # B may repeat during ZLE redisplay. The block identity remains unchanged.
     builtin print -rnu $_patina_native_tty -- \
-        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n'
+        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n\n'
     _patina_native_apply_prompt
     return 0
 }
@@ -338,7 +339,7 @@ _patina_native_submit() {
 # completion-request: generation LF, UUID LF, UTF-8 caret byte offset LF, draft.
 # completions/<UUID> is published by one atomic directory rename. Files:
 # generation, identifier, status (ok/rejected), reason, count, truncated (0/1),
-# items/<1..count>/buffer (exact resulting UTF-8 draft), and cursor (byte offset).
+# items-v1: repeated UTF-8 caret byte offset NUL, exact resulting buffer NUL.
 # The app binds UUID to its draft revision and discards obsolete responses.
 
 _patina_native_completion_initialize() {
@@ -463,6 +464,11 @@ _patina_native_completion_read() {
             reason=invalid-caret
             return 1
         fi
+        # The parent only routes a bounded, identified request. Full UTF-8,
+        # dynamic-syntax and character-offset checks happen once in its worker
+        # before anything reaches compsys. Avoid an iconv process on the real
+        # interactive shell's ZLE path for every completion request.
+        [[ ${2-} == route-only ]] && return 0
         if ! command /usr/bin/iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1; then
             reason=invalid-utf8
             return 1
@@ -530,7 +536,7 @@ _patina_native_complete() {
     builtin local generation identifier='-' payload caret reason
     builtin local -i character_caret
     {
-        if _patina_native_completion_read "$consumed"; then
+        if _patina_native_completion_read "$consumed" route-only; then
             if [[ -n ${_patina_native_completion_seen[$identifier]-} ]]; then
                 # Also leave an in-flight response alone. Publishing a second
                 # directory with the same UUID could race its first writer.
@@ -580,16 +586,19 @@ _patina_native_completion_worker_widget() {
     builtin zf_mv -f "$active" "$request" || return 0
     if ! _patina_native_completion_read "$request"; then
         _patina_native_completion_reject
+        builtin zf_rm -f "$request"
         return 0
     fi
     builtin zf_rm -f "$request"
     builtin local destination="$_patina_native_dir/completions/$identifier"
     builtin local staging="$_patina_native_dir/completions/.pending-$identifier"
     [[ -e $destination ]] && return 0
-    builtin zf_mkdir -p "$staging/items" || return 1
+    builtin zf_mkdir -p "$staging" || return 1
+    builtin local packed_descriptor
     builtin local -i _patina_completion_matches=0 index count=0 total_bytes=0 truncated=0 bytes
     builtin local -A seen
     {
+        builtin exec {packed_descriptor}> "$staging/items-v1" || return 1
         BUFFER=$payload
         CURSOR=$character_caret
         # Restore user completion options before ZLE parses the command. Doing
@@ -626,11 +635,11 @@ _patina_native_completion_worker_widget() {
                 break
             fi
             (( ++count, total_bytes += bytes ))
-            builtin zf_mkdir "$staging/items/$count" || return 1
-            builtin print -rn -- "$BUFFER" > "$staging/items/$count/buffer"
             _patina_native_byte_count "$LBUFFER"
-            builtin print -rn -- "$REPLY" > "$staging/items/$count/cursor"
+            builtin print -rnu $packed_descriptor -- "$REPLY"$'\0'"$BUFFER"$'\0'
         done
+        builtin exec {packed_descriptor}>&-
+        packed_descriptor=''
         builtin print -rn -- "$generation" > "$staging/generation"
         builtin print -rn -- "$identifier" > "$staging/identifier"
         builtin print -rn -- ok > "$staging/status"
@@ -639,6 +648,7 @@ _patina_native_completion_worker_widget() {
         builtin print -rn -- "$truncated" > "$staging/truncated"
         builtin zf_mv "$staging" "$destination"
     } always {
+        [[ -n $packed_descriptor ]] && builtin exec {packed_descriptor}>&-
         BUFFER=''
         CURSOR=0
         builtin zf_rm -rf "$staging"

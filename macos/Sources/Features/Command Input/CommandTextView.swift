@@ -21,14 +21,9 @@ final class CommandTextView: NSTextView {
     // for editors whose caller did not supply an existing text container.
     private let ownedTextStorage: NSTextStorage?
     private(set) var minimumLineHeight: CGFloat = 0
-    private var completionRevision: UInt64 = 0
-    private var completionRequest: CommandCompletionRequest?
-    private var completionPopup: CommandCompletionView?
-    private(set) var completionItems: [CommandCompletionCandidate] = []
-    private(set) var selectedCompletionIndex = 0
-    private var completionMessage: String?
-    private var completionFilter: CommandCompletionFilter?
-    private var editingCompletion = false
+    private(set) lazy var completions = CommandCompletionController(textView: self)
+    var completionItems: [CommandCompletionCandidate] { completions.items }
+    var selectedCompletionIndex: Int { completions.selectedIndex }
 
     // Ghostty's window undo manager also owns closing/reopening tabs and panes.
     // Editing or clearing one draft must never undo or erase those operations.
@@ -91,7 +86,8 @@ final class CommandTextView: NSTextView {
             height: .greatestFiniteMagnitude
         )
         setAccessibilityLabel("Command input")
-        setAccessibilityHelp("Edit a command. Return submits; Shift Return adds a line. Escape returns to the terminal.")
+        setAccessibilityHelp("Edit a command. Right accepts a suggestion; Tab or Down opens options. "
+                             + "Return submits; Shift Return adds a line. Escape dismisses suggestions or returns to the terminal.")
     }
 
     required init?(coder: NSCoder) {
@@ -107,7 +103,7 @@ final class CommandTextView: NSTextView {
             return
         }
 
-        if handleCompletionKey(event) { return }
+        if completions.handleKey(event) { return }
 
         switch event.keyCode {
         case 36, 76: // Return and keypad Enter
@@ -178,6 +174,7 @@ final class CommandTextView: NSTextView {
             }
         }
         if metricsChanged { reportContentHeight() }
+        completions.updatePosition()
     }
 
     override func updateTrackingAreas() {
@@ -297,7 +294,6 @@ final class CommandTextView: NSTextView {
 
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
-        if widthChanged { dismissCompletions() }
         super.setFrameSize(newSize)
         // TextKit can resize its view while laying out. Avoid entering its
         // layout manager recursively from that frame change.
@@ -307,193 +303,29 @@ final class CommandTextView: NSTextView {
             guard let self else { return }
             self.heightReportScheduled = false
             self.reportContentHeight()
+            // Resizing changes annotation geometry, not the draft or its
+            // caret. Preserve valid suggestions and pending debounced work.
+            self.updateCompletionPosition()
         }
     }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
-        if allowed { editingCompletion = completionFilter != nil }
+        if allowed { completions.willEdit() }
         return allowed
     }
 
     override func didChangeText() {
-        completionRevision &+= 1
         super.didChangeText()
-        if !filterCompletionsAfterEdit() { dismissCompletions() }
-        editingCompletion = false
+        completions.didEdit()
         reportContentHeight()
     }
 
-    /// Programmatic acknowledgement/history changes do not call didChangeText.
-    func draftWillChangeExternally() {
-        completionRevision &+= 1
-        dismissCompletions()
-    }
-
-    func completionSelectionDidChange() {
-        guard !editingCompletion else { return }
-        if let request = completionRequest, !completionIsCurrent(request) { dismissCompletions() }
-    }
-
-    func receiveCompletions(_ response: CommandCompletionResponse) {
-        guard let request = completionRequest,
-              response.requestID == request.id, response.revision == request.revision else { return }
-        guard completionIsCurrent(request), isEditable, !hasMarkedText(),
-              window?.isKeyWindow == true, window?.firstResponder === self,
-              !isHiddenOrHasHiddenAncestor else {
-            dismissCompletions()
-            return
-        }
-        completionItems = response.items.filter { validCompletion($0, in: request.text) }
-        completionFilter = CommandCompletionFilter(request: request, items: completionItems)
-        selectedCompletionIndex = 0
-        if completionItems.count == 1 {
-            acceptCompletion(at: 0)
-            return
-        }
-        completionMessage = completionItems.isEmpty ? (response.message ?? "No completions") : nil
-        showCompletionPopup()
-    }
-
-    func dismissCompletions() {
-        let hadCompletion = completionRequest != nil || !completionItems.isEmpty || completionMessage != nil
-        completionRequest = nil
-        completionItems = []
-        completionMessage = nil
-        completionFilter = nil
-        editingCompletion = false
-        completionPopup?.dismiss()
-        if hadCompletion { onCancelCompletion() }
-    }
-
-    func updateCompletionPosition() {
-        guard !completionItems.isEmpty || completionMessage != nil else { return }
-        completionPopup?.updatePosition(for: self)
-    }
-
-    private func handleCompletionKey(_ event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
-        let menuOpen = !completionItems.isEmpty || completionMessage != nil
-        if event.keyCode == 53, menuOpen || completionRequest != nil {
-            dismissCompletions()
-            return true
-        }
-        guard isEditable else { return false }
-        if event.keyCode == 48, modifiers == .option {
-            dismissCompletions()
-            insertText("\t", replacementRange: selectedRange())
-            return true
-        }
-        guard modifiers.isSubset(of: [.shift]) else { return false }
-        switch event.keyCode {
-        case 48: // Tab and Shift Tab
-            if !completionItems.isEmpty {
-                moveCompletionSelection(by: modifiers.contains(.shift) ? -1 : 1)
-            } else if completionMessage != nil || completionRequest == nil {
-                requestCompletions()
-            }
-            return true
-        case 125, 126: // Down and Up
-            guard menuOpen, !completionItems.isEmpty else { return false }
-            moveCompletionSelection(by: event.keyCode == 125 ? 1 : -1)
-            return true
-        case 36, 76:
-            guard !completionItems.isEmpty, modifiers.isEmpty else { return false }
-            acceptCompletion(at: selectedCompletionIndex)
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func requestCompletions() {
-        dismissCompletions()
-        let selection = selectedRange()
-        guard selection.length == 0, selection.location != NSNotFound,
-              window?.firstResponder === self else { return }
-        let request = CommandCompletionRequest(
-            id: UUID(), revision: completionRevision, text: string, cursorUTF16: selection.location
-        )
-        completionRequest = request
-        onRequestCompletion(request)
-    }
-
-    private func completionIsCurrent(_ request: CommandCompletionRequest) -> Bool {
-        request.revision == completionRevision && request.text == string
-            && selectedRange() == NSRange(location: request.cursorUTF16, length: 0)
-    }
-
-    private func filterCompletionsAfterEdit() -> Bool {
-        let selection = selectedRange()
-        guard editingCompletion, let filter = completionFilter, let request = completionRequest,
-              isEditable, !hasMarkedText(), selection.length == 0,
-              window?.firstResponder === self, window?.isKeyWindow == true,
-              let items = filter.items(in: string, cursorUTF16: selection.location) else { return false }
-        completionRequest = .init(id: request.id, revision: completionRevision,
-                                  text: string, cursorUTF16: selection.location)
-        completionItems = items
-        selectedCompletionIndex = 0
-        completionMessage = items.isEmpty ? "No matching completions" : nil
-        showCompletionPopup()
-        return true
-    }
-
-    private func validCompletion(_ candidate: CommandCompletionCandidate, in text: String) -> Bool {
-        let length = (text as NSString).length
-        let range = candidate.replacementRange
-        guard range.location >= 0, range.length >= 0,
-              range.location <= length, range.length <= length - range.location,
-              validUTF16Offset(range.location, in: text),
-              validUTF16Offset(range.location + range.length, in: text) else { return false }
-        if let cursor = candidate.cursorUTF16 {
-            let result = (text as NSString).replacingCharacters(in: range, with: candidate.replacementText)
-            guard validUTF16Offset(cursor, in: result) else { return false }
-        }
-        return true
-    }
-
-    private func validUTF16Offset(_ offset: Int, in text: String) -> Bool {
-        guard offset >= 0, offset <= text.utf16.count else { return false }
-        let index = text.utf16.index(text.utf16.startIndex, offsetBy: offset)
-        // Range(NSRange, in:) can preserve an offset inside a surrogate pair.
-        // Require an index representable by the original Swift string instead.
-        return String.Index(index, within: text) != nil
-    }
-
-    private func moveCompletionSelection(by amount: Int) {
-        guard !completionItems.isEmpty else { return }
-        selectedCompletionIndex = (selectedCompletionIndex + amount + completionItems.count) % completionItems.count
-        completionPopup?.select(index: selectedCompletionIndex)
-        completionPopup?.updatePosition(for: self)
-    }
-
-    private func acceptCompletion(at index: Int) {
-        guard let request = completionRequest, completionIsCurrent(request),
-              completionItems.indices.contains(index), isEditable else {
-            dismissCompletions()
-            return
-        }
-        let candidate = completionItems[index]
-        guard validCompletion(candidate, in: string) else { dismissCompletions(); return }
-        dismissCompletions()
-        breakUndoCoalescing()
-        insertText(candidate.replacementText, replacementRange: candidate.replacementRange)
-        if let cursor = candidate.cursorUTF16 { setSelectedRange(NSRange(location: cursor, length: 0)) }
-        breakUndoCoalescing()
-        scrollRangeToVisible(selectedRange())
-    }
-
-    private func showCompletionPopup() {
-        // Unit tests use unshown windows; creating their result state must not
-        // order a window over the user's desktop.
-        guard window?.isVisible == true else { return }
-        if completionPopup == nil {
-            completionPopup = CommandCompletionView()
-            completionPopup?.onAccept = { [weak self] in self?.acceptCompletion(at: $0) }
-        }
-        completionPopup?.show(items: completionItems, message: completionMessage,
-                              selected: selectedCompletionIndex, for: self)
-    }
+    func draftWillChangeExternally() { completions.externalEdit() }
+    func completionSelectionDidChange() { completions.selectionChanged() }
+    func receiveCompletions(_ response: CommandCompletionResponse) { completions.receive(response) }
+    func dismissCompletions() { completions.dismiss() }
+    func updateCompletionPosition() { completions.updatePosition() }
 
     var measuredContentHeight: CGFloat {
         let diagnostic = CommandInputDiagnostics.begin(.textMeasurement)

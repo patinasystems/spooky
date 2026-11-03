@@ -3,6 +3,107 @@
 These measurements cover the prototype's native input and shell bridge. They do
 not establish terminal rendering throughput or a general efficiency claim.
 
+## Automatic completion and folder browsing
+
+The completion controller now owns debouncing, cached matching, popup state,
+and inline suggestions separately from native text editing. Candidate tokens
+are decoded and Unicode-normalized once per result set. An optimized Swift
+microbenchmark alternated the prior and indexed helpers over the same 200
+Unicode path candidates and 2,000 queries, after 200 warmups:
+
+| Cached matching helper | Median | p95 |
+| --- | ---: | ---: |
+| Prior implementation | 260.67 µs | 298.50 µs |
+| Pre-normalized index | 16.25 µs | 18.58 µs |
+
+This measures the matching helper only, excluding AppKit, shell execution, and
+IPC. Source hashes and raw results are in
+`/tmp/spooky-completion-index-benchmark.json`; reproduce through Pat with
+`test/native-input/benchmark_completion.py --baseline-ref <prior-commit>`.
+
+Separately, packed shell responses reduce per-candidate file operations. Private
+PTY fixtures measured response publication with a 1 ms observation bound and
+20 warm samples per query, following one cold request:
+
+| Shell query | Before warm median | Packed response warm median |
+| --- | ---: | ---: |
+| `git che` | 24.68 ms | 20.81 ms |
+| `git ` | 53.79 ms | 28.33 ms |
+| `cat ` | 30.50 ms | 10.68 ms |
+
+The packed run's cold Git requests still took approximately 129 ms. These are
+synthetic-HOME shell response timings, not inline-suggestion appearance or
+Enter-to-screen measurements. Local artifacts are
+`/tmp/spooky-completion-latency-before.json` and
+`/tmp/spooky-completion-latency-packed.json`. Completion response observation
+now uses directory events and a timeout instead of a recurring 20 ms poll.
+
+No renderer pipeline was added: command captions and directory-path hit bounds
+use Ghostty's existing renderer. Path hit testing occurs on clicks; an open
+folder popover revalidates its anchor only when its layout context changes.
+The AppKit tree reuses outline rows and loads expanded folders on a filesystem
+actor, with at most 1,000 entries per folder and an explicit truncation row.
+
+Automated validation covers 136 native cases across the combined and final
+targeted runs, all 98 selected core tests, and all 50 zsh PTY tests. The combined
+native run passed 135 cases; correcting the new AppKit geometry test's
+flipped-coordinate assumption left both scrollbar-track tests passing on rerun.
+Logs are `/tmp/spooky-final-native-tests-footer.log` and
+`/tmp/spooky-final-scroller-track-tests.log`. The native `ReleaseFast` core build
+completed 243 steps. All nine directory-popover tests passed, and a live recheck
+confirmed that the tree opens above the docked header with readable filenames.
+The measurements above do not establish end-to-end UI latency or rendering parity.
+
+## Stable docking and scrollbar synchronization
+
+The current draft now docks once a pane has actual scrollback and remains docked
+when the viewport returns to the live bottom. Previously, switching between
+inline and docked layouts at that boundary changed the PTY height by three rows,
+which could reflow output and move the scrollbar beneath the user. Docking is
+now a latched per-pane presentation decision; a new pane still starts inline.
+The renderer omits the original current caption while drawing its pinned copy,
+so the same command header is not displayed twice.
+
+The native scrollbar track now ends above the complete docked header/editor
+using `NSScrollView.scrollerInsets`. Previously the opaque editor could cover
+the live-end thumb. This changes only the track geometry, retaining the full
+Metal drawable, clip-view dimensions, document range, and PTY size. Identical
+insets skip tiling. AppKit regressions check actual track/knob rectangles and
+unchanged content geometry, including restoration when the footer disappears.
+
+Scrollbar dragging retains its fractional terminal-row position while new
+output, font metrics, or editor reservations alter pixel geometry. Ordinary
+core acknowledgments cannot move an active drag. Releasing the drag settles on
+the integer row already requested, rather than jumping to a stale core offset.
+Regressions cover these docking and drag transitions; they do not measure
+scrolling frame times. A live candidate rendered 1,500 Unicode lines; repeated
+wheel transitions from the live end into history and back kept the current
+header/draft at the same positions, without a duplicate caption. Physical thumb
+dragging remains unqualified: automation missed the thumb, and setting its
+accessibility value did not dispatch a scroll action.
+
+After release, later core snapshots still apply normally; there is no
+sequence-based rejection of an older acknowledgment queued before release.
+The shared terminal grid also retains the primary prompt's blank rows above
+the footer; this change does not remove or remap those terminal rows.
+
+A sample taken during a computer-use timeout showed the main thread waiting
+for application events and the renderer sleeping in `kevent`. Physical footprint
+was 94.1 MB at that sample and 320.1 MB peak. No application freeze was observed
+in that capture, but it does not explain every automation timeout or establish
+performance parity. Evidence: `/tmp/spooky-docking-window-sample.txt`, sampled
+from the separate Render Check candidate. Live Cmd+F from the docked editor
+found all 1,501 occurrences of `café` in the command plus output, and Escape
+returned to the unchanged two-line draft. Tree labels, folder expansion, and
+Escape dismissal were also observed. The Mac then locked during another tree
+interaction, preventing further physical-thumb qualification.
+
+The normal app was separately built and signature-verified at
+`macos/build-spooky/delivery/ReleaseLocal/Spooky.app`; executable SHA-256:
+`7724b66d8e7d7dfa6997404ccba51f68155efd49cc254523d32701825c143f19`.
+The user's earlier app remains running. The historical checks below concern
+earlier candidates and do not certify this new delivery bundle's live behavior.
+
 ## Submission latency and padded command UI
 
 The submission path now wakes geometry observation immediately on Enter,
@@ -63,7 +164,7 @@ regressions. Strict Swift lint and diff whitespace checks passed. Build/test
 logs are `/tmp/spooky-padding-coretests.log`, `/tmp/spooky-padding-corebuild.log`,
 `/tmp/spooky-polish-swift-tests.log`, and `/tmp/spooky-search-keys-tests-final.log`.
 
-The final regular Spooky bundle (SHA-256
+That revision's regular Spooky bundle (SHA-256
 `311b4d1db4099e5923afb9dedea633ef10861bdd44f8d98a0e98c73c7f38e39f`)
 built successfully and passed live Cmd+F → Unicode paste → match navigation →
 undo/redo → Escape checks with its native draft preserved. Its completion menu

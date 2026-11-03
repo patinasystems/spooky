@@ -2722,13 +2722,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .no_min_contrast = true,
                     .is_command_chrome = true,
                     .is_pinned_command = header.pinned,
+                    .command_top_gap = header.rows == 2,
+                    .command_above_viewport = header.above_viewport,
                 };
                 try self.command_cells.append(self.alloc, .{
                     .atlas = .solid,
                     .bools = flags,
                     .grid_pos = .{ 0, header.row },
                     .color = .{ bg.r, bg.g, bg.b, 255 },
-                    .glyph_size = .{ 0, self.size.cell.height },
+                    .glyph_size = .{ 0, self.size.cell.height * @as(u32, header.rows) },
                 });
                 try self.command_cells.append(self.alloc, .{
                     .atlas = .solid,

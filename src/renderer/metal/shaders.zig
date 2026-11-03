@@ -280,7 +280,9 @@ pub const CellText = extern struct {
         is_cursor_glyph: bool = false,
         is_command_chrome: bool = false,
         is_pinned_command: bool = false,
-        _padding: u4 = 0,
+        command_top_gap: bool = false,
+        command_above_viewport: bool = false,
+        _padding: u2 = 0,
     } align(1) = .{},
 
     pub const Atlas = enum(u8) {

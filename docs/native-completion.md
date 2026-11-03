@@ -47,40 +47,49 @@ widgets, remote shells, and exact fish/zsh editing parity are separate work and
 could add several weeks. A terminal-native fish pane is a smaller alternative,
 but then the shell, rather than NSTextView, owns editing.
 
-**Implemented AppKit interface.** NSTextView remains first responder while a
-nonactivating child panel renders an `NSTableView` at the insertion rect.
-Candidates carry display text, detail, replacement text/range, and an optional
-resulting cursor position. The current zsh bridge returns whole-buffer edits;
-acceptance still uses NSTextView's normal edit/undo path rather than assigning
-its `string` property. While the menu is open, typing and deletion within the
-active token filter the cached candidates immediately using case/diacritic-insensitive
-fuzzy matching, with prefix matches ranked first. Acceptance replaces the current
-UTF-16 token range and preserves surrounding text. Moving the caret, changing
-other command text, losing focus, starting IME composition, or changing editor
-width cancels the request. Height-only growth repositions the menu. All new UI is AppKit; there is no Lookout or
-SwiftUI completion view and no new terminal output renderer.
+**Implemented AppKit interface.** Typing starts a 60 ms debounced shell query
+when there is no reusable result set. A faint inline annotation previews the
+best match without changing the NSTextView document, selection, undo history,
+measured height, or command bytes. Prefix matches show their remaining suffix;
+a fuzzy replacement shows `→ option` so it cannot look like an appended command.
+Inline text never paints over an existing argument on the same line.
 
-The rounded menu displays only completion options, uses an accent-tinted selected
-row, and scrolls selection without animation. A zero-match query can recover by
-backspacing. Filtering uses the bounded result set from the initial Tab request;
-it does not discover candidates excluded by the shell's original query. Close
-and press Tab again to refresh the shell result set in a different context.
-Cmd+F opens terminal search from the editor, preserving the draft. The search
-field and result/navigation controls use matching AppKit styling; Escape closes
-search and returns focus to the originating editor when its pane still owns focus.
+The completion controller owns request lifetime and presentation separately from
+TextKit. The matching index decodes and normalizes each candidate once. Edits
+within the active token filter it synchronously with case/diacritic-insensitive
+fuzzy matching, ranking prefix matches first. Acceptance replaces the current
+UTF-16 token range through normal native editing. Caret/selection changes, loss
+of focus, external edits, and IME composition dismiss stale predictions. Height
+and width changes reposition annotations without cancelling valid suggestions.
 
-Implemented keyboard contract: Tab requests completion at a collapsed selection;
-a unique candidate is
-inserted. Multiple candidates open the menu; Tab/Shift-Tab or arrows move the
-selection, Return accepts it without executing, and Escape closes the menu
-without switching to terminal input. Escape also cancels a pending request before
-the menu appears. With no menu or pending request, Return and Escape keep their
-existing meanings. Option-Tab inserts a literal tab. Marked IME text always
-gets first refusal. Fish's own interaction similarly inserts a unique result,
-extends an unambiguous prefix for multiple results, and offers a pager navigable
-with Tab/Shift-Tab. Matching every pager behavior is optional scope, not a
-requirement for the first native menu.
-([fish interactive completion](https://fishshell.com/docs/current/interactive.html#tab-completion))
+For straightforward arguments, a broader shell query preserves the command and
+directory prefix while asking for options for the active basename. Command-name
+queries retain the first typed character to avoid exhausting the 200-result cap.
+Uncertain quoting/expansion syntax keeps its exact shell query. If the bounded
+broad results omit the typed prefix, the controller requests that exact token
+once. Cached edits need no shell process, filesystem read, or IPC. Automatic
+queries are limited to 16 KiB drafts; explicit completion retains the 1 MiB
+protocol limit. Custom shell completers can still be slow on a cold query.
+
+| Key | Behavior |
+| --- | --- |
+| Right with an inline preview | Accept the suggestion |
+| Tab or Down with an inline preview | Reveal the full option list, selecting the best match |
+| Tab without a prediction | Request and open the option list |
+| Up / Down in the list | Navigate options without animation |
+| Tab or Return in the list | Accept the selected option without running it |
+| Escape | Dismiss suggestions/list; preserve typed text |
+| Return with only an inline preview | Run exactly the typed draft |
+| Option-Tab / Shift-Return | Insert a literal tab / newline |
+
+Even a unique suggestion requires acceptance. Down without a visible suggestion
+retains native multiline navigation. With no suggestions pending, Escape keeps
+its terminal-input behavior. Marked IME text always gets first refusal.
+
+The option list, inline annotation, and search controls are AppKit, with shared
+rounded styling and no new SwiftUI view or renderer. Cmd+F opens terminal search
+from the editor while preserving its draft. Search owns ordinary clipboard and
+undo shortcuts; Escape restores the originating editor when its pane owns focus.
 
 **Future native-only alternative.** A separate command/path provider could enumerate executable
 names from the live shell's PATH and files relative to its current directory;
@@ -149,7 +158,7 @@ bridge directory. The app atomically publishes `completion-request` as:
 <prompt generation> LF
 <request UUID> LF
 <UTF-8 caret byte offset> LF
-<exact UTF-8 draft>
+<UTF-8 shell query (exact draft or broadened active token)>
 ```
 
 Only the dedicated `ESC [ 99 ; 2 ~` trigger travels through the real PTY. The
@@ -157,8 +166,9 @@ foreground widget consumes the request once; the worker claims its own copy by
 rename before reading. It publishes `completions/<UUID>/` with one atomic
 directory rename. This directory contains `generation`, `identifier`,
 `status` (`ok` or `rejected`), `reason`, `count`, `truncated` (`0` or `1`), and
-`items/<1..count>/buffer` plus `cursor`. Each item is a complete resulting draft
-and its UTF-8 caret byte offset. The app validates identity and bounds, converts
+`items-v1`, a packed sequence of `cursor NUL buffer NUL` records. Each buffer
+is the exact completed query and each cursor is its UTF-8 byte offset. The reader
+also accepts the original `items/<1..count>/buffer` and `cursor` representation. The app validates identity and bounds, converts
 offsets to UTF-16, and removes the consumed response. The in-app request UUID
 also binds the result to the draft revision and selection; those UI fields do
 not need to be interpreted by zsh.
@@ -166,8 +176,8 @@ not need to be interpreted by zsh.
 Drafts and individual resulting buffers are limited to 1 MiB; aggregate
 candidate buffers to 8 MiB; results to 200 distinct buffers; enumeration to
 400 match steps. The shell publishes truncation, but the current popup does not
-yet show a truncation indicator. The app waits approximately three seconds
-(150 response checks with 20 ms sleeps, plus I/O time). Cancellation stops app
+yet show a truncation indicator. The app waits on atomic-publication directory events with a cancellable three-second
+deadline, checking for an already-published result before waiting. Cancellation stops app
 waiting and removes matching queued/available files; it does not promise to
 interrupt an already-running completion function immediately. Worker teardown
 at execution/next prompt bounds its lifetime to the prompt session. New requests

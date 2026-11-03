@@ -549,6 +549,7 @@ typedef struct {
   bool snapshot_valid; // False when the parser owns the mutex; retry later.
   bool primary;
   bool viewport_at_bottom;
+  bool has_scrollback; // Actual history exists above the active terminal grid.
   bool cursor_valid; // Cursor is within the visible primary grid.
   uint32_t columns; // Applied terminal dimensions, not a queued resize.
   uint32_t rows;
@@ -569,11 +570,21 @@ typedef struct {
   char id[65];
   const char* label;
   uintptr_t label_len;
+  uintptr_t path_len; // UTF-8 prefix of label occupied by the directory, or zero.
   const char* suffix;
   uintptr_t suffix_len;
   bool current;
   bool pinned;
 } ghostty_command_chrome_s;
+
+// Visible directory-label cell bounds, in logical points from the surface top.
+typedef struct {
+  char id[65];
+  double x;
+  double y;
+  double width;
+  double height;
+} ghostty_command_path_hit_s;
 
 // Config types
 
@@ -1246,6 +1257,9 @@ GHOSTTY_API uintptr_t ghostty_surface_command_layout(ghostty_surface_t,
     ghostty_command_layout_s*, ghostty_command_block_s*, uintptr_t capacity);
 GHOSTTY_API void ghostty_surface_set_command_chrome(ghostty_surface_t, bool enabled,
     double pinned_offset_from_bottom, const ghostty_command_chrome_s*, uintptr_t count);
+// Nonblocking; false also means the parser owns the lock or geometry is changing.
+GHOSTTY_API bool ghostty_surface_command_path_at(ghostty_surface_t, double x, double y,
+    ghostty_command_path_hit_s*);
 GHOSTTY_API void ghostty_surface_set_native_input_inset(ghostty_surface_t, double bottom);
 GHOSTTY_API void ghostty_surface_set_native_input_padding(ghostty_surface_t, double horizontal, double bottom);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);

@@ -1563,6 +1563,7 @@ pub const CAPI = struct {
         snapshot_valid: bool,
         primary: bool,
         viewport_at_bottom: bool,
+        has_scrollback: bool,
         cursor_valid: bool,
         columns: u32,
         rows: u32,
@@ -1579,10 +1580,19 @@ pub const CAPI = struct {
         id: [65]u8,
         label: ?[*]const u8,
         label_len: usize,
+        path_len: usize,
         suffix: ?[*]const u8,
         suffix_len: usize,
         current: bool,
         pinned: bool,
+    };
+
+    const CommandPathHit = extern struct {
+        id: [65]u8,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
     };
 
     // ghostty_clipboard_content_s
@@ -2069,10 +2079,12 @@ pub const CAPI = struct {
         defer core.renderer_state.mutex.unlock(global.io());
         const term = core.renderer_state.terminal;
         const screen = term.screens.active;
+        const scrollbar = screen.pages.scrollbar();
         layout.* = .{
             .snapshot_valid = true,
             .primary = term.screens.active_key == .primary,
             .viewport_at_bottom = screen.viewportIsBottom(),
+            .has_scrollback = term.screens.active_key == .primary and scrollbar.total > scrollbar.len,
             .cursor_valid = false,
             .columns = screen.pages.cols,
             .rows = screen.pages.rows,
@@ -2096,7 +2108,7 @@ pub const CAPI = struct {
         const output = blocks orelse return 0;
         if (capacity == 0) return 0;
         screen.command_blocks.prune(&screen.pages);
-        const offset = screen.pages.scrollbar().offset;
+        const offset = scrollbar.offset;
         var written: usize = 0;
         for (screen.command_blocks.blocks.items) |block| {
             const region = @import("../terminal/CommandBlocks.zig").region(
@@ -2139,6 +2151,7 @@ pub const CAPI = struct {
             inputs[i] = .{
                 .id = std.mem.sliceTo(&entries.?[i].id, 0),
                 .label = if (entry.label) |p| p[0..@min(entry.label_len, 512)] else "",
+                .path_len = @min(entry.path_len, entry.label_len),
                 .suffix = if (entry.suffix) |p| p[0..@min(entry.suffix_len, 128)] else "",
                 .current = entry.current,
                 .pinned = entry.pinned,
@@ -2155,6 +2168,31 @@ pub const CAPI = struct {
         };
         state.mutex.unlock(global.io());
         if (changed) surface.refresh();
+    }
+
+    /// Resolve only the directory portion of the caption currently under a
+    /// click. No text extraction, filesystem work, or waiting on the parser.
+    export fn ghostty_surface_command_path_at(surface: *Surface, x: f64, y: f64, result: *CommandPathHit) bool {
+        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return false;
+        const core = &surface.core_surface;
+        const state = &core.renderer_state;
+        if (!state.mutex.tryLock()) return false;
+        defer state.mutex.unlock(global.io());
+        const term = state.terminal;
+        const size = core.size;
+        const grid = size.grid();
+        if (grid.columns != term.cols or grid.rows != term.rows) return false;
+        const scale = surface.content_scale;
+        const hit = state.command_chrome.pathAt(core.alloc, term, size, @floatCast(x * scale.x), @floatCast(y * scale.y)) catch return false;
+        const rect = hit orelse return false;
+        result.* = .{
+            .id = rect.id,
+            .x = @as(f64, rect.x) / scale.x,
+            .y = @as(f64, rect.y) / scale.y,
+            .width = @as(f64, rect.width) / scale.x,
+            .height = @as(f64, rect.height) / scale.y,
+        };
+        return true;
     }
 
     /// Reserve native UI inside the existing Metal drawable's bottom padding.
