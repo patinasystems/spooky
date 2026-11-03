@@ -12,6 +12,7 @@ import re
 import select
 import shlex
 import signal
+import subprocess
 import tempfile
 import time
 import unittest
@@ -795,6 +796,76 @@ class NativeInputBridgeTests(unittest.TestCase):
 
 
 @unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
+class NativeBranchMetadataTests(unittest.TestCase):
+    def setUp(self):
+        self.shell = Shell()
+        self.addCleanup(self.shell.close)
+
+    def git(self, *arguments, cwd=None):
+        return subprocess.check_output(
+            ["/usr/bin/git", "-C", str(cwd or self.shell.root), *arguments],
+            env={"HOME": str(self.shell.root), "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1"},
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+
+    def refresh(self, command="builtin :"):
+        _, generation = self.shell.submit(command)
+        self.shell.ready_after(generation)
+        return self.shell.metadata(self.shell.state()[3], "branch").decode()
+
+    def initialize(self, directory=None):
+        self.git("init", "-q", "-b", "main", cwd=directory)
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "commit", "-q", "--allow-empty", "-m", "fixture", cwd=directory)
+
+    def test_branch_reads_new_repository_and_live_branch_changes_without_cache(self):
+        self.assertEqual(self.refresh(), "")
+        self.initialize()
+        self.assertEqual(self.refresh(), "main")
+        self.git("checkout", "-q", "-b", "feature/café")
+        self.assertEqual(self.refresh(), "feature/café")
+        self.git("checkout", "-q", "--detach")
+        self.assertEqual(self.refresh(), "")
+        self.git("checkout", "-q", "main")
+        self.assertEqual(self.refresh(), "main")
+
+    def test_branch_follows_nested_repository_and_physical_cwd(self):
+        self.initialize()
+        nested = self.shell.root / "work"
+        (self.shell.root / "linked-work").symlink_to(nested, target_is_directory=True)
+        self.assertEqual(self.refresh("cd linked-work"), "main")
+        self.git("init", "-q", "-b", "nested", cwd=nested)
+        self.assertEqual(self.refresh(), "nested")
+        self.assertEqual(self.refresh("cd .."), "main")
+
+    def test_branch_resolves_worktree_gitdir_commondir_and_detached_head(self):
+        self.initialize()
+        linked = self.shell.root / "linked"
+        self.git("worktree", "add", "-q", "-b", "linked-branch", str(linked))
+        self.assertEqual(self.refresh("cd linked"), "linked-branch")
+        self.git("checkout", "-q", "--detach", cwd=linked)
+        self.assertEqual(self.refresh(), "")
+        self.git("checkout", "-q", "-b", "linked-next", cwd=linked)
+        self.assertEqual(self.refresh(), "linked-next")
+        self.assertEqual(self.refresh("cd .."), "main")
+
+    def test_branch_resolves_relative_gitfile_and_symbolic_ref_chain(self):
+        self.git("init", "-q", "-b", "main", "--separate-git-dir", str(self.shell.root / "git-data"),
+                 str(self.shell.root / "work"))
+        (self.shell.root / "work/.git").write_text("gitdir: ../git-data\n")
+        self.assertEqual(self.refresh("cd work"), "main")
+        self.git("symbolic-ref", "refs/heads/alias", "refs/heads/main", cwd=self.shell.root / "work")
+        self.git("symbolic-ref", "HEAD", "refs/heads/alias", cwd=self.shell.root / "work")
+        self.assertEqual(self.refresh(), "main")
+
+    def test_branch_explicit_git_environment_uses_git_fallback(self):
+        self.initialize(self.shell.root / "work")
+        self.assertEqual(self.refresh(), "")
+        self.assertEqual(self.refresh('export GIT_DIR="$HOME/work/.git"'), "main")
+        self.assertEqual(self.refresh("unset GIT_DIR"), "")
+
+
+@unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
 class NativeHistoryBridgeTests(unittest.TestCase):
     def shell(self, **options):
         shell = Shell(**options)
@@ -904,6 +975,22 @@ class NativeHistoryBridgeTests(unittest.TestCase):
             _, generation = deduplicating.submit(draft)
             deduplicating.ready_after(generation)
         self.assertEqual(deduplicating.history()["items"], [": one", ": two"])
+
+    def test_history_sparse_event_numbers_preserve_old_live_entries(self):
+        shell = self.shell(user_rc="HISTSIZE=2\n"
+            'for (( index=0; index<2050; ++index )); do print -sr -- "seed-$index"; done\n'
+            "HISTSIZE=10000\nsetopt hist_ignore_all_dups\n")
+        for command in [": ancient", *([": repeated"] * 40), ": newest"]:
+            _, generation = shell.submit(command)
+            shell.ready_after(generation)
+        self.assertEqual(shell.history()["items"][:3], [": newest", ": repeated", ": ancient"])
+
+    def test_history_large_dense_event_numbers_return_exact_recent_window(self):
+        shell = self.shell(user_rc="HISTSIZE=12000\n"
+            'for (( index=0; index<5000; ++index )); do print -sr -- "dense-$index"; done\n')
+        response = shell.history()
+        self.assertEqual(response["items"], [f"dense-{index}" for index in range(4999, 3999, -1)])
+        self.assertEqual(response["truncated"], "1")
 
     def test_history_queued_during_foreground_read_is_rejected_at_next_prompt(self):
         shell = self.shell()

@@ -119,16 +119,16 @@ struct CommandTextViewTests {
     }
 
     @Test func editorPaddingSurroundsTheViewportWithoutChangingTextMetrics() {
-        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 32))
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 36))
         editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
                                    textColor: .white, backgroundColor: .black, minimumLineHeight: 24)
         editor.layout()
-        #expect(editor.scrollView.frame == NSRect(x: 4, y: 4, width: 392, height: 24))
+        #expect(editor.scrollView.frame == NSRect(x: 6, y: 6, width: 388, height: 24))
         #expect(editor.textView.measuredContentHeight == 24)
 
-        editor.setFrameSize(NSSize(width: 400, height: 104))
+        editor.setFrameSize(NSSize(width: 400, height: 108))
         editor.layout()
-        #expect(editor.scrollView.frame == NSRect(x: 4, y: 4, width: 392, height: 96))
+        #expect(editor.scrollView.frame == NSRect(x: 6, y: 6, width: 388, height: 96))
         #expect(editor.textView.frame.height >= editor.scrollView.contentView.bounds.height)
         #expect(editor.textView.measuredContentHeight == 24)
     }
@@ -615,6 +615,103 @@ struct CommandTextViewTests {
         view.keyDown(with: try keyEvent(code: 124, characters: ""))
         #expect(view.string == "git checkout")
         #expect(view.completions.inlineSuggestion == nil)
+    }
+
+    @Test func nativeEditsStoreDraftAndReportHeightWithoutRebuildingHostPresentation() async throws {
+        let session = try CommandInputSession()
+        session.receive(.init(state: .init(kind: "ready", generation: "prompt-1", context: "start", blockID: "123-1"),
+                              receipt: nil, metadata: [:]))
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .textColor, backgroundColor: .textBackgroundColor, minimumLineHeight: 24)
+        let window = makeFocusWindow(containing: editor)
+        defer { window.close() }
+        editor.layoutSubtreeIfNeeded()
+        #expect(window.makeFirstResponder(editor.textView))
+        editor.onTextChanged = { session.setDraft($0) }
+        var presentations = 0
+        var heights: [CGFloat] = []
+        session.onChange = { presentations += 1 }
+        editor.onContentHeightChanged = { heights.append($0) }
+        await drainMainQueue()
+        await drainMainQueue()
+        let oneLine = editor.textView.measuredContentHeight + CommandInputView.padding * 2
+        heights.removeAll()
+
+        editor.textView.insertText("echo first", replacementRange: editor.textView.selectedRange())
+        await drainMainQueue()
+        #expect(session.draft == "echo first")
+        #expect(editor.textView.string == session.draft)
+        #expect(presentations == 0)
+        #expect(heights.isEmpty)
+
+        editor.textView.insertText("\n", replacementRange: editor.textView.selectedRange())
+        await drainMainQueue()
+        #expect(session.draft == "echo first\n")
+        #expect(presentations == 0)
+        #expect(try #require(heights.last) > oneLine)
+
+        // Width-dependent wrapping also reaches the host through its height
+        // callback, independently of session presentation notifications.
+        editor.textView.insertText(String(repeating: "word ", count: 60),
+                                   replacementRange: editor.textView.selectedRange())
+        await drainMainQueue()
+        #expect(session.draft == editor.textView.string)
+        #expect(presentations == 0)
+        #expect(try #require(heights.last) > oneLine * 2)
+    }
+
+    @Test func inlineGeometryAndAppearanceChangesPreserveSuggestionAndAcceptance() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        var requests: [CommandCompletionRequest] = []
+        view.onRequestCompletion = { requests.append($0) }
+        view.completions.requestAutomaticNow()
+        view.receiveCompletions(completionResponse(to: try #require(requests.first)))
+        #expect(view.completions.inlineSuggestion == "eckout")
+
+        view.setFrameSize(NSSize(width: 280, height: 48))
+        view.configureAppearance(font: .monospacedSystemFont(ofSize: 16, weight: .regular),
+                                 textColor: .white, backgroundColor: .black, minimumLineHeight: 28)
+        view.updateCompletionPosition()
+        // A window may lose key status without changing its first responder.
+        // Position updates hide the annotation without losing its valid draft.
+        window.simulatedKey = false
+        view.updateCompletionPosition()
+        window.simulatedKey = true
+        view.updateCompletionPosition()
+
+        #expect(requests.count == 1)
+        #expect(view.string == "git ch")
+        #expect(view.completions.inlineSuggestion == "eckout")
+        #expect(view.selectedRange() == NSRange(location: 6, length: 0))
+        view.keyDown(with: try keyEvent(code: 124, characters: ""))
+        #expect(view.string == "git checkout")
+        #expect(view.completions.inlineSuggestion == nil)
+    }
+
+    @Test func movingAPreviewDoesNotPreventItsInvalidationAfterEditingOrSelection() throws {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.setDraft("git ch")
+        let window = makeFocusWindow(containing: editor)
+        defer { window.close() }
+        editor.layoutSubtreeIfNeeded()
+        #expect(window.makeFirstResponder(editor.textView))
+        var request: CommandCompletionRequest?
+        editor.onRequestCompletion = { request = $0 }
+        editor.textView.completions.requestAutomaticNow()
+        editor.receiveCompletions(completionResponse(to: try #require(request)))
+        editor.textView.updateCompletionPosition()
+
+        editor.textView.insertText("p", replacementRange: editor.textView.selectedRange())
+        #expect(editor.textView.completions.inlineSuggestion == " → cherry-pick")
+        editor.textView.updateCompletionPosition()
+        #expect(editor.textView.completions.inlineSuggestion == " → cherry-pick")
+        editor.textView.setSelectedRange(NSRange(location: 0, length: 3))
+        editor.textView.updateCompletionPosition()
+        #expect(editor.textView.completions.inlineSuggestion == nil)
+        #expect(editor.textView.completionItems.isEmpty)
+        #expect(editor.textView.string == "git chp")
     }
 
     @Test func tabRevealsInlineOptionsAndSecondTabAcceptsTheSelectedOption() throws {

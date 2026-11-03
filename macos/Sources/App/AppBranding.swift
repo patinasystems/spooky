@@ -3,6 +3,12 @@ import AppKit
 /// Product identity belongs to the app bundle; the Ghostty module and terminal
 /// core keep their upstream names for source and configuration compatibility.
 enum AppBranding {
+    static var nativeInputEnabled: Bool {
+        let setting = ProcessInfo.processInfo.environment["GHOSTTY_NATIVE_INPUT"]
+        let bundleDefault = Bundle.main.object(forInfoDictionaryKey: "SpookyNativeInputEnabled") as? Bool ?? false
+        return setting == "1" || (setting != "0" && bundleDefault)
+    }
+
     static var displayName: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Spooky"
     }

@@ -47,8 +47,8 @@ final class SurfaceSearchOverlayView: NSView {
 
     override func layout() {
         super.layout()
-        let margin: CGFloat = 8
-        let width = max(1, min(370, bounds.width - margin * 2))
+        let margin = CommandOverlayStyle.inset
+        let width = max(1, min(320, bounds.width - margin * 2))
         bar.frame = NSRect(x: max(0, bounds.width - width - margin), y: margin,
                            width: width, height: CommandOverlayStyle.rowHeight + CommandOverlayStyle.inset * 2)
     }
@@ -132,6 +132,7 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
     var onClose: () -> Void = {}
     var onEscape: () -> Void = {}
     var onFocus: () -> Void = {}
+    private let surface = CommandOverlaySurface(blending: .withinWindow, castsShadow: true)
     private let icon = NSImageView()
     private let next = NSButton()
     private let previous = NSButton()
@@ -142,15 +143,13 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
 
     init() {
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = CommandOverlayStyle.cornerRadius
-        layer?.borderWidth = 1
-        layer?.shadowOpacity = 0.16
-        layer?.shadowRadius = 8
-        layer?.shadowOffset = NSSize(width: 0, height: -2)
+        // Shared overlay chrome sits beneath the controls, which stay direct
+        // subviews so focus, hit testing, and accessibility are unchanged.
+        addSubview(surface)
         [icon, field, count, next, previous, closeButton].forEach { addSubview($0) }
         icon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil)
         icon.imageScaling = .scaleProportionallyDown
+        icon.symbolConfiguration = .init(pointSize: 12, weight: .regular)
         field.placeholderString = "Find in terminal"
         field.font = .systemFont(ofSize: 13)
         field.isBordered = false
@@ -190,14 +189,21 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
         super.layout()
         let inset = CommandOverlayStyle.inset
         let row = CommandOverlayStyle.rowHeight
-        icon.frame = NSRect(x: inset + 6, y: inset + 8, width: 14, height: 14)
+        if surface.frame != bounds { surface.frame = bounds }
+        let midY = bounds.height / 2
+        icon.frame = NSRect(x: inset * 2, y: floor(midY - 7), width: 14, height: 14)
         closeButton.frame = NSRect(x: bounds.width - inset - row, y: inset, width: row, height: row)
         previous.frame = closeButton.frame.offsetBy(dx: -row, dy: 0)
         next.frame = previous.frame.offsetBy(dx: -row, dy: 0)
-        let countWidth = min(64, max(36, count.intrinsicContentSize.width + 4))
-        count.frame = NSRect(x: next.frame.minX - countWidth - 4, y: inset + 8, width: countWidth, height: 16)
-        field.frame = NSRect(x: inset + 28, y: inset + 6,
-                             width: max(1, count.frame.minX - inset - 36), height: 20)
+        let countSize = count.intrinsicContentSize
+        let countWidth = count.stringValue.isEmpty ? 0 : min(64, ceil(countSize.width))
+        let countHeight = ceil(countSize.height)
+        count.frame = NSRect(x: next.frame.minX - countWidth - inset, y: floor(midY - countHeight / 2),
+                             width: countWidth, height: countHeight)
+        let fieldX = icon.frame.maxX + inset
+        let fieldHeight = ceil(field.intrinsicContentSize.height)
+        field.frame = NSRect(x: fieldX, y: floor(midY - fieldHeight / 2),
+                             width: max(1, count.frame.minX - inset - fieldX), height: fieldHeight)
     }
 
     func update(needle: Ghostty.OSSurfaceView.SearchState.Needle, selected: UInt?, total: UInt?) {
@@ -266,6 +272,7 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
         button.imagePosition = .imageOnly
         button.isBordered = false
         button.bezelStyle = .inline
+        button.symbolConfiguration = .init(pointSize: 11, weight: .medium)
         button.target = self
         button.action = action
         button.toolTip = label
@@ -273,7 +280,6 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
     }
 
     private func updateColors() {
-        CommandOverlayStyle.apply(to: self)
         field.textColor = CommandOverlayStyle.primaryText
         count.textColor = CommandOverlayStyle.secondaryText
         icon.contentTintColor = CommandOverlayStyle.secondaryText

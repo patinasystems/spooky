@@ -20,8 +20,24 @@ final class CommandCompletionController {
     private(set) var selectedIndex = 0
     private(set) var listVisible = false
     private(set) var inlineSuggestion: String?
+    /// The `@` file picker shares this popup but never zsh's request state.
+    private(set) var filePicker = CommandFilePicker()
+    /// Set by `CommandTextView.keyDown` only for a typed `@` keystroke, so
+    /// paste, IME commits, history, and undo can never open the picker.
+    var pendingFileTrigger = false
+    var filePickerActive: Bool { filePicker.isActive }
 
-    init(textView: CommandTextView) { self.textView = textView }
+    init(textView: CommandTextView) {
+        self.textView = textView
+        filePicker.onChange = { [weak self] in self?.filePickerDidChange() }
+    }
+
+    /// Test and integration seam; replaces any active picker session.
+    func installFilePicker(_ picker: CommandFilePicker) {
+        filePicker.end()
+        filePicker = picker
+        picker.onChange = { [weak self] in self?.filePickerDidChange() }
+    }
 
     deinit { automaticTask?.cancel() }
 
@@ -30,9 +46,21 @@ final class CommandCompletionController {
     func didEdit() {
         revision &+= 1
         defer { editing = false }
+        let typedAt = pendingFileTrigger
+        pendingFileTrigger = false
         guard !accepting else { return }
         cancelAutomatic()
         guard let textView, !textView.string.isEmpty else { dismiss(); return }
+        if filePicker.isActive {
+            if canSuggest, filePicker.refresh(text: textView.string, cursor: textView.selectedRange().location) {
+                presentFilePicker()
+                return
+            }
+            // The `@query` ended (whitespace, deletion, caret moved): leave
+            // its text as typed and resume ordinary completion behavior.
+            dismiss()
+        }
+        if typedAt, beginFilePicker() { return }
         if let filter, let request, canSuggest,
            let matches = filter.items(in: textView.string, cursorUTF16: textView.selectedRange().location) {
             self.request = .init(id: request.id, revision: revision, text: textView.string,
@@ -57,6 +85,14 @@ final class CommandCompletionController {
 
     func selectionChanged() {
         guard !editing, !accepting else { return }
+        if filePicker.isActive {
+            guard let textView, textView.selectedRange().length == 0,
+                  filePicker.activeRange(in: textView.string, cursor: textView.selectedRange().location) != nil else {
+                dismiss()
+                return
+            }
+            return
+        }
         if let request, !isCurrent(request) { dismiss() }
         // A selection/caret move also cancels a debounced request whose result
         // has not arrived yet. It does not start unsolicited shell work.
@@ -124,7 +160,8 @@ final class CommandCompletionController {
     }
 
     func dismiss() {
-        let hadRequest = request != nil || !items.isEmpty || message != nil
+        let hadRequest = request != nil || (!items.isEmpty && !filePicker.isActive) || message != nil
+        if filePicker.isActive { filePicker.end() }
         cancelAutomatic()
         request = nil
         awaitingResponse = false
@@ -139,6 +176,7 @@ final class CommandCompletionController {
     }
 
     func handleKey(_ event: NSEvent) -> Bool {
+        if filePicker.isActive { return handleFilePickerKey(event) }
         let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
         if event.keyCode == 53, request != nil || automaticTask != nil || listVisible {
             dismiss()
@@ -217,6 +255,7 @@ final class CommandCompletionController {
     }
 
     private func accept(at index: Int) {
+        if filePicker.isActive { acceptFile(at: index); return }
         guard let textView, let request, isCurrent(request), items.indices.contains(index), textView.isEditable else {
             dismiss()
             return
@@ -234,6 +273,7 @@ final class CommandCompletionController {
     }
 
     private func present() {
+        if filePicker.isActive { presentFilePicker(); return }
         guard let textView else { return }
         if listVisible {
             inlineSuggestion = nil
@@ -253,7 +293,18 @@ final class CommandCompletionController {
 
     func updatePosition() {
         guard let textView else { return }
-        if listVisible { popup?.updatePosition(for: textView) } else { updateInlineSuggestion() }
+        if listVisible {
+            popup?.updatePosition(for: textView)
+        } else if canSuggest, let inlineSuggestion {
+            // Draft/candidate edits compute this projection in present();
+            // selection changes invalidate it. A geometry or appearance
+            // update must not rebuild and validate the command again.
+            ghost.show(inlineSuggestion, in: textView)
+        } else {
+            // Losing key-window status can be temporary without changing the
+            // draft. Keep its projection available for the next valid layout.
+            ghost.removeFromSuperview()
+        }
     }
 
     private func updateInlineSuggestion() {
@@ -296,6 +347,130 @@ final class CommandCompletionController {
             return CommandCompletionBridge.byteOffset(in: result, cursorUTF16: cursor) != nil
         }
         return true
+    }
+}
+
+// MARK: - `@` file picker
+
+extension CommandCompletionController {
+    private func beginFilePicker() -> Bool {
+        guard canSuggest, let textView, let cwd = textView.fileSearchDirectory else { return false }
+        let cursor = textView.selectedRange().location
+        guard cursor > 0, CommandFilePicking.triggers(in: textView.string, at: cursor - 1) else { return false }
+        dismiss()
+        filePicker.begin(anchor: cursor - 1, cwd: cwd)
+        guard filePicker.refresh(text: textView.string, cursor: cursor) else {
+            filePicker.end()
+            return false
+        }
+        presentFilePicker()
+        return true
+    }
+
+    private func filePickerDidChange() {
+        guard filePicker.isActive else { return }
+        guard canSuggest else { dismiss(); return }
+        presentFilePicker()
+    }
+
+    private func presentFilePicker() {
+        guard let textView, let session = filePicker.session else { return }
+        listVisible = true
+        inlineSuggestion = nil
+        ghost.removeFromSuperview()
+        items = filePicker.candidates()
+        selectedIndex = filePicker.selectedIndex
+        guard textView.window?.isVisible == true else { return }
+        let popup = popup ?? {
+            let view = CommandCompletionView()
+            view.onAccept = { [weak self] in self?.accept(at: $0) }
+            self.popup = view
+            return view
+        }()
+        popup.show(items: items, message: filePicker.message, selected: selectedIndex,
+                   header: filePicker.header, anchor: session.anchor, for: textView)
+    }
+
+    /// Tab drills into a folder or accepts a file; Return accepts either;
+    /// Up/Down and Control-N/P select; Command-Up browses the parent; Escape
+    /// closes with the text unchanged. Other keys stay native editing.
+    private func handleFilePickerKey(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        switch event.keyCode {
+        case 53:
+            dismiss()
+            return true
+        case 48 where modifiers.isEmpty:
+            if let entry = filePicker.selectedEntry {
+                if entry.isDirectory { browseFilePicker(into: entry.path) } else { acceptFile(at: filePicker.selectedIndex) }
+            }
+            return true
+        case 48 where modifiers == .shift:
+            moveFileSelection(-1)
+            return true
+        case 48:
+            dismiss()
+            return handleKey(event)
+        case 36, 76:
+            guard modifiers.isEmpty else { dismiss(); return false }
+            acceptFile(at: filePicker.selectedIndex)
+            return true
+        case 125 where modifiers.isEmpty, 45 where modifiers == .control:
+            moveFileSelection(1)
+            return true
+        case 126 where modifiers.isEmpty, 35 where modifiers == .control:
+            moveFileSelection(-1)
+            return true
+        case 126 where modifiers == .command:
+            browseFilePicker(into: nil)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func moveFileSelection(_ delta: Int) {
+        filePicker.move(delta)
+        selectedIndex = filePicker.selectedIndex
+        popup?.select(index: selectedIndex)
+    }
+
+    /// Scope changes are picker state only; the query text is reset to `@`
+    /// so folder names with spaces never enter the draft unquoted.
+    private func browseFilePicker(into directory: String?) {
+        guard let textView, textView.isEditable,
+              let range = filePicker.activeRange(in: textView.string, cursor: textView.selectedRange().location) else {
+            dismiss()
+            return
+        }
+        if let directory { filePicker.enter(directory: directory) } else { filePicker.enterParent() }
+        if range.length > 1 {
+            accepting = true
+            textView.breakUndoCoalescing()
+            textView.insertText("", replacementRange: NSRange(location: range.location + 1, length: range.length - 1))
+            textView.breakUndoCoalescing()
+            accepting = false
+        }
+        guard filePicker.refresh(text: textView.string, cursor: textView.selectedRange().location) else {
+            dismiss()
+            return
+        }
+        presentFilePicker()
+    }
+
+    /// Accepts only results computed for the current query generation; a
+    /// stale list shown while a newer lookup is pending is never inserted.
+    private func acceptFile(at index: Int) {
+        guard let textView, textView.isEditable,
+              let result = filePicker.acceptance(at: index, text: textView.string,
+                                                 cursor: textView.selectedRange().location) else { return }
+        dismiss()
+        accepting = true
+        defer { accepting = false }
+        textView.breakUndoCoalescing()
+        textView.insertText(result.text, replacementRange: result.range)
+        textView.breakUndoCoalescing()
+        textView.scrollRangeToVisible(textView.selectedRange())
     }
 }
 

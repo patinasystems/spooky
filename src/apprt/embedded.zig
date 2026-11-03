@@ -1567,6 +1567,9 @@ pub const CAPI = struct {
         cursor_valid: bool,
         columns: u32,
         rows: u32,
+        scrollback_rows: u64,
+        active_cursor_row: u32,
+        unreserved_grid_height: f64,
         cell_width: f64,
         cell_height: f64,
         padding_left: f64,
@@ -2072,7 +2075,10 @@ pub const CAPI = struct {
         const padding_left = @as(f64, @floatFromInt(size.padding.left)) / scale.x;
         const padding_top = @as(f64, @floatFromInt(size.padding.top)) / scale.y;
 
+        // Project placement against the grid before the editor reserves its
+        // footer. The footer itself must never be evidence of real overflow.
         layout.snapshot_valid = false;
+        const unreserved = core.sizeWithNativeInputBottom(0) catch return 0;
         // Geometry is advisory. Never block the GUI behind a hot PTY parser;
         // terminal chrome itself is snapshotted by the renderer's normal path.
         if (!core.renderer_state.mutex.tryLock()) return 0;
@@ -2088,6 +2094,9 @@ pub const CAPI = struct {
             .cursor_valid = false,
             .columns = screen.pages.cols,
             .rows = screen.pages.rows,
+            .scrollback_rows = scrollbar.total -| scrollbar.len,
+            .active_cursor_row = screen.cursor.y,
+            .unreserved_grid_height = @as(f64, @floatFromInt(unreserved.terminal().height)) / scale.y,
             .cell_width = cell_width,
             .cell_height = cell_height,
             .padding_left = padding_left,

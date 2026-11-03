@@ -1,0 +1,243 @@
+diff --git a/src/content.rs b/src/content.rs
+index 954039d..3969072 100644
+--- a/src/content.rs
++++ b/src/content.rs
+@@ -2086,6 +2086,11 @@ fn content_of(gids: &[(u32, u32, u32, u32)], g: u32) -> Option<(usize, u32)> {
+ }
+ 
+ impl Content {
++    /// No manifest or segment access for a names-only engine.
++    pub(crate) fn empty(dir: PathBuf) -> Content {
++        Content { dir, segs: Vec::new(), next_id: 1, gids: Vec::new(), base: Vec::new(), blocks: Vec::new(), copies: Vec::new(), users: Vec::new(), sources: Vec::new() }
++    }
++
+     /// Open the segments the manifest lists, without touching anything: the
+     /// view of an engine that follows another process's index.
+     pub fn open_shared(dir: PathBuf) -> Content {
+diff --git a/src/engine.rs b/src/engine.rs
+index 35c3922..1143ea4 100644
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -91,6 +91,7 @@ struct Shared {
+     /// than answer "indexing".
+     loading: (Mutex<bool>, Condvar),
+     content: RwLock<Content>,
++    content_index_enabled: bool,
+     home: String,
+     dir: PathBuf,
+     /// Wakes the apply loop; an empty batch is a no-op wake-up.
+@@ -150,6 +151,17 @@ pub fn no_materialize() {
+ /// Searches run here, at user-interactive QoS: an app's background executor
+ /// (or any low-QoS caller) would otherwise put the scan on efficiency cores.
+ /// Each search gets it here, which notes when (`LAST_SEARCH`).
++/// A filename picker should not promote every search thread to UI-critical QoS.
++fn names_pool() -> &'static rayon::ThreadPool {
++    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
++    POOL.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(2)
++        .thread_name(|i| format!("fsearch-names-{i}"))
++        .start_handler(|_| {
++            no_materialize();
++            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
++        }).build().unwrap())
++}
++
+ fn search_pool() -> &'static rayon::ThreadPool {
+     LAST_SEARCH.store(now_ns(), Ordering::Relaxed);
+     pool()
+@@ -227,7 +239,16 @@ impl Engine {
+     /// Start indexing in the background and return at once. Searches wait
+     /// while a saved index loads, and answer `Err` while the very first run
+     /// builds one.
+-    pub fn start(mut opts: Options) -> Result<Engine, String> {
++    pub fn start(opts: Options) -> Result<Engine, String> {
++        Self::start_with_content(opts, true)
++    }
++
++    /// App-owned filename search: never load, read, or index file contents.
++    pub fn start_names_only(opts: Options) -> Result<Engine, String> {
++        Self::start_with_content(opts, false)
++    }
++
++    fn start_with_content(mut opts: Options, content_index_enabled: bool) -> Result<Engine, String> {
+         std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
+         // Home as paths are compared to it: "/h/" put nothing in content scope.
+         if opts.home.len() > 1 && opts.home.ends_with('/') {
+@@ -253,12 +274,19 @@ impl Engine {
+         let loading = Index::load(&dir.join("index.bin"));
+         let (tx, rx) = std::sync::mpsc::channel();
+         let (ctx, crx) = std::sync::mpsc::channel();
+-        let content = if owner { Content::open(dir.join("content")) } else { Content::open_shared(dir.join("content")) };
++        let content = if !content_index_enabled {
++            Content::empty(dir.join("content"))
++        } else if owner {
++            Content::open(dir.join("content"))
++        } else {
++            Content::open_shared(dir.join("content"))
++        };
+         let content_ready = AtomicBool::new(!owner || !content.segs.is_empty());
+         let shared = Arc::new(Shared {
+             live: RwLock::new(None),
+             loading: (Mutex::new(loading.is_some()), Condvar::new()),
+             content: RwLock::new(content),
++            content_index_enabled,
+             home: opts.home,
+             dir,
+             wake: tx,
+@@ -279,7 +307,7 @@ impl Engine {
+             content_early: Mutex::new(Vec::new()),
+             on_change: RwLock::new(Vec::new()),
+         });
+-        if owner {
++        if owner && content_index_enabled {
+             start_content(&shared);
+         }
+         let s = shared.clone();
+@@ -288,6 +316,9 @@ impl Engine {
+         // mapped, so a restart's first answer needn't wait (`fsearch <query>`
+         // with no daemon running: 33 -> 27 ms on the M6).
+         spawn("fsearch-apply", move || {
++            if !s.content_index_enabled {
++                unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
++            }
+             let (live, replay) = match loading {
+                 Some(b) => {
+                     log(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
+@@ -360,7 +391,7 @@ impl Engine {
+         WARM_UNTIL.store(0, Ordering::Relaxed);
+         let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
+             let mut p = Vec::new();
+-            search_pool()
++            (if self.s.content_index_enabled { search_pool() } else { names_pool() })
+                 .install(|| Searcher { live }.search(q))
+                 .into_iter()
+                 .map(|h| {
+@@ -388,6 +419,9 @@ impl Engine {
+     /// The bool says whether the content index answered (false: files were
+     /// picked from the name index and read, for folders it doesn't cover).
+     pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
++        if !self.s.content_index_enabled {
++            return Err("content search is disabled".into());
++        }
+         WARM_UNTIL.store(0, Ordering::Relaxed);
+         let home = self.s.home.as_bytes();
+         let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
+@@ -513,7 +547,7 @@ impl Shared {
+         }
+         let t = Instant::now();
+         let hold = walk::Hold::new();
+-        let ls = folder_listings(dir);
++        let ls = folder_listings(dir, if self.content_index_enabled { EARLY_THREADS } else { 2 });
+         drop(hold);
+         let live = Live::new(Index::build(ls, 0, 0, self.home.as_bytes()));
+         log(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
+@@ -528,6 +562,7 @@ impl Shared {
+     /// build reads the same files as the answer's direct scan.
+     fn index_first(&self, early: Option<Arc<Early>>) {
+         if let Some(e) = early
++            && self.content_index_enabled
+             && self.owner()
+             && content::in_scope(&e.dir, self.home.as_bytes())
+             && !e.indexing.swap(true, Ordering::Relaxed)
+@@ -567,6 +602,7 @@ impl Shared {
+             self.watch(base.event_id);
+             *self.live.write().unwrap() = Some(Live::new(base));
+         }
++        if !self.content_index_enabled { return; }
+         let cdir = self.dir.join("content");
+         let changed = std::fs::metadata(&cdir).and_then(|m| m.modified()).ok();
+         let mut seen = self.content_seen.lock().unwrap();
+@@ -593,9 +629,11 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
+     }
+     s.owner.store(true, Ordering::Relaxed);
+     log("took over the index from a previous owner");
+-    *s.content.write().unwrap() = Content::open(s.dir.join("content"));
++    if s.content_index_enabled {
++        *s.content.write().unwrap() = Content::open(s.dir.join("content"));
++        start_content(s);
++    }
+     rescan_unskipped(s);
+-    start_content(s);
+     true
+ }
+ 
+@@ -664,7 +702,7 @@ const EARLY_THREADS: usize = 16;
+ /// whole subtree. Where the whole-disk crawl would not descend (a mount
+ /// point, a file, a missing or skipped folder) the chain stops, and the
+ /// index has nothing under `dir` either.
+-fn folder_listings(dir: &[u8]) -> Vec<Listing> {
++fn folder_listings(dir: &[u8], threads: usize) -> Vec<Listing> {
+     let comps: Vec<&[u8]> = dir.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
+     let (mut out, mut path) = (Vec::new(), b"/".to_vec());
+     for (i, &c) in comps.iter().enumerate() {
+@@ -679,7 +717,7 @@ fn folder_listings(dir: &[u8]) -> Vec<Listing> {
+         }
+     }
+     let k = comps.len() as u32;
+-    for mut l in walk::scan(dir, EARLY_THREADS) {
++    for mut l in walk::scan(dir, threads) {
+         l.id += k;
+         for e in l.ents.iter_mut().filter(|e| e.child != NONE) {
+             e.child += k;
+@@ -890,7 +928,7 @@ fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs
+ fn full_build(shared: &Shared, event_id: u64) -> Index {
+     let t = Instant::now();
+     let started = crate::query::now_secs();
+-    let ls = walk::scan_disk(SCAN_THREADS);
++    let ls = walk::scan_disk(if shared.content_index_enabled { SCAN_THREADS } else { 2 });
+     let idx = Index::build(ls, event_id, started, shared.home.as_bytes());
+     let path = shared.dir.join("index.bin");
+     let saved = idx.save(&path);
+@@ -968,7 +1006,9 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
+         std::mem::take(&mut live.trees)
+     };
+     let n = dirs.len();
+-    let _ = shared.content_tx.send((dirs, trees));
++    if shared.content_index_enabled {
++        let _ = shared.content_tx.send((dirs, trees));
++    }
+     shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
+     log(format!(
+         "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
+@@ -1144,7 +1184,9 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
+             }
+             let (rec, flat): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|(_, (r, _))| *r);
+             trees.extend(rec.into_iter().map(|(p, _)| p));
+-            let _ = shared.content_tx.send((flat.into_iter().map(|(p, _)| p).collect(), trees));
++            if shared.content_index_enabled {
++                let _ = shared.content_tx.send((flat.into_iter().map(|(p, _)| p).collect(), trees));
++            }
+         }
+         let replay = gap.filter(|(_, at)| at.elapsed() >= REPLAY_QUIET).map(|(from, _)| from);
+         if rebuild || (replay.is_some() && replays >= 3) {
+diff --git a/src/query.rs b/src/query.rs
+index d0d1a6c..2e00192 100644
+--- a/src/query.rs
++++ b/src/query.rs
+@@ -428,6 +428,27 @@ const TYPES: &[(&str, &[&str])] = &[
+ ];
+ 
+ impl Query {
++    /// Literal fuzzy words for a filename picker, with no query-language syntax.
++    pub fn literal_names(s: &str) -> Query {
++        fn tokens(s: &str) -> Vec<Token> {
++            // The searcher's positive-token mask has eight bits, as in push_token.
++            let words: Vec<&str> = s.split_whitespace().collect();
++            words.into_iter().rev().take(8).collect::<Vec<_>>().into_iter().rev().map(|word| {
++                let text: Vec<u8> = word.bytes().map(|b| b.to_ascii_lowercase()).collect();
++                let mask = text.iter().fold(0, |m, &b| m | char_bit(b));
++                let mut token = Token { text, mask, mode: Mode::Fuzzy, negate: false, edits: 0, deep: false, start: 0, rest: 0, under: false };
++                token.set_typos(false);
++                token
++            }).collect()
++        }
++        Query {
++            tokens: tokens(s),
++            alt: if s.is_ascii() { None } else { other_form(s).map(|s| tokens(&s)) },
++            size: (0, u64::MAX), mtime: (0, u32::MAX), limit: 50,
++            ..Default::default()
++        }
++    }
++
+     /// Parse the human query language. Plain words are fuzzy tokens;
+     /// `'x` exact, `^x` prefix, `x$` suffix, `!x` negate; globs (`*.rs`,
+     /// `src/**/*.{c,h}`) and folders (`test/`), each negated by `!`;

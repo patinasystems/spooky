@@ -21,6 +21,12 @@ struct CommandCompletionCandidate: Sendable {
     var cursorUTF16: Int?
 }
 
+/// Optional scope line above the list (the `@` picker's folder and status).
+struct CommandCompletionHeader: Equatable {
+    var title: String
+    var status: String
+}
+
 struct CommandCompletionResponse: Sendable {
     let requestID: UUID
     let revision: UInt64
@@ -35,9 +41,15 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     private let panel: CommandCompletionPanel
     private let table = CommandCompletionTable()
     private let scrollView = NSScrollView()
-    private let background = CommandCompletionBackground(frame: .zero)
+    private let surface = CommandOverlaySurface(blending: .behindWindow, castsShadow: false)
+    private let headerTitle = NSTextField(labelWithString: "")
+    private let headerStatus = NSTextField(labelWithString: "")
+    private var header: CommandCompletionHeader?
     private var items: [CommandCompletionCandidate] = []
     private var message: String?
+    private var font = CommandCompletionView.fallbackFont
+    private var contentWidth = CommandOverlayStyle.minimumPopupWidth
+    private var anchorLocation: Int?
     var onAccept: (Int) -> Void = { _ in }
 
     override init() {
@@ -79,13 +91,37 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.contentView.drawsBackground = false
-        background.addSubview(scrollView)
-        panel.contentView = background
+        for label in [headerTitle, headerStatus] {
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = CommandOverlayStyle.secondaryText
+            label.isHidden = true
+            surface.contentView.addSubview(label)
+        }
+        headerTitle.lineBreakMode = .byTruncatingHead
+        headerStatus.alignment = .right
+        surface.contentView.addSubview(scrollView)
+        panel.contentView = surface
     }
 
-    func show(items: [CommandCompletionCandidate], message: String?, selected: Int, for textView: NSTextView) {
+    func show(items: [CommandCompletionCandidate], message: String?, selected: Int,
+              header: CommandCompletionHeader? = nil, anchor: Int? = nil, for textView: NSTextView) {
         self.items = items
         self.message = message
+        if self.header != header {
+            self.header = header
+            headerTitle.stringValue = header?.title ?? ""
+            headerStatus.stringValue = header?.status ?? ""
+            headerTitle.isHidden = header == nil
+            headerStatus.isHidden = header?.status.isEmpty ?? true
+            table.setAccessibilityLabel(header.map { "Files in \($0.title)" } ?? "Command completions")
+        }
+        // Match the editor's face so labels read as a continuation of the
+        // typed token rather than a separate UI font.
+        if let editorFont = textView.font, editorFont != font { font = editorFont }
+        anchorLocation = anchor ?? Self.anchorLocation(for: items, in: textView)
+        contentWidth = header.map { Self.width(for: $0, contentWidth: measuredWidth()) } ?? measuredWidth()
+        let rowHeight = Self.rowHeight(for: font)
+        if table.rowHeight != rowHeight { table.rowHeight = rowHeight }
         table.reloadData()
         updatePosition(for: textView)
         select(index: selected)
@@ -111,6 +147,78 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         return NSPoint(x: viewport.minX, y: max(0, min(y, documentHeight - viewport.height)))
     }
 
+    private static let fallbackFont = NSFont.monospacedSystemFont(ofSize: 12.5, weight: .regular)
+    private static let detailFont = NSFont.systemFont(ofSize: 11)
+    /// Bounded so very large result sets cannot stall a keystroke.
+    private static let measuredItemLimit = 200
+    /// Enough for a legible abbreviated folder path; it truncates at the head.
+    private static let headerMinimumWidth: CGFloat = 260
+    /// NSTextField label cells draw glyphs 2pt inside their frame.
+    private static let labelPadding: CGFloat = 2
+
+    /// Reserve the whole status and a short scope label, while keeping the
+    /// same bounded popup width as ordinary completion results.
+    static func width(for header: CommandCompletionHeader, contentWidth: CGFloat) -> CGFloat {
+        let attributes: [NSAttributedString.Key: Any] = [.font: detailFont]
+        let statusWidth = ceil((header.status as NSString).size(withAttributes: attributes).width)
+        let titleWidth = min(96, ceil((header.title as NSString).size(withAttributes: attributes).width))
+        let headerWidth = statusWidth + titleWidth + CommandOverlayStyle.inset * 5
+        return min(CommandOverlayStyle.maximumPopupWidth, max(headerMinimumWidth, max(contentWidth, headerWidth)))
+    }
+
+    /// Grows with the editor font so large faces never clip; 6pt above and below.
+    static func rowHeight(for font: NSFont) -> CGFloat {
+        let line = font.ascender - font.descender + font.leading
+        return max(CommandOverlayStyle.rowHeight, ceil(line + CommandOverlayStyle.inset * 2))
+    }
+
+    /// Fits the panel on whichever side of the caret has room, trimming the
+    /// visible row count (never below one) instead of leaving the screen.
+    static func panelGeometry(rows: Int, rowHeight: CGFloat, caret: NSRect,
+                              available: NSRect, extra: CGFloat = 0) -> (y: CGFloat, height: CGFloat) {
+        let inset = CommandOverlayStyle.inset
+        let spaceBelow = caret.minY - inset - available.minY
+        let spaceAbove = available.maxY - caret.maxY - inset
+        let wanted = CGFloat(min(8, max(1, rows))) * rowHeight + inset * 2 + extra
+        let placeBelow = wanted <= spaceBelow || spaceBelow >= spaceAbove
+        let space = max(0, min(placeBelow ? spaceBelow : spaceAbove, available.height))
+        let fitting = max(1, Int(floor((space - inset * 2 - extra) / rowHeight)))
+        let height = min(wanted, CGFloat(fitting) * rowHeight + inset * 2 + extra)
+        let y = placeBelow ? caret.minY - inset - height : caret.maxY + inset
+        return (min(max(y, available.minY), available.maxY - height), height)
+    }
+
+    /// Shared start of the replaced token, so labels line up under it.
+    private static func anchorLocation(for items: [CommandCompletionCandidate], in textView: NSTextView) -> Int? {
+        guard let range = items.first?.replacementRange, range.location != NSNotFound else { return nil }
+        let cursor = textView.selectedRange().location
+        guard range.location <= cursor, cursor <= (textView.string as NSString).length,
+              items.allSatisfy({ $0.replacementRange.location == range.location }) else { return nil }
+        let token = (textView.string as NSString).substring(with: NSRange(location: range.location,
+                                                                         length: cursor - range.location))
+        return token.contains("\n") ? nil : range.location
+    }
+
+    private func measuredWidth() -> CGFloat {
+        let titleAttributes: [NSAttributedString.Key: Any] = [.font: font]
+        let detailAttributes: [NSAttributedString.Key: Any] = [.font: Self.detailFont]
+        var titleWidth: CGFloat = 0
+        var detailWidth: CGFloat = 0
+        if items.isEmpty {
+            titleWidth = ((message ?? "No completions") as NSString).size(withAttributes: titleAttributes).width
+        }
+        for item in items.prefix(Self.measuredItemLimit) {
+            titleWidth = max(titleWidth, (item.displayText as NSString).size(withAttributes: titleAttributes).width)
+            if !item.detail.isEmpty {
+                detailWidth = max(detailWidth, (item.detail as NSString).size(withAttributes: detailAttributes).width)
+            }
+        }
+        let gap = detailWidth > 0 ? CommandOverlayStyle.inset * 3 : 0
+        let chrome = CommandOverlayStyle.inset * 4 + Self.labelPadding * 4
+        return min(CommandOverlayStyle.maximumPopupWidth,
+                   max(CommandOverlayStyle.minimumPopupWidth, ceil(titleWidth + gap + detailWidth + chrome)))
+    }
+
     func updatePosition(for textView: NSTextView) {
         guard let parent = textView.window, parent.isVisible, parent.isKeyWindow,
               !textView.isHiddenOrHasHiddenAncestor,
@@ -118,17 +226,42 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
             dismiss()
             return
         }
-        let anchor = textView.firstRect(forCharacterRange: textView.selectedRange(), actualRange: nil)
-        let available = screen.visibleFrame.insetBy(dx: 8, dy: 8)
-        let width = min(420, available.width)
-        let height = CGFloat(min(8, max(1, items.count))) * table.rowHeight + CommandOverlayStyle.inset * 2
-        let x = min(max(anchor.minX, available.minX), available.maxX - width)
-        let below = anchor.minY - height - 3
-        let y = below >= available.minY ? below : min(anchor.maxY + 3, available.maxY - height)
+        let caret = textView.firstRect(forCharacterRange: textView.selectedRange(), actualRange: nil)
+        let length = (textView.string as NSString).length
+        let tokenX = anchorLocation.flatMap { location -> CGFloat? in
+            guard location <= length else { return nil }
+            return textView.firstRect(forCharacterRange: NSRange(location: location, length: 0), actualRange: nil).minX
+        } ?? caret.minX
+        let inset = CommandOverlayStyle.inset
+        let available = screen.visibleFrame.insetBy(dx: inset, dy: inset)
+        let width = min(contentWidth, available.width)
+        let headerExtra = header == nil ? 0 : CommandOverlayStyle.headerHeight
+        let geometry = Self.panelGeometry(rows: numberOfRows(in: table), rowHeight: table.rowHeight,
+                                          caret: caret, available: available, extra: headerExtra)
+        // Panel inset plus label leading puts label glyphs under the token.
+        let x = min(max(tokenX - inset * 2 - Self.labelPadding, available.minX), available.maxX - width)
         if panel.appearance?.name != textView.effectiveAppearance.name { panel.appearance = textView.effectiveAppearance }
-        let frame = NSRect(x: x, y: y, width: width, height: height)
-        if panel.frame != frame { panel.setFrame(frame, display: true, animate: false) }
-        scrollView.frame = background.bounds.insetBy(dx: CommandOverlayStyle.inset, dy: CommandOverlayStyle.inset)
+        let frame = NSRect(x: x, y: geometry.y, width: width, height: geometry.height)
+        if panel.frame != frame {
+            let resized = panel.frame.size != frame.size
+            panel.setFrame(frame, display: true, animate: false)
+            if resized { panel.invalidateShadow() }
+        }
+        surface.layoutSubtreeIfNeeded()
+        let content = surface.contentView.bounds
+        if header != nil {
+            // Non-flipped content: the header occupies the top band.
+            let band = NSRect(x: inset * 2, y: content.maxY - inset - CommandOverlayStyle.headerHeight,
+                              width: content.width - inset * 4, height: CommandOverlayStyle.headerHeight)
+            let statusWidth = headerStatus.isHidden ? 0 : min(band.width, ceil(headerStatus.intrinsicContentSize.width))
+            let labelHeight = ceil(headerTitle.intrinsicContentSize.height)
+            let y = floor(band.midY - labelHeight / 2)
+            headerStatus.frame = NSRect(x: band.maxX - statusWidth, y: y, width: statusWidth, height: labelHeight)
+            headerTitle.frame = NSRect(x: band.minX, y: y, width: max(0, band.width - statusWidth - (statusWidth > 0 ? inset : 0)),
+                                       height: labelHeight)
+        }
+        scrollView.frame = NSRect(x: inset, y: inset, width: max(0, content.width - inset * 2),
+                                  height: max(0, content.height - inset * 2 - headerExtra))
         let tableSize = NSSize(width: scrollView.contentSize.width, height: CGFloat(table.numberOfRows) * table.rowHeight)
         if table.frame.size != tableSize { table.setFrameSize(tableSize) }
         if table.tableColumns.first?.width != tableSize.width { table.tableColumns.first?.width = tableSize.width }
@@ -158,9 +291,9 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
             ?? CommandCompletionCell()
         cell.identifier = identifier
         if items.indices.contains(row) {
-            cell.configure(title: items[row].displayText, detail: items[row].detail)
+            cell.configure(title: items[row].displayText, detail: items[row].detail, font: font)
         } else {
-            cell.configure(title: message ?? "No completions", detail: "")
+            cell.configure(title: message ?? "No completions", detail: "", font: font, muted: true)
         }
         return cell
     }
@@ -184,26 +317,16 @@ private final class CommandCompletionTable: NSTableView {
 }
 
 @MainActor
-private final class CommandCompletionBackground: NSView {
-    override var wantsUpdateLayer: Bool { true }
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func updateLayer() { CommandOverlayStyle.apply(to: self) }
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
-}
-
-@MainActor
 private final class CommandCompletionRow: NSTableRowView {
+    // The tinted selection is light; keep label colors instead of AppKit's
+    // emphasized white-on-accent text, which is unreadable in light mode.
+    override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+
     override func drawSelection(in dirtyRect: NSRect) {
         guard isSelected else { return }
         CommandOverlayStyle.selectionBackground.setFill()
-        NSBezierPath(roundedRect: bounds.insetBy(dx: 0, dy: 1), xRadius: 6, yRadius: 6).fill()
+        let radius = CommandOverlayStyle.selectionRadius
+        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
     }
 }
 
@@ -214,7 +337,6 @@ private final class CommandCompletionCell: NSTableCellView {
 
     init() {
         super.init(frame: .zero)
-        title.font = .monospacedSystemFont(ofSize: 12.5, weight: .regular)
         title.textColor = CommandOverlayStyle.primaryText
         title.lineBreakMode = .byTruncatingMiddle
         detail.font = .systemFont(ofSize: 11)
@@ -227,7 +349,9 @@ private final class CommandCompletionCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func configure(title: String, detail: String) {
+    func configure(title: String, detail: String, font: NSFont, muted: Bool = false) {
+        if self.title.font != font { self.title.font = font }
+        self.title.textColor = muted ? CommandOverlayStyle.secondaryText : CommandOverlayStyle.primaryText
         self.title.stringValue = title.replacingOccurrences(of: "\n", with: "↵")
         self.detail.stringValue = detail.replacingOccurrences(of: "\n", with: " ")
         needsLayout = true
@@ -235,9 +359,14 @@ private final class CommandCompletionCell: NSTableCellView {
 
     override func layout() {
         super.layout()
-        let detailWidth = detail.stringValue.isEmpty ? 0 : bounds.width * 0.42
-        title.frame = NSRect(x: 8, y: (bounds.height - 18) / 2, width: max(0, bounds.width - detailWidth - 16), height: 18)
-        detail.frame = NSRect(x: bounds.width - detailWidth, y: (bounds.height - 16) / 2,
-                              width: max(0, detailWidth - 8), height: 16)
+        let pad = CommandOverlayStyle.inset
+        let detailWidth = detail.stringValue.isEmpty ? 0 : min(detail.intrinsicContentSize.width, bounds.width * 0.42)
+        let gap = detailWidth > 0 ? pad * 3 : 0
+        let titleHeight = ceil(title.intrinsicContentSize.height)
+        let detailHeight = ceil(detail.intrinsicContentSize.height)
+        title.frame = NSRect(x: pad, y: floor((bounds.height - titleHeight) / 2),
+                             width: max(0, bounds.width - detailWidth - gap - pad * 2), height: titleHeight)
+        detail.frame = NSRect(x: bounds.width - detailWidth - pad, y: floor((bounds.height - detailHeight) / 2),
+                              width: detailWidth, height: detailHeight)
     }
 }

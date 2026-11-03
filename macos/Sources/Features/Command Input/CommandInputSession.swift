@@ -156,10 +156,18 @@ final class CommandInputSession {
 
     func setDraft(_ value: String) {
         guard value != draft else { return }
+        let previousNotice = notice
+        let wasEmpty = draft.isEmpty
         draft = value
         completionTask?.cancel()
         historyTask?.cancel()
-        changed()
+        // TextKit already displays an editor-originated edit and reports any
+        // changed height separately. Rebuilding the host here also rebuilds
+        // unchanged captions, making ordinary typing depend on scrollback.
+        // Recovery text and notice controls still need explicit publication.
+        if recoveryVisible || notice != previousNotice || (notice != nil && wasEmpty != draft.isEmpty) {
+            changed()
+        }
     }
 
     func requestHistory(_ request: CommandHistoryRequest) {

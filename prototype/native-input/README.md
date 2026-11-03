@@ -9,8 +9,17 @@ as plain text.
 The editor starts at one line, grows with hard and soft wraps, and stops growing
 at the smaller of 12 terminal lines or 45% of the pane. Longer drafts scroll
 inside the editor. Short sessions start inline at the terminal input position.
-Once scrollback exists, the current header and draft remain docked at the bottom,
-including when scrolling returns to the live end.
+The current header and draft dock when the prompt fills the available inline
+grid. They stay fixed while browsing history and return inline at the live end
+when a resize, clear, or shorter draft leaves room. Editor and block padding is
+six logical points.
+
+Type `@` at an argument boundary to open the native file picker. Up/Down select,
+Tab enters a folder, Command-Up goes to its parent, and Return inserts the
+selected path with shell quoting. Escape leaves the draft unchanged. The picker,
+shell completions, and terminal search share AppKit popover chrome with a mostly
+opaque macOS material and a Reduce Transparency fallback. Shell-specific
+completion still comes from the live zsh environment.
 
 Native input integrates with your normal local zsh startup and configuration. See the
 [design and implementation notes](../../docs/native-command-input.md) for the
@@ -130,7 +139,8 @@ same PTY. Alternate-screen applications use the normal live terminal, rather
 than a reconstructed block transcript.
 
 Native editing and completion are supported at the empty primary prompt only.
-History still uses terminal input. Native completion rejects dynamic expansion
+Native Up/Down navigation recalls live shell history at the first/last visual
+line and restores the unsent draft. Native completion rejects dynamic expansion
 contexts such as command/process substitutions; use terminal input for those.
 Completion functions can perform their ordinary I/O, but the draft is never
 accepted or executed by the completion widget. Each pane has one private idle

@@ -388,9 +388,7 @@ extension Ghostty {
 
             // Setup our surface. This will also initialize all the terminal IO.
             var surface_cfg = baseConfig ?? SurfaceConfiguration()
-            let nativeInputSetting = ProcessInfo.processInfo.environment["GHOSTTY_NATIVE_INPUT"]
-            let nativeInputDefault = Bundle.main.object(forInfoDictionaryKey: "SpookyNativeInputEnabled") as? Bool ?? false
-            if nativeInputSetting == "1" || (nativeInputSetting != "0" && nativeInputDefault) {
+            if AppBranding.nativeInputEnabled {
                 do {
                     let session = try CommandInputSession()
                     session.configure(&surface_cfg)

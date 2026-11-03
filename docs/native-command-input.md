@@ -22,11 +22,12 @@ smart dashes, and automatic substitutions are disabled.
 The composer starts at one terminal line and grows with hard and soft wraps.
 It is capped at the smaller of 12 terminal lines or 45% of the pane; larger drafts
 scroll within the editor. Short sessions align it with the terminal's input
-position. Once the pane has scrollback, the current command header and composer
-remain docked at the bottom, including when scrolling returns to the live end.
-Docking is remembered per pane and does not toggle with the viewport's current
-position. Its reserved height therefore stays constant while scrolling, so the
-terminal grid and scrollbar do not resize during a gesture. Layout reserves
+position. When the live prompt fills the prospective inline grid, the current header and
+composer dock at the bottom. The calculation excludes the dock's own reservation
+and uses applied terminal dimensions; retained rows created by resizing are not
+enough to force docking. Docking stays stable while browsing scrollback, then
+returns inline at the live end when a settled resize, clear, or shorter draft
+leaves room. Layout reserves
 space so the growing draft does not cover terminal output. The native scrollbar
 track ends above the docked header/editor through scroller insets; its thumb
 cannot slide behind the editor. Those track insets do not resize the drawable,
@@ -51,13 +52,13 @@ padding. The editor and interactive controls remain AppKit objects so native
 text input, selection, undo, IME, menus, and accessibility retain their platform
 behavior. These changes do not remove the upstream SwiftUI application shell.
 
-Native command panes add four logical points of left/right padding to terminal
-geometry and four-point bottom padding. New prompts and the dock reserve one
+Native command panes add six logical points of left/right padding to terminal
+geometry and six-point bottom padding. New prompts and the dock reserve one
 compact header row, keeping the caption readable without an extra blank line
-before the input. The separator and caption use the compact four-point inset;
+before the input. The separator and caption use the compact six-point inset;
 older two-row scrollback retains its original geometry. Output text keeps its
 normal cell size and selection coordinates.
-The multiline editor has four-point padding on every side. Completion and
+The multiline editor has six-point padding on every side. Completion and
 terminal search share an AppKit overlay style, and Cmd+F routes from the editor
 to the existing terminal search engine. Clicking the printed directory copies
 its full absolute path; Command-click or Control-click opens it in Finder.
@@ -268,3 +269,41 @@ the app normally and does not disable user configuration or window restoration.
 Upstream automatic updates are disabled for the fork. Existing Blocks and
 Diagnostics development bundles remain separate. See the guide for current
 verification and remaining physical IME/VoiceOver qualification.
+
+## Native filename picker
+
+A typed `@` at a shell argument boundary opens the existing completion list in
+file-picker mode. It starts with the current directory's children; a filename
+query searches the fsearch index, while explicit paths and keyboard navigation
+browse a directory. Tab enters a selected directory, Command-Up moves to its
+parent, and Return inserts a file or directory. Left/Right retain native caret
+movement. Escape cancels without changing the draft. Acceptance replaces only
+the active `@query`, quotes shell metacharacters, and is one undo step.
+
+`CommandFileSearchSession` owns query generations and navigation. Its injected
+provider calls `CommandFileSearchService`, an actor with bounded requests to one
+app-owned JSON-lines helper, started in the background at application launch.
+Latest-query cancellation and generation
+checks reject stale results; directory listings do not wait for the global
+index. Zsh still provides semantic command, option, and argument completions.
+
+The helper links fsearch v0.2.1 at revision
+`88e63fdf850cf7749deae8198b187accd21f8ba5`. A checked patch adds a names-only engine
+and literal filename queries. The integration does not enable fsearch's query
+language, content indexing, socket daemon, login item, or keep-warm spin loop.
+It uses Spooky's own index under `~/Library/Application Support/Spooky/` and
+exits with the app. Protected directories remain subject to macOS permissions.
+While the initial index is unfinished, the picker shows “Initial search index
+is being created…” even for the first empty `@`. It keeps the query and updates
+automatically when the index becomes ready. Immediate directory browsing remains
+available during the crawl. Readiness requests are independent of searches and
+cannot cancel them.
+
+`CommandOverlaySurface` supplies the shared AppKit material, tint, border and
+shadow for completion, file picking, and terminal search. Reduce Transparency
+uses an opaque fill. Navigation and layout changes do not animate. These small
+controls remain separate from Ghostty's existing Metal terminal render pass.
+
+Command headers retain a single-row layout. Their text is at least 87.5% of the
+terminal font size, independently of the 6pt block padding, and path hit bounds
+use the same renderer layout as the visible glyphs.

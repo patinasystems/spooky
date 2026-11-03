@@ -2690,16 +2690,24 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
 /// even with balancing disabled so config and DPI changes refresh explicit
 /// padding and never add a second copy of the inset.
 fn recomputePadding(self: *Surface) !void {
+    self.size = try self.sizeWithNativeInputBottom(self.native_input_inset_bottom);
+}
+
+/// Project the current surface with a different native footer, without queuing
+/// a PTY resize. Placement uses this to exclude its own reservation from overflow.
+pub fn sizeWithNativeInputBottom(self: *const Surface, bottom: u32) !rendererpkg.Size {
     const content_scale = try self.rt_surface.getContentScale();
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
-    self.size.setPaddingWithNativeInsets(
+    var size = self.size;
+    size.setPaddingWithNativeInsets(
         self.config.scaledPadding(x_dpi, y_dpi),
         self.config.window_padding_balance,
         self.native_input_inset_horizontal,
-        self.native_input_inset_bottom,
+        bottom,
     );
-    self.size.command_padding = rendererpkg.Size.scaledInset(self.native_input_inset_horizontal_points, content_scale.y);
+    size.command_padding = rendererpkg.Size.scaledInset(self.native_input_inset_horizontal_points, content_scale.y);
+    return size;
 }
 
 /// Called to set the preedit state for character input. Preedit is used

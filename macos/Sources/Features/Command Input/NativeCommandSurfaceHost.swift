@@ -123,9 +123,20 @@ final class NativeCommandSurfaceHost: NSView {
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission
         let editing = recovering || (session.editorVisible && geometry.primary && session.currentBlockID != nil)
+        // Evaluate the prospective inline grid, excluding the dock's own
+        // reservation. Retained rows alone can come from an earlier resize.
+        let inlineReservation = max(0, height - line) + padding
+        let availableInset = max(0, geometry.unreservedGridHeight - line * 2)
+        let inlineRows = UInt32(max(0, floor((geometry.unreservedGridHeight
+            - min(inlineReservation, availableInset)) / line)))
+        let requestedSize = surfaceView.surface.map { ghostty_surface_size($0) }
+        let geometryIsSettled = terminalView.frame == bounds && !terminalView.needsLayout
+            && (requestedSize.map { UInt32($0.rows) == geometry.rows && UInt32($0.columns) == geometry.columns } ?? false)
         let placement = docking.placement(layout: geometry, editing: editing, recovering: recovering,
                                            transferring: transferring,
-                                           metrics: .init(editorHeight: height, containerHeight: bounds.height, padding: padding))
+                                           metrics: .init(editorHeight: height, containerHeight: bounds.height,
+                                                          padding: padding, inlineRows: inlineRows,
+                                                          geometryIsSettled: geometryIsSettled))
         let shown = placement.shown
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
@@ -190,6 +201,12 @@ final class NativeCommandSurfaceHost: NSView {
                                    backgroundColor: background, minimumLineHeight: line)
         editor.setDraft(session.draft)
         editor.setHistoryContext(session.historyContext)
+        // Raw metadata: a valid directory name may itself end in a newline.
+        let cwd = session.currentBlockID.flatMap { session.blockMetadata[$0]?.workingDirectory }
+        let fileSearchDirectory = cwd.flatMap { $0.hasPrefix("/") ? $0 : nil }
+        if editor.textView.fileSearchDirectory != fileSearchDirectory {
+            editor.textView.fileSearchDirectory = fileSearchDirectory
+        }
         editor.setEditable(session.isEditable && shown && !recovering && !surfaceView.readonly)
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()

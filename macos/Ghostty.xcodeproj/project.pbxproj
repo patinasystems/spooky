@@ -290,6 +290,7 @@
 				A5B3052D299BEAAA0047F10C /* Sources */,
 				A5B3052E299BEAAA0047F10C /* Frameworks */,
 				A5B3052F299BEAAA0047F10C /* Resources */,
+				C0DE55002F4A100000000001 /* Embed file search helper */,
 				819324572F24E74E00A9ED8F /* Copy DockTilePlugin */,
 			);
 			buildRules = (
@@ -405,6 +406,29 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		C0DE55002F4A100000000001 /* Embed file search helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = (
+				"$(PROJECT_DIR)/../scripts/spooky/embed-file-search.py",
+				"$(SPOOKY_FSEARCH_HELPER_DIR)/spooky-fsearch",
+				"$(SPOOKY_FSEARCH_HELPER_DIR)/LICENSE.fsearch",
+				"$(SPOOKY_FSEARCH_HELPER_DIR)/LICENSE.dependencies",
+				"$(SPOOKY_FSEARCH_HELPER_DIR)/fsearch-provenance.json",
+			);
+			name = "Embed file search helper";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Helpers/spooky-fsearch",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/FSearch/LICENSE.fsearch",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/FSearch/LICENSE.dependencies",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/FSearch/fsearch-provenance.json",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "exec /usr/bin/python3 \"$PROJECT_DIR/../scripts/spooky/embed-file-search.py\"\n";
+			showEnvVarsInLog = 0;
+		};
 		FC501E0B2F46B410007AE49D /* Run SwiftLint */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -530,6 +554,7 @@
 				PATINA_BUNDLE_ID = com.patinasystems.spooky;
 				PATINA_DISPLAY_NAME = Spooky;
 				SPOOKY_NATIVE_INPUT_ENABLED = 1;
+				SPOOKY_FSEARCH_HELPER_DIR = "$(PROJECT_DIR)/build-spooky/fsearch";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
@@ -879,6 +904,7 @@
 				PATINA_BUNDLE_ID = com.patinasystems.spooky;
 				PATINA_DISPLAY_NAME = Spooky;
 				SPOOKY_NATIVE_INPUT_ENABLED = 1;
+				SPOOKY_FSEARCH_HELPER_DIR = "$(PROJECT_DIR)/build-spooky/fsearch";
 				SDKROOT = macosx;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -938,6 +964,7 @@
 				PATINA_BUNDLE_ID = com.patinasystems.spooky;
 				PATINA_DISPLAY_NAME = Spooky;
 				SPOOKY_NATIVE_INPUT_ENABLED = 1;
+				SPOOKY_FSEARCH_HELPER_DIR = "$(PROJECT_DIR)/build-spooky/fsearch";
 				SDKROOT = macosx;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";

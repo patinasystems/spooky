@@ -23,7 +23,15 @@ def main [
         []
     }
 
-    let arch_args = if $arch == "" { [] } else { [-arch $arch] }
+    # The native helper and app must target the same architecture. Explicit
+    # --arch remains available for cross builds; ordinary local builds are native.
+    let build_arch = if $arch == "" { (^uname -m | str trim) } else { $arch }
+    let arch_args = [-arch $build_arch]
+    let helper_dir = ($output_dir | path join "fsearch")
+    if $scheme == "Ghostty" and ($action in ["build" "test" "archive" "build-for-testing"]) {
+        ^python3 ($env.FILE_PWD | path join ".." "scripts" "spooky" "fsearch" "build.py") --architectures $build_arch --output-dir $helper_dir
+        if $env.LAST_EXIT_CODE != 0 { error make {msg: "Building Spooky's file-search helper failed"} }
+    }
     let config_args = if $xcconfig == "" { [] } else { [-xcconfig ($xcconfig | path expand)] }
     let test_args = if $only_testing == "" { [] } else { $only_testing | split row "," | each { |id| $"-only-testing:($id)" } }
     let derived_args = [-derivedDataPath ($output_dir | path join "DerivedData")]
@@ -36,6 +44,7 @@ def main [
         -scheme $scheme
         -configuration $configuration
         $"SYMROOT=($output_dir)"
+        $"SPOOKY_FSEARCH_HELPER_DIR=($helper_dir)"
         ...$derived_args
         ...$arch_args
         ...$config_args

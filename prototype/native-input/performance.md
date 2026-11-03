@@ -362,3 +362,123 @@ idle and a fixed native editing sequence separately. For shell interactions,
 check submission acknowledgement, continuation handling, and late receipt
 recovery as correctness requirements alongside the counters. Do not infer a
 typing or scrolling improvement from an idle file-read reduction.
+
+## November 3: docking, shell and filename-search integration
+
+These measurements used controlled synthetic zsh fixtures on the user's busy
+Mac. The before/after command runs were interleaved; they are not idle-machine
+or whole-app latency claims. Native submission includes the request-file bridge
+and waits for the next ready prompt.
+
+| Operation | Before median | After median | Scope |
+| --- | ---: | ---: | --- |
+| Native command submission | 40.71 ms | 16.88 ms | Same synthetic repo/compsys, 20 samples per side; p95 47.94 → 21.69 ms |
+| Raw builtin prompt round trip | 40.98 ms | 17.10 ms | 40 interleaved samples per side |
+| First history snapshot, 100,000 stored events | 440.80 ms | 77.32 ms | Same 1,000 returned entries; byte-identical packed payload |
+| First history snapshot, 10,000 stored events | 96.30 ms | 78.54 ms | Same payload |
+| Caption lookup, 1,000 headers at history top | 8.153 µs | 0.375 µs | CPU lookup only, 27 pages, paired Fast benchmark |
+
+Small histories showed no reliable gain (1,000 entries: 64.38 → 72.12 ms in a
+noisy eight-sample run). Their existing bounded array enumeration is preserved.
+Metadata output is unchanged: 483 files / 10,063 bytes over 60 commands.
+
+Ordinary branch captions now read Git reference files directly, without a new
+Git process per prompt. Unusual layouts and explicit Git overrides still use
+Git. Recent dense history avoids sorting the entire history map; sparse event
+IDs retain the exact-order fallback. The completion worker still starts per
+prompt because reusing it would make the inherited shell environment stale.
+
+Normal text edits no longer publish a full host presentation. TextKit already
+owns the edit and separately reports height changes. Recovery controls still
+update. Geometry-only suggestion updates reuse their existing text projection.
+Focused tests check these notification and invalidation paths.
+
+Caption lookup now visits only pages intersecting the viewport. It allocates
+no additional lookup memory and retains no new state. The savings above are
+microseconds, not evidence of a comparable improvement in frame or Enter
+latency. Reproduce with `test/native-input/benchmark_command_chrome.py` through
+Pat; the script runs Debug regressions and derives a Fast root-module benchmark
+because the repository's normal test root is fixed to Debug.
+
+Two live process captures had median CPU estimates of 0.5% and 1.0% of one core.
+Their stack captures included mixed input/accessibility activity or idle waits,
+and computer-use scrolling lost visibility while the user changed desktops.
+They do not establish a matched scrolling or idle comparison. No sustained
+renderer CPU bottleneck was established by those captures.
+
+Normal app launch starts one persistent filename-search helper. Its pinned fsearch
+patch disables content indexing and keep-warm spinning, bounds search workers
+and initial crawl concurrency to two, and lowers background indexing priority.
+It uses a private index and exits when its stdin closes. Queries and responses
+are bounded, superseded results are discarded, and nonblocking pipe writes fail
+and restart the helper instead of blocking cancellation behind a full pipe.
+Directory listing is immediate and bounded; nonempty folder searches query the
+index rather than filtering an arbitrary prefix of a large directory.
+
+The integrated AppKit build was also exercised through computer use: a fresh
+short session stayed inline; 120 output lines docked the editor; repeated scroll
+gestures kept it fixed; `clear` returned it inline. The file picker opened on a
+typed `@`, navigated into a directory with Down/Tab, searched descendants,
+inserted a relative path with Return, and restored the query with one undo.
+Cmd-F from the editor opened terminal search; shell completion displayed only
+the candidate token in the same shared material surface.
+
+A subsequent ten-second idle capture of that app had median CPU usage of 0.5%
+of one core, maximum 3.6%, and stable RSS of about 243 MiB. The app was initially
+visible, but desktop activity was uncontrolled. This is a separate observation,
+not a matched before/after rendering benchmark. The filename helper is measured
+separately; its initial filesystem crawl is not included in the app's CPU figure.
+
+On November 3, the first helper had finished indexing 18,185,776 entries and
+2,430,840 directories into a 332.7 MiB name index. There was no content-index
+directory. At about eight minutes after helper launch, `ps` still reported
+roughly 1.1 GiB RSS, but `sample` reported about 8.1 MiB current physical footprint
+and a 1.1 GiB peak. `vmmap` showed 7.3 MiB of live malloc allocations, about
+730 MiB of empty/reclaimable malloc pages, and 212 MiB of clean resident mapped
+index pages. RSS therefore does not describe the live heap or non-reclaimable
+memory cost here; the initial crawl did have a substantial transient peak.
+
+Two five-second stack captures showed stdin and query workers waiting, with
+the filesystem updater waiting about 94% and 99% of sampled time. Active updater
+stacks performed directory listings and applied FSEvents; no warm-spin thread or
+content worker existed. A separate 20.01-second observation accumulated 4.71 CPU
+seconds in the helper (23.5% of one core), versus 0.19 seconds in the app (0.95%).
+Desktop/filesystem activity was uncontrolled, and these samples are not a steady
+idle benchmark. The evidence motivated an experiment batching names-only events
+for 250 ms before existing deduplication, rather than changing allocation policy
+based on RSS. That experiment was subsequently rejected; the shipped helper
+retains upstream's existing event scheduling.
+
+Index startup now happens at app launch, as requested, instead of waiting for a
+filename query. The picker asks the engine for actual readiness and displays
+“Initial search index is being created…” while loading/building is pending;
+status requests do not replace searches. The cached index is reused on later
+launches. The first-crawl measurements above predate the eager-start change.
+
+The eager-start candidate with experimental batching was launched before any
+editor input. A separate 20.01-second window measured 2.73 helper CPU seconds
+(13.64% of one core) and 0.12 app CPU seconds (0.60%). Its helper physical footprint
+was 8.8 MiB, live malloc allocations were 9.3 MiB, and RSS was about 1.35 GiB.
+This window was about two minutes after launch with uncontrolled filesystem
+activity. It is not a matched comparison with the earlier window and does not
+establish a steady-idle cost or a CPU improvement.
+
+A bounded paired experiment ran old/new helpers against disposable APFS-cloned
+indexes, with the original personal index left unchanged. Both could find the
+1,200-entry fixture before the workload. During 346 renames over a 10.50-second
+observation, the old helper used 6.49 CPU seconds (61.8% of one core) and the
+batching helper used 6.28 seconds (59.8%). The final rename appeared after 212 ms
+in the old helper and 1,666 ms in the batching helper; both removed the old name.
+Warmup reached visible results after 1.62 seconds plus a one-second pause, which
+does not prove cached-index replay and initialization had fully settled. Other
+filesystem activity and the app's additional watcher were uncontrolled. These
+limits prevent attributing the small CPU difference solely to batching. Because
+the observed freshness was worse without a convincing CPU benefit, the 250 ms
+batching change and its two tests were reverted before release. Startup/status,
+names-only indexing, bounded workers, and cancellation remain.
+
+The paired helper hashes were `abbb0614cd994435ad0476bed8336230104fcfdf14eb407025af94afd251b713`
+(old) and `0e19d52ba68fed07e0bd44ef77220d33b542851a60ccc9c23ef974ccb20bdc94`
+(rejected batching candidate). The final patch hash is
+`f2536ff72b1d34a2eddf3c43fa485744257e6ae0ffa0f1a6318f4cb0db4a8f00`.
+The measurements above must not be presented as final-build idle qualification.

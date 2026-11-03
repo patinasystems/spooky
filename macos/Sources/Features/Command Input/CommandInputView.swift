@@ -5,7 +5,7 @@ import AppKit
 /// content height independently of that viewport.
 @MainActor
 final class CommandInputView: NSView, NSTextViewDelegate {
-    static let padding: CGFloat = 4
+    static let padding: CGFloat = 6
     let textView: CommandTextView
     let scrollView: CommandEditorScrollView
 
@@ -57,7 +57,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
         toolTip = "Right accepts a suggestion. Tab or Down opens options; Tab or Return accepts. "
             + "Up on the first visual line recalls history; Down on the last restores your draft. "
-            + "Option Tab inserts a tab. Shift Return adds a line."
+            + "Option Tab inserts a tab. Shift Return adds a line. Type @ for files."
     }
 
     required init?(coder: NSCoder) {

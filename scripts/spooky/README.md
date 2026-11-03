@@ -21,6 +21,11 @@ disabled. A future updater needs Spooky's own feed, signing key, and release flo
 Build the current native GhosttyKit core first using the repository's documented
 Zig workflow, then run these commands from the repository root. On Patina Macs,
 run build/package commands through `pat run` as required by the host's work queue.
+The build also requires Cargo/Rust with the requested macOS target installed.
+`build.nu` builds the pinned filename-search helper before Xcode; its copy-only
+phase embeds and signs that helper. With no `--arch`, the app and helper both
+target the host architecture. Direct Xcode builds must first run
+`python3 scripts/spooky/fsearch/build.py --architectures arm64 --output-dir macos/build-spooky/fsearch`.
 
 ```sh
 ./macos/build.nu --configuration ReleaseLocal --arch arm64 \
@@ -37,6 +42,8 @@ uv run scripts/spooky/package.py \
 The packager stages a copy and signs nested code before its enclosing bundles.
 It verifies the signature, identity, architecture, disabled upstream updates,
 absence of test/debug residue, and absence of the debugging entitlement.
+It also requires the pinned names-only fsearch helper, license, and provenance,
+checks the helper's architecture, and records its packaged executable hash.
 It then uses pinned `dmgbuild` 1.6.7 to write an APFS/UDZO image and its Finder
 layout directly, without AppleScript. The image contains `Spooky.app` and a
 shortcut to `/Applications`.

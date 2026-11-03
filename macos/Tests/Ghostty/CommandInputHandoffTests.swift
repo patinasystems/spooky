@@ -97,6 +97,37 @@ struct CommandInputHandoffTests {
     }
 
     @MainActor
+    @Test func draftChangesStillPublishRecoveryNoticeAndRetainedText() throws {
+        let session = try CommandInputSession()
+        session.receive(.init(state: .init(kind: "ready", generation: "prompt-1", context: "start", blockID: "123-1"),
+                              receipt: nil, metadata: [:]))
+        session.setDraft("retained draft")
+        session.receive(.init(state: nil, receipt: nil, metadata: [:]))
+        #expect(!session.isEditable)
+        #expect(session.notice != nil)
+        var notifications = 0
+        session.onChange = { notifications += 1 }
+
+        // An empty draft removes the unavailable-bridge notice and its View
+        // Draft action. Restoring text must make recovery available again.
+        session.setDraft("")
+        #expect(session.notice == nil)
+        #expect(notifications == 1)
+        session.setDraft("recover this")
+        #expect(session.notice != nil)
+        #expect(notifications == 2)
+
+        session.showRecoveryDraft()
+        #expect(session.isRecoveringDraft)
+        notifications = 0
+        session.setDraft("updated retained draft")
+        #expect(session.draft == "updated retained draft")
+        #expect(notifications == 1)
+        session.setDraft("updated retained draft")
+        #expect(notifications == 1)
+    }
+
+    @MainActor
     @Test(arguments: ["cont", "vared"])
     func secondaryShellOwnershipLeavesCursorTransitionsToTheParser(context: String) throws {
         let session = try CommandInputSession()

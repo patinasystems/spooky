@@ -21,6 +21,9 @@ struct CommandTerminalLayout: Equatable {
     var cursorValid = false
     var columns: UInt32 = 0
     var rows: UInt32 = 0
+    var scrollbackRows: UInt64 = 0
+    var activeCursorRow: UInt32 = 0
+    var unreservedGridHeight: CGFloat = 0
     var cellWidth: CGFloat = 8
     var cellHeight: CGFloat = 18
     var paddingLeft: CGFloat = 0
@@ -44,6 +47,9 @@ struct CommandTerminalLayout: Equatable {
         result.cursorValid = layout.cursor_valid
         result.columns = layout.columns
         result.rows = layout.rows
+        result.scrollbackRows = layout.scrollback_rows
+        result.activeCursorRow = layout.active_cursor_row
+        result.unreservedGridHeight = layout.unreserved_grid_height
         result.cellWidth = max(1, layout.cell_width)
         result.cellHeight = max(1, layout.cell_height)
         result.paddingLeft = layout.padding_left

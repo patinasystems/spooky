@@ -214,6 +214,20 @@ class AppDelegate: NSObject,
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppBranding.configureMainMenu()
 
+        // Start filename indexing while the first window and shell are opening.
+        // The service actor owns process I/O; startup never waits for the crawl.
+        // Test hosts exercise injected helpers without indexing the real filesystem.
+        if AppBranding.nativeInputEnabled,
+           ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+            Task {
+                do {
+                    try await CommandFileSearchService.shared.startIndexing()
+                } catch {
+                    Self.logger.error("Filename index startup failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
             // Disable this so that repeated key events make it through to our terminal views.

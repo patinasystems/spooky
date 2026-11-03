@@ -1,8 +1,8 @@
 import Foundation
 
-/// Docking is a per-pane presentation decision, not the terminal's scroll
-/// position. Once history overflows, scrolling cannot resize the PTY or move
-/// the input between its prompt and the footer. A new pane starts inline.
+/// Docking follows the prompt's fit in the prospective inline grid. Retained
+/// history alone is not overflow: resizing can preserve history above a mostly
+/// empty active screen. Browsing history holds the dock until the live end.
 struct CommandInputDocking {
     private(set) var hasDocked = false
 
@@ -18,6 +18,10 @@ struct CommandInputDocking {
         let editorHeight: CGFloat
         let containerHeight: CGFloat
         let padding: CGFloat
+        /// Row capacity with this draft's inline reservation, without a dock.
+        let inlineRows: UInt32
+        /// The snapshot and surface both describe the current pane dimensions.
+        let geometryIsSettled: Bool
     }
 
     mutating func placement(layout: CommandTerminalLayout, editing: Bool, recovering: Bool,
@@ -25,7 +29,16 @@ struct CommandInputDocking {
         let editorHeight = metrics.editorHeight
         let containerHeight = metrics.containerHeight
         let padding = metrics.padding
-        if editing && !recovering && layout.primary && layout.hasScrollback { hasDocked = true }
+        if editing && !recovering && !transferring && layout.primary && metrics.geometryIsSettled &&
+            layout.rows > 0 && metrics.inlineRows > 0 && layout.activeCursorRow < layout.rows {
+            if layout.atBottom {
+                hasDocked = projectedPromptRow(layout: layout, inlineRows: metrics.inlineRows) >= metrics.inlineRows - 1
+            } else if layout.scrollbackRows > 0 {
+                // Keep input accessible while browsing even when the retained
+                // rows came from a past, smaller window. Recheck at live end.
+                hasDocked = true
+            }
+        }
         let pinned = recovering || hasDocked
         let line = max(1, layout.cellHeight)
         let reserved = editing && !transferring
@@ -36,5 +49,17 @@ struct CommandInputDocking {
         return Placement(pinned: pinned, reservedHeight: reserved, origin: CGPoint(x: x, y: y),
                          shown: editing && (layout.cursorValid || pinned),
                          pinnedOffset: editing && pinned && !transferring ? editorHeight + line : -1)
+    }
+
+    /// Mirror PageList's row-resize behavior without walking history. Growth
+    /// pulls history only when the old cursor is on the last active row;
+    /// otherwise it preserves the cursor and appends blank rows. This removes
+    /// the dock's own reservation from the decision, avoiding an inline/dock
+    /// feedback loop. Shrink trims blanks before moving the cursor upward.
+    private func projectedPromptRow(layout: CommandTerminalLayout, inlineRows: UInt32) -> UInt32 {
+        if inlineRows <= layout.rows { return min(layout.activeCursorRow, inlineRows - 1) }
+        guard layout.activeCursorRow == layout.rows - 1 else { return layout.activeCursorRow }
+        let pulled = min(layout.scrollbackRows, UInt64(inlineRows - layout.rows))
+        return layout.activeCursorRow + UInt32(pulled)
     }
 }

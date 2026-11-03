@@ -105,6 +105,99 @@ _patina_native_metadata() {
         _patina_native_move -f "$temporary" "$destination"
 }
 
+# Branch captions need only Git's small reference files, not a new Git process
+# at every prompt. Read them afresh (no cache) so checkout, worktree and nested
+# repository changes are immediately reflected. Delegate unusual layouts and
+# explicit Git environment overrides back to Git rather than guessing.
+_patina_native_git_line() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local value
+    builtin local -A metadata
+    builtin zstat -H metadata "$1" 2>/dev/null || return 1
+    (( metadata[size] <= 16384 )) || return 1
+    IFS= builtin read -r value < "$1" || [[ -n $value ]] || return 1
+    REPLY=$value
+}
+
+_patina_native_branch_fast() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    REPLY=''
+    builtin local name
+    for name in GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_NAMESPACE GIT_CEILING_DIRECTORIES \
+        GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_OBJECT_DIRECTORY; do
+        (( ${+parameters[$name]} )) && return 1
+    done
+    builtin zmodload zsh/stat 2>/dev/null || return 1
+    builtin local directory=${PWD:A} parent git_directory='' common head reference
+    builtin local -A metadata
+    builtin zstat -H metadata "$directory" 2>/dev/null || return 1
+    builtin local device=${metadata[device]}
+    while true; do
+        if [[ -d $directory/.git ]]; then
+            git_directory=$directory/.git
+            break
+        elif [[ -f $directory/.git ]]; then
+            _patina_native_git_line "$directory/.git" || return 1
+            [[ $REPLY == 'gitdir: '* ]] || return 1
+            git_directory=${REPLY#'gitdir: '}
+            [[ $git_directory == /* ]] || git_directory=$directory/$git_directory
+            git_directory=${git_directory:A}
+            break
+        elif [[ -f $directory/HEAD && -d $directory/objects &&
+                ( -d $directory/refs || -d $directory/reftable ) ]]; then
+            git_directory=$directory
+            break
+        fi
+        parent=${directory:h}
+        [[ $parent == $directory ]] && return 0
+        builtin zstat -H metadata "$parent" 2>/dev/null || return 1
+        [[ ${metadata[device]} == $device ]] || return 0
+        directory=$parent
+    done
+    common=$git_directory
+    if [[ -f $git_directory/commondir ]]; then
+        _patina_native_git_line "$git_directory/commondir" || return 1
+        common=$REPLY
+        [[ $common == /* ]] || common=$git_directory/$common
+        common=${common:A}
+    fi
+    [[ -d $common/objects && -d $common/refs && ! -d $common/reftable &&
+       ! -L $git_directory/HEAD ]] || return 1
+    _patina_native_git_line "$git_directory/HEAD" || return 1
+    head=$REPLY
+    builtin local -i depth
+    for (( depth=0; depth<8; ++depth )); do
+        if [[ $head == 'ref: refs/heads/'* ]]; then
+            reference=${head#'ref: '}
+            [[ $reference != *'..'* && $reference != *[[:space:][:cntrl:]]* &&
+               $reference != 'refs/heads/' ]] || return 1
+            if [[ -L $common/$reference ]]; then
+                return 1
+            elif [[ -f $common/$reference ]]; then
+                _patina_native_git_line "$common/$reference" || return 1
+                if [[ $REPLY == 'ref: '* ]]; then
+                    head=$REPLY
+                    continue
+                fi
+            fi
+            REPLY=${reference#'refs/heads/'}
+            return 0
+        elif [[ ( ${#head} == 40 || ${#head} == 64 ) && $head != *[^0-9a-fA-F]* ]]; then
+            REPLY=''
+            return 0
+        fi
+        return 1
+    done
+    return 1
+}
+
+_patina_native_branch() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    if ! _patina_native_branch_fast; then
+        REPLY=$(command /usr/bin/git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null) || REPLY=''
+    fi
+}
+
 _patina_native_record_input() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     (( _patina_native_input_recorded )) && return 0
@@ -153,9 +246,9 @@ _patina_native_prepare_prompt() {
     _patina_native_mkdir -p "$_patina_native_dir/blocks/$_patina_native_block_id"
     _patina_native_block_cwd=$PWD
     _patina_native_metadata cwd "$_patina_native_block_cwd"
-    builtin local branch
-    branch=$(command /usr/bin/git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
-    _patina_native_metadata branch "$branch"
+    builtin local REPLY
+    _patina_native_branch
+    _patina_native_metadata branch "$REPLY"
     _patina_native_metadata status editing
 
     # A reserves one compact chrome row before the native command input.
@@ -227,9 +320,9 @@ _patina_native_line_init() {
     if [[ $CONTEXT == start && $_patina_native_block_cwd != $PWD ]]; then
         _patina_native_block_cwd=$PWD
         _patina_native_metadata cwd "$PWD"
-        builtin local branch
-        branch=$(command /usr/bin/git -C "$PWD" symbolic-ref --quiet --short HEAD 2>/dev/null) || branch=''
-        _patina_native_metadata branch "$branch"
+        builtin local REPLY
+        _patina_native_branch
+        _patina_native_metadata branch "$REPLY"
     fi
     _patina_native_redraw
 }
@@ -719,6 +812,39 @@ _patina_native_history_safe_text() {
     [[ $without_whitespace != *[[:cntrl:]]* ]]
 }
 
+_patina_native_history_events() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    reply=()
+    builtin local key
+    # For a provably small history, the C implementation's key enumeration is
+    # cheaper than individual shell-level lookups and is already bounded.
+    if (( HISTCMD <= 2048 || HISTSIZE <= 2048 )); then
+        reply=("${(@Onk)history}")
+        return 0
+    fi
+    builtin local -i event=$(( HISTCMD - 1 )) missing=0
+    # Ordinary history has consecutive event numbers. Fetch just the newest
+    # 1001 IDs (one extra detects truncation), independent of the older history.
+    while (( event > 0 && ${#reply} < 1001 && missing < 32 )); do
+        if (( ${+history[$event]} )); then
+            reply+=("$event")
+        else
+            (( ++missing ))
+        fi
+        (( --event ))
+    done
+    # HIST_IGNORE_ALL_DUPS and imported histories can leave arbitrarily large
+    # gaps. Preserve their exact order with the original enumeration fallback;
+    # never omit an older live entry just to meet a numeric scan budget.
+    if (( event > 0 && ${#reply} < 1001 )); then
+        for key in "${(@Onk)history}"; do
+            (( key > event )) && continue
+            reply+=("$key")
+            (( ${#reply} >= 1001 )) && break
+        done
+    fi
+}
+
 _patina_native_history() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     builtin local request="$_patina_native_dir/history-request"
@@ -727,6 +853,7 @@ _patina_native_history() {
     _patina_native_move -f "$request" "$consumed" || return 1
     builtin local generation='' identifier='-' reason='' descriptor REPLY entry event
     builtin local destination staging outcome=ok
+    builtin local -a reply
     builtin local -i count=0 scanned=0 total_bytes=0 truncated=0 bytes
     {
         if _patina_native_history_read "$consumed"; then
@@ -751,9 +878,8 @@ _patina_native_history() {
         _patina_native_mkdir -p "$staging" || return 1
         builtin exec {descriptor}> "$staging/items-v1" || return 1
         if [[ -z $reason ]]; then
-            # Enumerate keys, not all command texts: large older commands must
-            # not be copied merely to produce the bounded recent snapshot.
-            for event in "${(@Onk)history}"; do
+            _patina_native_history_events
+            for event in "${reply[@]}"; do
                 if (( ++scanned > 1000 )); then
                     truncated=1
                     break

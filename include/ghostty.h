@@ -553,6 +553,9 @@ typedef struct {
   bool cursor_valid; // Cursor is within the visible primary grid.
   uint32_t columns; // Applied terminal dimensions, not a queued resize.
   uint32_t rows;
+  uint64_t scrollback_rows; // Retained rows, including rows introduced by resize.
+  uint32_t active_cursor_row; // Independent of the viewport while scrolling.
+  double unreserved_grid_height; // Logical grid height without native bottom inset.
   double cell_width;
   double cell_height;
   double padding_left;

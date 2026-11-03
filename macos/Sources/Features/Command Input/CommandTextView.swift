@@ -14,6 +14,9 @@ final class CommandTextView: NSTextView {
     var onCancelHistory: () -> Void = {}
     var onFind: () -> Bool = { false }
     var canRequestFocus: () -> Bool = { true }
+    /// Absolute cwd of the active prompt. The `@` file picker stays disabled
+    /// until the host knows it; it is never guessed.
+    var fileSearchDirectory: String?
     private var focusRequestScheduled = false
     private var focusRequestRevision: UInt64 = 0
     private var heightReportScheduled = false
@@ -91,7 +94,8 @@ final class CommandTextView: NSTextView {
         setAccessibilityLabel("Command input")
         setAccessibilityHelp("Edit a command. Right accepts a suggestion; Tab or Down opens options. "
                              + "Up on the first visual line recalls shell history; Down on the last returns to your draft. "
-                             + "Return submits; Shift Return adds a line. Escape dismisses suggestions or returns to the terminal.")
+                             + "Return submits; Shift Return adds a line. Type @ to insert a file path. "
+                             + "Escape dismisses suggestions or returns to the terminal.")
     }
 
     required init?(coder: NSCoder) {
@@ -107,6 +111,12 @@ final class CommandTextView: NSTextView {
             super.keyDown(with: event)
             return
         }
+        // The `@` picker owns Command-Up and its list keys before native
+        // modified-arrow handling; everything else falls through unchanged.
+        if completions.filePickerActive, completions.handleKey(event) { return }
+        completions.pendingFileTrigger = event.characters == "@"
+            && event.modifierFlags.isDisjoint(with: [.command, .control])
+        defer { completions.pendingFileTrigger = false }
 
         let arrow = event.keyCode == 125 || event.keyCode == 126
         let modified = !event.modifierFlags.isDisjoint(with: [.shift, .control, .option, .command])
@@ -171,11 +181,15 @@ final class CommandTextView: NSTextView {
         minimumLineHeight: CGFloat
     ) {
         var metricsChanged = false
+        var foregroundChanged = false
         if self.font != font {
             self.font = font
             metricsChanged = true
         }
-        if self.textColor != textColor { self.textColor = textColor }
+        if self.textColor != textColor {
+            self.textColor = textColor
+            foregroundChanged = true
+        }
         if insertionPointColor != textColor { insertionPointColor = textColor }
         if self.backgroundColor != backgroundColor { self.backgroundColor = backgroundColor }
         let lineHeight = max(0, minimumLineHeight)
@@ -194,7 +208,7 @@ final class CommandTextView: NSTextView {
             }
         }
         if metricsChanged { reportContentHeight() }
-        completions.updatePosition()
+        if metricsChanged || foregroundChanged { completions.updatePosition() }
     }
 
     override func updateTrackingAreas() {

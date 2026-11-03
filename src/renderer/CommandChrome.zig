@@ -111,6 +111,7 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
     var headers: std.ArrayList(Header) = .empty;
     errdefer headers.deinit(alloc);
     const screen = term.screens.active;
+    const viewport_top = screen.pages.getTopLeft(.viewport);
     const pinned_metadata = if (self.pinned_offset_from_bottom >= 0 and self.pinned_id[0] != 0)
         self.entries.get(self.pinned_id)
     else
@@ -125,12 +126,12 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
         const second = if (rows == 2) pin.down(1) else null;
         // A two-row caption can remain partly visible after its first row
         // scrolls above the viewport. The shader clips it to the VT viewport.
-        const point = screen.pages.pointFromPin(.viewport, pin.*);
-        const above = point == null;
-        const row = if (point) |pt| pt.viewport.y else row: {
+        const visible_row = viewportRow(viewport_top, screen.pages.rows, pin.*);
+        const above = visible_row == null;
+        const row = visible_row orelse row: {
             const next = second orelse continue;
-            const pt = screen.pages.pointFromPin(.viewport, next) orelse continue;
-            if (pt.viewport.y != 0) continue;
+            const next_row = viewportRow(viewport_top, screen.pages.rows, next) orelse continue;
+            if (next_row != 0) continue;
             break :row 0;
         };
         if (row >= screen.pages.rows) continue;
@@ -153,6 +154,143 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
     }
     result.headers = try headers.toOwnedSlice(alloc);
     return result;
+}
+
+/// Header visibility only needs the viewport's pages. pointFromPin(.viewport)
+/// also searches every page below it, even when an old pin lies above the
+/// viewport. Bound each lookup by visible rows instead of retained history.
+/// This must not replace command-region endpoint lookup: a region can extend
+/// below the viewport while its output still intersects the visible screen.
+fn viewportRow(top: terminal.Pin, rows: usize, pin: terminal.Pin) ?usize {
+    var node = top.node;
+    var first_row: usize = top.y;
+    var offset: usize = 0;
+    while (offset < rows) {
+        const count = @min(rows - offset, node.rows() - first_row);
+        if (node == pin.node) {
+            if (pin.y < first_row or pin.y - first_row >= count) return null;
+            return offset + pin.y - first_row;
+        }
+        offset += count;
+        node = node.next orelse return null;
+        first_row = 0;
+    }
+    return null;
+}
+
+test "command chrome bounded viewport rows match clipped page coordinates across history" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{
+        .cols = 80,
+        .rows = 40,
+        .max_scrollback_bytes = null,
+    });
+    defer term.deinit(t.allocator);
+    for (0..2_000) |_| try term.linefeed();
+    const pages = &term.screens.active.pages;
+    const total = pages.scrollbar().total;
+    for ([_]usize{ 0, total / 2, total - pages.rows }) |offset| {
+        pages.scroll(.{ .row = offset });
+        const top = pages.getTopLeft(.viewport);
+        for (0..total) |row| {
+            // Horizontal position cannot affect caption-row visibility.
+            const pin = pages.pin(.{ .screen = .{ .x = 79, .y = @intCast(row) } }).?;
+            const point = pages.pointFromPin(.viewport, pin);
+            const expected: ?usize = if (point) |p|
+                if (p.viewport.y < pages.rows) p.viewport.y else null
+            else
+                null;
+            try t.expectEqual(expected, viewportRow(top, pages.rows, pin));
+        }
+        try t.expectEqual(@as(?usize, 0), viewportRow(top, pages.rows, top));
+        try t.expectEqual(@as(?usize, pages.rows - 1), viewportRow(top, pages.rows, top.down(pages.rows - 1).?));
+        if (top.up(1)) |above| try t.expectEqual(null, viewportRow(top, pages.rows, above));
+        if (top.down(pages.rows)) |below| try t.expectEqual(null, viewportRow(top, pages.rows, below));
+    }
+}
+
+// An explicit ReleaseFast test benchmark keeps fixture construction outside
+// timing and alternates A/B order. This measures lookup only, not frames or
+// the shell. Both lookups allocate no memory and retain no additional state.
+// test/native-input/benchmark_command_chrome.py runs the optimized test root;
+// the normal build.zig test target deliberately remains Debug.
+test "command chrome viewport lookup benchmark" {
+    if (@import("builtin").mode != .fast) return error.SkipZigTest;
+    const t = std.testing;
+    const samples = 21;
+    const repetitions = 16;
+    for ([_]usize{ 10, 100, 1_000 }) |count| {
+        var term = try terminal.Terminal.init(t.io, t.allocator, .{
+            .cols = 80,
+            .rows = 40,
+            .max_scrollback_bytes = null,
+        });
+        defer term.deinit(t.allocator);
+        for (0..count * 16) |_| try term.linefeed();
+        const pages = &term.screens.active.pages;
+        const pins = try t.allocator.alloc(terminal.Pin, count);
+        defer t.allocator.free(pins);
+        for (pins, 0..) |*pin, index| pin.* = pages.pin(.{ .screen = .{ .y = @intCast(index * 16) } }).?;
+        var page_count: usize = 0;
+        var node = pages.pages.first;
+        while (node) |current| : (node = current.next) page_count += 1;
+        const total = pages.scrollbar().total;
+        for ([_]usize{ 0, total / 2, total - pages.rows }, 0..) |offset, position| {
+            pages.scroll(.{ .row = offset });
+            var before: [samples]u64 = undefined;
+            var after: [samples]u64 = undefined;
+            for (0..3) |_| {
+                _ = benchmarkViewportLookup(false, pages, pins, repetitions);
+                _ = benchmarkViewportLookup(true, pages, pins, repetitions);
+            }
+            for (0..samples) |sample| {
+                const first = if (sample % 2 == 0)
+                    benchmarkViewportLookup(false, pages, pins, repetitions)
+                else
+                    benchmarkViewportLookup(true, pages, pins, repetitions);
+                const second = if (sample % 2 == 0)
+                    benchmarkViewportLookup(true, pages, pins, repetitions)
+                else
+                    benchmarkViewportLookup(false, pages, pins, repetitions);
+                try t.expectEqual(first.checksum, second.checksum);
+                before[sample] = (if (sample % 2 == 0) first.ns else second.ns) / repetitions;
+                after[sample] = (if (sample % 2 == 0) second.ns else first.ns) / repetitions;
+            }
+            std.mem.sort(u64, &before, {}, std.sort.asc(u64));
+            std.mem.sort(u64, &after, {}, std.sort.asc(u64));
+            std.debug.print(
+                "\n{{\"benchmark\":\"command-header-lookup\",\"headers\":{d},\"pages\":{d},\"position\":{d}," ++
+                    "\"samples\":{d},\"before_median_ns\":{d},\"after_median_ns\":{d}," ++
+                    "\"before_p95_ns\":{d},\"after_p95_ns\":{d},\"additional_retained_bytes\":0}}\n",
+                .{ count, page_count, position, samples, before[samples / 2], after[samples / 2], before[19], after[19] },
+            );
+        }
+    }
+}
+
+fn benchmarkViewportLookup(
+    comptime bounded: bool,
+    pages: *const terminal.PageList,
+    pins: []const terminal.Pin,
+    repetitions: usize,
+) struct { ns: u64, checksum: usize } {
+    const start = std.Io.Timestamp.now(std.testing.io, .awake);
+    var checksum: usize = 0;
+    for (0..repetitions) |_| {
+        const top = pages.getTopLeft(.viewport);
+        for (pins) |pin| {
+            const row: ?usize = if (bounded)
+                viewportRow(top, pages.rows, pin)
+            else if (pages.pointFromPin(.viewport, pin)) |point|
+                if (point.viewport.y < pages.rows) point.viewport.y else null
+            else
+                null;
+            checksum +%= if (row) |y| y + 1 else 0;
+        }
+        std.mem.doNotOptimizeAway(&checksum);
+    }
+    const end = std.Io.Timestamp.now(std.testing.io, .awake);
+    return .{ .ns = @intCast(start.durationTo(end).nanoseconds), .checksum = checksum };
 }
 
 /// Only claim an extra chrome row when the first input anchor proves there
@@ -252,11 +390,12 @@ const Text = struct {
 
 pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16 };
 
-/// Captions retain their existing readable scale. Historical two-row headers
-/// have a second gap; compact one-row headers leave no extra blank input row.
-/// The terminal still owns all row positions and selection coordinates.
+/// Keep captions at least 87.5% of the terminal font within their existing row.
+/// Block padding can be larger: only the caption's internal top gap is capped.
+/// Historical two-row headers retain a second gap; terminal row positions and
+/// selection coordinates never change. Rendering and path hit bounds share this.
 pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32) CaptionLayout {
-    const gap = @min(requested_gap, cell_height -| 1);
+    const gap = @min(requested_gap, cell_height / 8);
     const scale = if (cell_height == 0) 1 else @as(f32, @floatFromInt(cell_height - gap)) / @as(f32, @floatFromInt(cell_height));
     const virtual_columns: u16 = @intFromFloat(@min(
         @as(f32, @floatFromInt(std.math.maxInt(u16))),
@@ -483,18 +622,36 @@ test "command chrome keeps space-padded headers but preserves visible output" {
 
 test "command chrome padding scales captions within the existing header row" {
     const t = std.testing;
-    const normal = captionLayout(80, 16, 4);
-    const retina = captionLayout(80, 32, 8);
-    try t.expectEqual(@as(u32, 4), normal.gap);
-    try t.expectEqual(@as(u32, 8), retina.gap);
+    const normal = captionLayout(80, 16, 6);
+    const retina = captionLayout(80, 32, 12);
+    try t.expectEqual(@as(u32, 2), normal.gap);
+    try t.expectEqual(@as(u32, 4), retina.gap);
+    try t.expectEqual(@as(f32, 0.875), normal.scale);
     try t.expectEqual(normal.scale, retina.scale);
     try t.expectEqual(normal.columns, retina.columns);
     try t.expectEqual(@as(f32, 16), @as(f32, @floatFromInt(normal.gap)) + 16 * normal.scale);
     try t.expect(@as(f32, @floatFromInt(normal.columns)) * normal.scale <= 80);
     const tiny = captionLayout(80, 3, 4);
-    try t.expect(tiny.scale > 0);
-    try t.expectEqual(@as(u32, 2), tiny.gap);
+    try t.expectEqual(@as(f32, 1), tiny.scale);
+    try t.expectEqual(@as(u32, 0), tiny.gap);
     try t.expectEqual(@as(u16, std.math.maxInt(u16)), captionLayout(std.math.maxInt(u16), 10, 9).columns);
+}
+
+test "command chrome large block gaps preserve readable one-row caption bounds" {
+    const t = std.testing;
+    for ([_]u32{ 1, 3, 16, 17, 32, 34, 64 }) |height| {
+        for ([_]u32{ 0, 1, 6, 12, 96 }) |padding| {
+            const layout = captionLayout(80, height, padding);
+            const row_height: f32 = @floatFromInt(height);
+            try t.expect(layout.scale >= 0.875 and layout.scale <= 1);
+            try t.expect(layout.gap <= padding);
+            // Font growth consumes only the internal gap, never the input row.
+            try t.expectApproxEqAbs(row_height, @as(f32, @floatFromInt(layout.gap)) + row_height * layout.scale, 0.0001);
+        }
+    }
+    const zero = captionLayout(80, 0, 6);
+    try t.expectEqual(@as(u32, 0), zero.gap);
+    try t.expectEqual(@as(f32, 1), zero.scale);
 }
 
 test "command chrome derives one or two reserved rows from input anchors" {
@@ -583,11 +740,11 @@ test "command chrome path hits exclude branch status gaps and overwritten rows" 
     const hit = (try chrome.pathAt(t.allocator, &term, size, 5, 9)).?;
     try t.expectEqualStrings("a", std.mem.sliceTo(&hit.id, 0));
     try t.expectEqual(@as(f32, 4), hit.x);
-    try t.expectEqual(@as(f32, 8), hit.y);
-    try t.expectEqual(@as(f32, 24), hit.width);
-    try t.expectEqual(@as(f32, 12), hit.height);
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 5)); // Separator/top gap.
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 29, 9)); // Branch cells.
+    try t.expectEqual(@as(f32, 4), hit.y);
+    try t.expectEqual(@as(f32, 28), hit.width);
+    try t.expectEqual(@as(f32, 14), hit.height);
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 2)); // Separator/top gap.
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 33, 9)); // After path, before branch.
     try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 150, 9)); // Status cells.
     term.setCursorPos(2, 1);
     try term.print('x');
@@ -619,10 +776,10 @@ test "command chrome path bounds preserve unicode truncation scale and partial c
     header.above_viewport = true;
     const clipped = pathRect(header, size, 20, 6, -1).?;
     try t.expectEqual(@as(f32, 0), clipped.y);
-    try t.expectEqual(@as(f32, 8), clipped.height);
+    try t.expectEqual(@as(f32, 4), clipped.height);
     header.pinned = true;
     const pinned = pathRect(header, size, 20, 6, 80).?;
-    try t.expectEqual(@as(f32, 136), pinned.y);
+    try t.expectEqual(@as(f32, 128), pinned.y);
 }
 
 test "command chrome pinned current header replaces only its visible grid copy" {

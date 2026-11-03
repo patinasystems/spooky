@@ -1,5 +1,7 @@
 """Read-only admission checks for preview packaging; no signing or DMG creation."""
 from pathlib import Path
+import json
+import hashlib
 import plistlib
 import runpy
 import tempfile
@@ -7,6 +9,7 @@ import unittest
 
 
 read_bundle = runpy.run_path(str(Path(__file__).with_name("package.py")))["read_bundle"]
+read_file_search = runpy.run_path(str(Path(__file__).with_name("package.py")))["read_file_search"]
 
 
 class PackageAdmissionTests(unittest.TestCase):
@@ -73,6 +76,43 @@ class PackageAdmissionTests(unittest.TestCase):
         link.symlink_to(Path(self.temporary.name))
         with self.assertRaisesRegex(ValueError, "external symlink"):
             read_bundle(self.app)
+
+    def test_requires_pinned_names_only_helper_and_license(self):
+        with self.assertRaisesRegex(ValueError, "missing.*helper"):
+            read_file_search(self.app)
+        helper = self.app / "Contents/Helpers/spooky-fsearch"
+        helper.parent.mkdir()
+        helper.write_bytes(b"fixture")
+        helper.chmod(0o755)
+        resources = self.app / "Contents/Resources/FSearch"
+        resources.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, "license"):
+            read_file_search(self.app)
+        source = Path(__file__).parent / "fsearch"
+        (resources / "LICENSE.fsearch").write_bytes((source / "LICENSE.fsearch").read_bytes())
+        (resources / "LICENSE.dependencies").write_bytes((source / "LICENSE.dependencies").read_bytes())
+        pin = json.loads((source / "upstream.json").read_text())
+        data = dict(revision=pin["revision"], content_indexing=False,
+                    idle_keep_warm=False, architectures=["arm64"],
+                    patch_sha256=hashlib.sha256((source / pin["patch"]).read_bytes()).hexdigest(),
+                    cargo_lock_sha256=hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest(),
+                    dependency_licenses_sha256=hashlib.sha256((source / "LICENSE.dependencies").read_bytes()).hexdigest(),
+                    adapter_source_sha256=hashlib.sha256((source / "Cargo.toml").read_bytes() + b"\0"
+                                                       + (source / "src/main.rs").read_bytes()).hexdigest())
+        manifest = resources / "fsearch-provenance.json"
+        manifest.write_text(json.dumps(data))
+        self.assertEqual(read_file_search(self.app), data)
+        for key, value in [("content_indexing", True), ("idle_keep_warm", True),
+                           ("revision", "wrong"), ("architectures", ["x86_64"]),
+                           ("patch_sha256", "wrong"), ("cargo_lock_sha256", "wrong"),
+                           ("adapter_source_sha256", "wrong")]:
+            manifest.write_text(json.dumps(dict(data, **{key: value})))
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "provenance"):
+                read_file_search(self.app)
+        manifest.write_text(json.dumps(data))
+        (resources / "LICENSE.dependencies").unlink()
+        with self.assertRaisesRegex(ValueError, "dependency licenses"):
+            read_file_search(self.app)
 
 
 if __name__ == "__main__":
