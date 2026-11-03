@@ -8,6 +8,26 @@ native editor is enabled by default; other configured shells and explicit
 commands retain ordinary terminal input. Block chrome uses Ghostty's Metal
 renderer; editing and interactive controls use AppKit.
 
+## Install Spooky
+
+**[Download Spooky for macOS](https://downloads.patinasystems.com/spooky/Spooky.dmg)**
+— Apple Silicon, macOS 13 or later.
+
+1. Open `Spooky.dmg`.
+2. Drag **Spooky** onto **Applications**.
+3. Open **Spooky** from Applications, then eject the disk image.
+
+This is an early preview and is **not yet notarized by Apple**. macOS may require
+explicit approval in System Settings → Privacy & Security before its first launch.
+The disk-image installation follows Ghostty's normal drag-to-Applications flow;
+the notarized first-launch experience requires a Developer ID release.
+Spooky installs alongside Ghostty and loads your existing Ghostty configuration.
+Upstream Ghostty automatic updates are disabled for this fork.
+
+[SHA-256 checksums](https://downloads.patinasystems.com/spooky/SHA256SUMS) ·
+[Build provenance](https://downloads.patinasystems.com/spooky/latest.json) ·
+[Packaging and publishing](scripts/spooky/README.md)
+
 [Build and run Spooky](prototype/native-input/README.md) ·
 [Implementation](docs/native-command-input.md) ·
 [Shell completion](docs/native-completion.md)
@@ -56,7 +76,8 @@ For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
 ## Download
 
-See the [download page](https://ghostty.org/download) on the Ghostty website.
+For this fork, [download Spooky](https://downloads.patinasystems.com/spooky/Spooky.dmg).
+For upstream Ghostty, see its [download page](https://ghostty.org/download).
 
 ## Documentation
 

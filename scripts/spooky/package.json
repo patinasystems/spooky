@@ -1,0 +1,10 @@
+{
+  "name": "spooky-release-tools",
+  "private": true,
+  "scripts": {
+    "wrangler": "wrangler"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}

@@ -1,0 +1,10 @@
+#include "../../prototype/native-input/spooky.xcconfig"
+
+// A downloadable preview must not inherit Xcode's local debugging entitlement
+// or code-coverage instrumentation. Packaging independently verifies admission.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
+CLANG_ENABLE_CODE_COVERAGE = NO
+ENABLE_CODE_COVERAGE = NO
+CLANG_COVERAGE_MAPPING = NO
+ENABLE_TESTABILITY = NO
+ENABLE_PREVIEWS = NO
