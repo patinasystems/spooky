@@ -103,6 +103,8 @@ Do not infer exact per-process output ownership from a block boundary.
 | [`CommandTextView.swift`](../macos/Sources/Features/Command%20Input/CommandTextView.swift) | Native editing, submit/newline/IME handling, independent undo, and text measurement. |
 | [`CommandInputView.swift`](../macos/Sources/Features/Command%20Input/CommandInputView.swift) | AppKit editor/scroll-view ownership and explicit callbacks. |
 | [`CommandCompletionController.swift`](../macos/Sources/Features/Command%20Input/CommandCompletionController.swift) | Debounced predictions, cached filtering, keyboard acceptance, and inline/list lifetime. |
+| [`CommandHistoryController.swift`](../macos/Sources/Features/Command%20Input/CommandHistoryController.swift) | Native Up/Down recall, visual-line boundaries, draft restoration, and stale-response rejection. |
+| [`CommandHistoryBridge.swift`](../macos/Sources/Features/Command%20Input/CommandHistoryBridge.swift) | On-demand live-shell history snapshot transport with bounded off-main reads. |
 | [`CommandInputDocking.swift`](../macos/Sources/Features/Command%20Input/CommandInputDocking.swift) | Stable per-pane inline-to-docked placement and reserved height. |
 | [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | Inline or pinned native editor placement, cursor ownership, and bottom inset. |
 | [`CommandBlockLayout.swift`](../macos/Sources/Features/Command%20Input/CommandBlockLayout.swift) | Snapshot of core geometry and immutable block metadata. |
@@ -225,8 +227,21 @@ at each primary prompt. The worker preserves shell context and produces exact
 quoted buffer/cursor edits; AppKit checks the draft revision and caret before
 applying them. It keeps temporary ZLE display out of the visible transcript.
 See [native completion](native-completion.md) for supported contexts and bounds.
-History navigation still uses terminal input. Reading a history file or asking
-a fresh background shell does not reproduce the live shell's state. User prompt plugins,
+Native Up/Down history reads the running zsh's in-memory history, including any
+previous-session entries loaded by the user's configuration. On the first Up at
+the first visual line, a generation-bound `history-request` asks a dedicated ZLE
+widget for an atomic snapshot in `histories/<UUID>`. The shell's actual input
+buffer and history position stay unchanged. Exact multiline/Unicode commands
+are NUL-delimited in `items-v1`; snapshots inspect at most 1,000 recent events
+and contain at most 1 MiB. Unsupported control characters are omitted.
+Subsequent arrows browse that snapshot locally. Down at the newest entry
+restores the unfinished draft and caret. Arrows inside multiline text retain
+native movement, and visible completion lists retain their arrow navigation.
+Editing, prompt changes, and cancelled pending requests cannot admit stale
+history results. This adds no history scan or history-file I/O to submission or
+prompt startup; the app never parses the user's `HISTFILE`.
+
+User prompt plugins,
 arbitrary ZLE widgets, SSH/tmux/nested sessions, Fish/Bash, and Linux each require
 separate adapters and qualification.
 

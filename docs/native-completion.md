@@ -82,8 +82,11 @@ protocol limit. Custom shell completers can still be slow on a cold query.
 | Return with only an inline preview | Run exactly the typed draft |
 | Option-Tab / Shift-Return | Insert a literal tab / newline |
 
-Even a unique suggestion requires acceptance. Down without a visible suggestion
-retains native multiline navigation. With no suggestions pending, Escape keeps
+Even a unique suggestion requires acceptance. Without a list, Up on the first
+visual line and Down on the last line navigate live-shell history and restore
+the unfinished draft. History recall suppresses predictions so Down can return
+through newer entries; typing resumes ordinary completion. Other arrows retain
+native multiline navigation. With no suggestions pending, Escape keeps
 its terminal-input behavior. Marked IME text always gets first refusal.
 
 The option list, inline annotation, and search controls are AppKit, with shared

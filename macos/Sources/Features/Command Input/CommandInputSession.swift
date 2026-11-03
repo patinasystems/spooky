@@ -11,12 +11,15 @@ final class CommandInputSession {
 
     var onChange: (() -> Void)?
     var onCompletion: ((CommandCompletionResponse) -> Void)?
+    var onHistory: ((CommandHistoryResponse) -> Void)?
     private var hasEditorFont = false
 
     let directory: URL
     private let bridge: CommandInputBridge
     private let completionBridge: CommandCompletionBridge
     private var completionTask: Task<Void, Never>?
+    private let historyBridge: CommandHistoryBridge
+    private var historyTask: Task<Void, Never>?
     private weak var surfaceView: Ghostty.SurfaceView?
     private var pollingTask: Task<Void, Never>?
     private var fileEvents: CommandInputFileEvents?
@@ -58,6 +61,7 @@ final class CommandInputSession {
     }
 
     var isEditable: Bool { ready && !terminalRequested && pending == nil && handoff == nil && !failed }
+    var historyContext: String? { isEditable ? generation : nil }
     var canReturnToEditor: Bool { ready && pending == nil && handoff == nil && !failed }
     var isRecoveringDraft: Bool { recoveryVisible }
     var isTransferringSubmission: Bool { !failed && (pending != nil || handoff != nil) }
@@ -94,6 +98,7 @@ final class CommandInputSession {
         self.directory = directory
         self.bridge = CommandInputBridge(directory: directory)
         self.completionBridge = CommandCompletionBridge(directory: directory)
+        self.historyBridge = CommandHistoryBridge(directory: directory)
     }
 
     deinit {
@@ -102,6 +107,7 @@ final class CommandInputSession {
         geometryTask?.cancel()
         submissionTask?.cancel()
         completionTask?.cancel()
+        historyTask?.cancel()
         // This directory belongs only to this surface. No user shell files are changed.
         try? FileManager.default.removeItem(at: directory)
     }
@@ -152,8 +158,50 @@ final class CommandInputSession {
         guard value != draft else { return }
         draft = value
         completionTask?.cancel()
+        historyTask?.cancel()
         changed()
     }
+
+    func requestHistory(_ request: CommandHistoryRequest) {
+        historyTask?.cancel()
+        guard isEditable, let generation, request.text == draft, surfaceView?.readonly != true else {
+            onHistory?(.init(requestID: request.id, revision: request.revision, entries: [],
+                             message: "History is available at an empty shell prompt."))
+            return
+        }
+        historyTask = Task { [weak self, historyBridge] in
+            do {
+                try await historyBridge.prepare(request, generation: generation)
+                try Task.checkCancellation()
+                guard let self, self.generation == generation, self.isEditable,
+                      self.draft == request.text, let surfaceView = self.surfaceView,
+                      let window = surfaceView.window, window.isKeyWindow,
+                      let editor = window.firstResponder as? CommandTextView,
+                      editor.string == request.text,
+                      editor.selectedRange() == NSRange(location: request.cursorUTF16, length: 0),
+                      (window.windowController as? BaseTerminalController)?.focusedSurface === surfaceView else {
+                    await historyBridge.cancel(request.id)
+                    self?.onHistory?(.init(requestID: request.id, revision: request.revision, entries: [],
+                                          message: "History cancelled. Press Up to try again."))
+                    return
+                }
+                guard surfaceView.surfaceModel?.perform(action: "text:\\x1b[99;3~") == true else {
+                    throw BridgeError.unavailable("The terminal rejected the history request.")
+                }
+                let response = try await historyBridge.waitForResponse(to: request, generation: generation)
+                guard !Task.isCancelled, self.isEditable,
+                      self.generation == generation, self.draft == request.text else { return }
+                self.onHistory?(response)
+            } catch {
+                await historyBridge.cancel(request.id)
+                guard !Task.isCancelled, let self, self.draft == request.text else { return }
+                self.onHistory?(.init(requestID: request.id, revision: request.revision, entries: [],
+                                     message: error.localizedDescription))
+            }
+        }
+    }
+
+    func cancelHistory() { historyTask?.cancel() }
 
     func requestCompletion(_ request: CommandCompletionRequest) {
         completionTask?.cancel()
@@ -203,6 +251,7 @@ final class CommandInputSession {
         guard isEditable, let generation, let blockID = currentBlockID,
               let surfaceView, !surfaceView.readonly else { return false }
         completionTask?.cancel()
+        historyTask?.cancel()
         guard text.utf8.count <= Self.maximumBytes else {
             status = "Command exceeds the prototype's 1 MiB limit. Draft preserved."
             changed()
@@ -274,6 +323,7 @@ final class CommandInputSession {
 
     func useTerminal() {
         completionTask?.cancel()
+        historyTask?.cancel()
         terminalRequested = true
         recoveryVisible = false
         editorVisible = false
@@ -407,13 +457,15 @@ final class CommandInputSession {
         let transferring: Bool
         let nativeIntegration: Bool
         let prefersNativeInput: Bool
+        let historyContext: String?
     }
 
     private var presentationKey: Presentation {
         Presentation(status: status, editable: isEditable, visible: editorVisible,
                      focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID,
                      transferring: isTransferringSubmission,
-                     nativeIntegration: hasNativeIntegration, prefersNativeInput: prefersNativeInput)
+                     nativeIntegration: hasNativeIntegration, prefersNativeInput: prefersNativeInput,
+                     historyContext: historyContext)
     }
 
     private func focusTerminal() {

@@ -10,6 +10,8 @@ final class CommandTextView: NSTextView {
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
     var onCancelCompletion: () -> Void = {}
+    var onRequestHistory: (CommandHistoryRequest) -> Void = { _ in }
+    var onCancelHistory: () -> Void = {}
     var onFind: () -> Bool = { false }
     var canRequestFocus: () -> Bool = { true }
     private var focusRequestScheduled = false
@@ -22,6 +24,7 @@ final class CommandTextView: NSTextView {
     private let ownedTextStorage: NSTextStorage?
     private(set) var minimumLineHeight: CGFloat = 0
     private(set) lazy var completions = CommandCompletionController(textView: self)
+    private(set) lazy var history = CommandHistoryController(textView: self)
     var completionItems: [CommandCompletionCandidate] { completions.items }
     var selectedCompletionIndex: Int { completions.selectedIndex }
 
@@ -87,6 +90,7 @@ final class CommandTextView: NSTextView {
         )
         setAccessibilityLabel("Command input")
         setAccessibilityHelp("Edit a command. Right accepts a suggestion; Tab or Down opens options. "
+                             + "Up on the first visual line recalls shell history; Down on the last returns to your draft. "
                              + "Return submits; Shift Return adds a line. Escape dismisses suggestions or returns to the terminal.")
     }
 
@@ -98,12 +102,28 @@ final class CommandTextView: NSTextView {
         // Let the input method consume Return/Escape while composing. A Return
         // that commits an IME candidate must never also execute the command.
         guard !hasMarkedText() else {
+            history.reset()
             dismissCompletions()
             super.keyDown(with: event)
             return
         }
 
+        let arrow = event.keyCode == 125 || event.keyCode == 126
+        let modified = !event.modifierFlags.isDisjoint(with: [.shift, .control, .option, .command])
+        if arrow {
+            // Modified arrows belong entirely to native selection/navigation.
+            if modified { super.keyDown(with: event); return }
+            if completions.listVisible {
+                _ = completions.handleKey(event)
+                return
+            }
+            if history.isBrowsing {
+                if !history.navigate(older: event.keyCode == 126) { super.keyDown(with: event) }
+                return
+            }
+        }
         if completions.handleKey(event) { return }
+        if arrow && history.navigate(older: event.keyCode == 126) { return }
 
         switch event.keyCode {
         case 36, 76: // Return and keypad Enter
@@ -206,6 +226,7 @@ final class CommandTextView: NSTextView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        history.cancelPending()
         restorePointer(for: event)
         super.mouseDown(with: event)
     }
@@ -280,6 +301,7 @@ final class CommandTextView: NSTextView {
     override func resignFirstResponder() -> Bool {
         let accepted = super.resignFirstResponder()
         if accepted {
+            history.reset()
             dismissCompletions()
             onFocusChanged(false)
         }
@@ -288,7 +310,7 @@ final class CommandTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { dismissCompletions() }
+        if window == nil { history.reset(); dismissCompletions() }
         applyFocusRequest()
     }
 
@@ -311,18 +333,26 @@ final class CommandTextView: NSTextView {
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
-        if allowed { completions.willEdit() }
+        if allowed {
+            history.willEdit()
+            if !history.applying { completions.willEdit() }
+        }
         return allowed
     }
 
     override func didChangeText() {
         super.didChangeText()
-        completions.didEdit()
+        if history.applying {
+            completions.externalEdit()
+        } else {
+            history.willEdit()
+            completions.didEdit()
+        }
         reportContentHeight()
     }
 
-    func draftWillChangeExternally() { completions.externalEdit() }
-    func completionSelectionDidChange() { completions.selectionChanged() }
+    func draftWillChangeExternally() { history.reset(); completions.externalEdit() }
+    func completionSelectionDidChange() { history.selectionChanged(); completions.selectionChanged() }
     func receiveCompletions(_ response: CommandCompletionResponse) { completions.receive(response) }
     func dismissCompletions() { completions.dismiss() }
     func updateCompletionPosition() { completions.updatePosition() }

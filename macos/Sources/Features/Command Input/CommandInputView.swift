@@ -17,6 +17,8 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
     var onCancelCompletion: () -> Void = {}
+    var onRequestHistory: (CommandHistoryRequest) -> Void = { _ in }
+    var onCancelHistory: () -> Void = {}
     /// The host checks that this pane still owns the requested activation.
     var canRequestFocus: () -> Bool = { true }
 
@@ -50,8 +52,11 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.onContentHeightChanged = { [weak self] height in self?.contentHeightChanged(height) }
         textView.onRequestCompletion = { [weak self] in self?.onRequestCompletion($0) }
         textView.onCancelCompletion = { [weak self] in self?.onCancelCompletion() }
+        textView.onRequestHistory = { [weak self] in self?.onRequestHistory($0) }
+        textView.onCancelHistory = { [weak self] in self?.onCancelHistory() }
         textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
         toolTip = "Right accepts a suggestion. Tab or Down opens options; Tab or Return accepts. "
+            + "Up on the first visual line recalls history; Down on the last restores your draft. "
             + "Option Tab inserts a tab. Shift Return adds a line."
     }
 
@@ -80,13 +85,15 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     }
 
     func setEditable(_ editable: Bool) {
-        if !editable { textView.dismissCompletions() }
+        if !editable { textView.history.reset(); textView.dismissCompletions() }
         if textView.isEditable != editable { textView.isEditable = editable }
         if !textView.isSelectable { textView.isSelectable = true }
         textView.applyFocusRequest()
     }
 
     func receiveCompletions(_ response: CommandCompletionResponse) { textView.receiveCompletions(response) }
+    func receiveHistory(_ response: CommandHistoryResponse) { textView.history.receive(response) }
+    func setHistoryContext(_ promptID: String?) { textView.history.setContext(promptID) }
 
     func dismissCompletions() { textView.dismissCompletions() }
 

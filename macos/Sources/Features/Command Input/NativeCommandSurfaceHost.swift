@@ -57,6 +57,9 @@ final class NativeCommandSurfaceHost: NSView {
         editor.onRequestCompletion = { [weak session] in session?.requestCompletion($0) }
         editor.onCancelCompletion = { [weak session] in session?.cancelCompletion() }
         session.onCompletion = { [weak self] in self?.editor.receiveCompletions($0) }
+        editor.onRequestHistory = { [weak session] in session?.requestHistory($0) }
+        editor.onCancelHistory = { [weak session] in session?.cancelHistory() }
+        session.onHistory = { [weak self] in self?.editor.receiveHistory($0) }
         editor.canRequestFocus = { [weak self] in self?.canFocusEditor ?? false }
         editor.onFocusChanged = { [weak self] focused in
             guard focused, let self else { return }
@@ -186,6 +189,7 @@ final class NativeCommandSurfaceHost: NSView {
         editor.configureAppearance(font: session.editorFont, textColor: foreground,
                                    backgroundColor: background, minimumLineHeight: line)
         editor.setDraft(session.draft)
+        editor.setHistoryContext(session.historyContext)
         editor.setEditable(session.isEditable && shown && !recovering && !surfaceView.readonly)
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()

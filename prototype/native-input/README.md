@@ -65,8 +65,11 @@ local executor when this separate checkout is only on this Mac.
    an inline preview executes exactly the typed draft.
 6. Click a block's directory to copy its full absolute path. Command-click or
    Control-click opens that directory in Finder.
-7. Use the terminal-input control or Escape (with no suggestions pending) for
-   shell history and unsupported completion contexts. Native editing can resume
+7. Up on the first visual line recalls shell history; Down on the last line
+   moves forward and restores your unfinished draft. Within multiline commands,
+   arrows move the caret; an open completion list keeps its arrow navigation.
+   Use the terminal-input control or Escape (with no suggestions pending) for
+   custom shell widgets and unsupported completion contexts. Native editing can resume
    at an empty primary prompt; clear or run any partially edited shell line.
 8. Try `read answer; print -r -- "$answer"` or a terminal application. Running
    programs receive ordinary terminal input. Incomplete input such as

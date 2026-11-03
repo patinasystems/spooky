@@ -38,6 +38,7 @@ builtin typeset -g _patina_native_generation="$$-0"
 builtin typeset -g _patina_native_last_state=''
 builtin typeset -gA _patina_native_seen
 builtin typeset -gA _patina_native_completion_seen
+builtin typeset -gA _patina_native_history_seen
 builtin typeset -gA _patina_native_completion_options
 builtin typeset -gi _patina_native_completion_available=0 _patina_native_completion_fd=0
 builtin typeset -gi _patina_native_block_counter=0 _patina_native_input_recorded=0
@@ -185,6 +186,7 @@ _patina_native_exit() {
     builtin local result=$?
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     _patina_native_completion_stop
+    _patina_native_history_cleanup
     _patina_native_finish_block "$result"
     _patina_native_publish exited end
     return 0
@@ -213,6 +215,8 @@ _patina_native_line_init() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     (( ++_patina_native_counter ))
     _patina_native_generation="$$-$_patina_native_counter"
+    _patina_native_history_seen=()
+    _patina_native_history_cleanup
     # Startup's one-shot precmd can precede user theme hooks in the first
     # captured hook list. Finalize after them and after existing ZLE init hooks.
     if [[ $PS1 != $_patina_native_marked_ps1 || $PS2 != $_patina_native_marked_ps2 ||
@@ -655,17 +659,149 @@ _patina_native_completion_worker_widget() {
     }
 }
 
+# History is read only on demand from zsh's own in-memory history, including
+# entries its configured startup already loaded. Never parse HISTFILE or use
+# history navigation widgets: the actual BUFFER, CURSOR and HISTNO stay intact.
+# history-request: generation LF, UUID LF. ESC [ 99 ; 3 ~ consumes it.
+# histories/<UUID> uses completion's metadata fields; items-v1 is exact UTF-8
+# command NUL records, newest first. Inspect at most 1000 recent events, with
+# <=1 MiB per entry and <=1 MiB for the complete packed file including framing.
+
+_patina_native_history_cleanup() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    [[ -d $_patina_native_dir/histories ]] || return 0
+    builtin local child
+    for child in "$_patina_native_dir/histories/"*(ND); do
+        [[ ${child:t} == ${1-} ]] || _patina_native_remove -rf "$child"
+    done
+}
+
+_patina_native_history_read() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local descriptor extra
+    builtin local -A metadata
+    if ! builtin zmodload zsh/stat || ! builtin zstat -H metadata "$1" ||
+       (( metadata[size] > 258 )); then
+        reason=oversized-request
+        return 1
+    fi
+    {
+        builtin exec {descriptor}< "$1" || { reason=read-failed; return 1; }
+        if ! IFS= builtin read -r -u $descriptor generation ||
+           ! IFS= builtin read -r -u $descriptor identifier; then
+            identifier='-'
+            reason=malformed-request
+            return 1
+        fi
+        if [[ -z $identifier || ${#identifier} -gt 128 ||
+              $identifier == *[^a-zA-Z0-9-]* ]]; then
+            identifier='-'
+            reason=malformed-identifier
+            return 1
+        fi
+        if IFS= builtin read -r -d '' -u $descriptor extra || [[ -n $extra ]]; then
+            reason=malformed-request
+            return 1
+        fi
+    } always {
+        [[ -n $descriptor ]] && builtin exec {descriptor}<&-
+    }
+}
+
+_patina_native_history_safe_text() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local LC_ALL=en_US.UTF-8
+    [[ $1 != *[[:INVALID:][:INCOMPLETE:]]* ]] || return 1
+    builtin local without_whitespace=${1//$'\n'/}
+    without_whitespace=${without_whitespace//$'\t'/}
+    # Submit accepts tabs/newlines but no other ASCII control characters.
+    LC_ALL=C
+    [[ $without_whitespace != *[[:cntrl:]]* ]]
+}
+
+_patina_native_history() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local request="$_patina_native_dir/history-request"
+    builtin local consumed="$_patina_native_dir/history-consumed.$$"
+    [[ -f $request && ! -L $request ]] || return 0
+    _patina_native_move -f "$request" "$consumed" || return 1
+    builtin local generation='' identifier='-' reason='' descriptor REPLY entry event
+    builtin local destination staging outcome=ok
+    builtin local -i count=0 scanned=0 total_bytes=0 truncated=0 bytes
+    {
+        if _patina_native_history_read "$consumed"; then
+            if [[ -n ${_patina_native_history_seen[$identifier]-} ]]; then
+                reason=duplicate-request
+            elif [[ $generation != $_patina_native_generation ]]; then
+                reason=stale-generation
+            elif [[ $CONTEXT != start ]]; then
+                reason=not-primary-prompt
+            elif [[ -n $BUFFER ]]; then
+                reason=nonempty-buffer
+            elif ! builtin zmodload -F zsh/parameter p:history 2>/dev/null; then
+                reason=history-unavailable
+            fi
+        fi
+        destination="$_patina_native_dir/histories/$identifier"
+        staging="$_patina_native_dir/histories/.pending-$identifier"
+        # A duplicate trigger cannot overwrite a response still being read.
+        [[ -e $destination ]] && return 0
+        _patina_native_history_seen[$identifier]=1
+        _patina_native_history_cleanup "$identifier"
+        _patina_native_mkdir -p "$staging" || return 1
+        builtin exec {descriptor}> "$staging/items-v1" || return 1
+        if [[ -z $reason ]]; then
+            # Enumerate keys, not all command texts: large older commands must
+            # not be copied merely to produce the bounded recent snapshot.
+            for event in "${(@Onk)history}"; do
+                if (( ++scanned > 1000 )); then
+                    truncated=1
+                    break
+                fi
+                entry=${history[$event]}
+                _patina_native_byte_count "$entry"
+                bytes=$REPLY
+                if (( bytes == 0 || bytes > 1048576 )) || ! _patina_native_history_safe_text "$entry"; then
+                    truncated=1
+                    continue
+                fi
+                if (( total_bytes + bytes + 1 > 1048576 )); then
+                    truncated=1
+                    break
+                fi
+                (( ++count, total_bytes += bytes + 1 ))
+                builtin print -rnu $descriptor -- "$entry"$'\0'
+            done
+        fi
+        builtin exec {descriptor}>&-
+        descriptor=''
+        builtin print -rn -- "$generation" > "$staging/generation"
+        builtin print -rn -- "$identifier" > "$staging/identifier"
+        [[ -n $reason ]] && outcome=rejected
+        builtin print -rn -- "$outcome" > "$staging/status"
+        builtin print -rn -- "$reason" > "$staging/reason"
+        builtin print -rn -- "$count" > "$staging/count"
+        builtin print -rn -- "$truncated" > "$staging/truncated"
+        _patina_native_move "$staging" "$destination"
+    } always {
+        [[ -n $descriptor ]] && builtin exec {descriptor}>&-
+        _patina_native_remove -f "$consumed"
+        [[ -n $staging ]] && _patina_native_remove -rf "$staging"
+    }
+}
+
 _patina_native_completion_initialize
 
 builtin zle -N _patina_native_submit
 builtin zle -N _patina_native_complete
+builtin zle -N _patina_native_history
 builtin zle -N _patina_native_completion_worker_widget
 builtin zle -C _patina_native_completion_generate_widget menu-complete _patina_native_completion_generate
 builtin autoload -Uz add-zle-hook-widget
 add-zle-hook-widget line-init _patina_native_line_init
 add-zle-hook-widget line-pre-redraw _patina_native_redraw
 add-zle-hook-widget line-finish _patina_native_line_finish
-# Reserve only the two transport sequences. Preserve the user's main keymap
+# Reserve only the transport sequences. Preserve the user's main keymap
 # (including a custom map copied before this integration was loaded).
 builtin bindkey -M main $'\e[99;1~' _patina_native_submit
 builtin bindkey -M main $'\e[99;2~' _patina_native_complete
@@ -675,6 +811,10 @@ builtin bindkey -M vicmd $'\e[99;1~' _patina_native_submit
 builtin bindkey -M emacs $'\e[99;2~' _patina_native_complete
 builtin bindkey -M viins $'\e[99;2~' _patina_native_complete
 builtin bindkey -M vicmd $'\e[99;2~' _patina_native_complete
+builtin bindkey -M main $'\e[99;3~' _patina_native_history
+builtin bindkey -M emacs $'\e[99;3~' _patina_native_history
+builtin bindkey -M viins $'\e[99;3~' _patina_native_history
+builtin bindkey -M vicmd $'\e[99;3~' _patina_native_history
 builtin typeset -ga precmd_functions preexec_functions zshexit_functions
 precmd_functions+=(_patina_native_precmd)
 preexec_functions+=(_patina_native_preexec)

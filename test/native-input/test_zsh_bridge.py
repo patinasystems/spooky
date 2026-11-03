@@ -26,6 +26,7 @@ ADAPTER = (
 STARTUP = ADAPTER.with_name("native-input-startup.zsh")
 TRIGGER = b"\x1b[99;1~"
 COMPLETION_TRIGGER = b"\x1b[99;2~"
+HISTORY_TRIGGER = b"\x1b[99;3~"
 
 
 class Shell:
@@ -176,6 +177,36 @@ class Shell:
         self.raw(COMPLETION_TRIGGER)
         self.wait(lambda: self.completion_response(identifier) is not None)
         return self.completion_response(identifier)
+
+    def stage_history(self, generation=None, identifier=None):
+        generation = generation or self.state()[1]
+        identifier = identifier or str(uuid.uuid4())
+        temporary = self.bridge / "history-request.next"
+        temporary.write_text(f"{generation}\n{identifier}\n")
+        temporary.chmod(0o600)
+        os.replace(temporary, self.bridge / "history-request")
+        return identifier
+
+    def history_response(self, identifier):
+        path = self.bridge / "histories" / identifier
+        if not path.exists():
+            return None
+        result = {
+            name: (path / name).read_text()
+            for name in ("generation", "identifier", "status", "reason", "count", "truncated")
+        }
+        packed = (path / "items-v1").read_bytes()
+        records = packed.split(b"\0")
+        count = int(result["count"])
+        assert len(records) == count + 1 and records[-1] == b""
+        result["items"] = [entry.decode("utf-8") for entry in records[:-1]]
+        return result
+
+    def history(self, generation=None, identifier=None):
+        identifier = self.stage_history(generation, identifier)
+        self.raw(HISTORY_TRIGGER)
+        self.wait(lambda: self.history_response(identifier) is not None)
+        return self.history_response(identifier)
 
     def submit(self, draft, generation=None, identifier=None):
         generation = generation or self.state()[1]
@@ -761,6 +792,174 @@ class NativeInputBridgeTests(unittest.TestCase):
         shell.wait(lambda: shell.receipt()[0] == "rejected")
         self.assertEqual(shell.receipt()[2], "oversized-request")
         self.assertEqual(shell.state()[0], "ready")
+
+
+@unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
+class NativeHistoryBridgeTests(unittest.TestCase):
+    def shell(self, **options):
+        shell = Shell(**options)
+        self.addCleanup(shell.close)
+        return shell
+
+    def test_history_preserves_exact_multiline_unicode_and_chronology(self):
+        older = "echo older"
+        newest = "printf 'café 👻\\n'\n\tprintf 'two'  \n"
+        shell = self.shell(user_rc="HISTSIZE=2048\n" + "\n".join(
+            f"builtin print -sr -- {shlex.quote(entry)}" for entry in [older, newest]
+        ) + "\n")
+        before = shell.state()
+        identifier = str(uuid.uuid4())
+        response = shell.history(identifier=identifier)
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["generation"], before[1])
+        self.assertEqual(response["identifier"], identifier)
+        self.assertEqual(response["items"], [newest, older])
+        self.assertEqual(response["truncated"], "0")
+        self.assertEqual(shell.state(), before)
+        self.assertIsNone(shell.metadata(before[3], "input"))
+
+    def test_history_uses_entries_loaded_by_normal_user_configuration(self):
+        shell = self.shell(
+            user_rc='HISTFILE="$HOME/previous-history"\nHISTSIZE=100\nSAVEHIST=100\n',
+            startup_files={"previous-history": ": 1700000000:0;echo previous café\n"
+                ": 1700000001:0;printf 'first'\\\nprintf 'second'\n"},
+        )
+        self.assertEqual(shell.history()["items"], [
+            "printf 'first'\nprintf 'second'", "echo previous café",
+        ])
+        # Snapshot reads the live history, not the file: changing the file after
+        # startup must not silently import commands absent from this shell.
+        (shell.root / "previous-history").write_text("echo never imported\n")
+        self.assertNotIn("echo never imported", shell.history()["items"])
+
+    def test_history_keeps_zle_buffer_cursor_event_and_options_unchanged(self):
+        shell = self.shell(user_rc="HISTSIZE=100\n"
+            "builtin print -sr -- 'echo fixture'\n"
+            "_probe_history_count=0\n"
+            "_probe_history_state() {\n"
+            '  builtin print -rn -- "$BUFFER"$\'\\0\'"$CURSOR"$\'\\0\'"$HISTNO"'
+            '$\'\\0\'"$HISTCMD"$\'\\0\'"${options[ksharrays]}" > "$HOME/history-state"\n'
+            '  (( ++_probe_history_count )); print -rn -- "$_probe_history_count" > "$HOME/history-state-count"\n'
+            "}\n"
+            "zle -N _probe_history_state\n"
+            "bindkey $'\\e[99;4~' _probe_history_state\n"
+            "setopt ksh_arrays no_unset\n")
+        shell.raw(b"\x1b[99;4~")
+        shell.wait(lambda: shell.result("history-state-count") == b"1")
+        before = shell.result("history-state")
+        first = shell.history()
+        shell.raw(b"\x1b[99;4~")
+        shell.wait(lambda: shell.result("history-state-count") == b"2")
+        self.assertEqual(shell.result("history-state"), before)
+        self.assertEqual(shell.history()["items"], first["items"])
+        _, generation = shell.submit('print -rn -- after > "$HOME/result"')
+        shell.ready_after(generation)
+        self.assertEqual(shell.result(), b"after")
+        self.assertEqual(shell.history()["items"][0], 'print -rn -- after > "$HOME/result"')
+
+    def test_history_rejects_stale_generation_terminal_buffer_and_continuation(self):
+        shell = self.shell()
+        old_generation = shell.state()[1]
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        self.assertEqual(shell.history(generation=old_generation)["reason"], "stale-generation")
+        shell.raw("echo unfinished")
+        shell.wait(lambda: shell.state()[0] == "terminal")
+        self.assertEqual(shell.history()["reason"], "nonempty-buffer")
+        shell.raw(b"\x15")
+        shell.wait(lambda: shell.state()[0] == "ready")
+        _, generation = shell.submit("for item in")
+        shell.wait(lambda: shell.state()[2] == "cont")
+        self.assertEqual(shell.history()["reason"], "not-primary-prompt")
+        shell.raw(b"\x03")
+        shell.ready_after(generation)
+
+    def test_history_caps_recent_events_and_packed_bytes(self):
+        shell = self.shell(user_rc="HISTSIZE=2000\n"
+            'for (( index=0; index<1105; ++index )); do print -sr -- "echo event-$index"; done\n')
+        response = shell.history()
+        self.assertEqual(len(response["items"]), 1000)
+        self.assertEqual(response["items"][0], "echo event-1104")
+        self.assertEqual(response["items"][-1], "echo event-105")
+        self.assertEqual(response["truncated"], "1")
+
+        large = self.shell(user_rc="HISTSIZE=100\n"
+            "text=${(l:600000::x:)}\n"
+            'print -sr -- "older $text"\nprint -sr -- "newer $text"\n'
+            "oversized=${(l:1048577::z:)}\nprint -sr -- \"$oversized\"\n")
+        response = large.history()
+        self.assertEqual(len(response["items"]), 1)
+        self.assertEqual(response["items"][0], "newer " + "x" * 600000)
+        self.assertEqual(response["truncated"], "1")
+        packed = large.bridge / "histories" / response["identifier"] / "items-v1"
+        self.assertLessEqual(packed.stat().st_size, 1048576)
+
+    def test_history_keeps_chronological_duplicates_and_respects_storage_options(self):
+        shell = self.shell(user_rc="HISTSIZE=100\nsetopt hist_find_no_dups\n"
+            "print -sr -- one\nprint -sr -- two\nprint -sr -- one\n")
+        # HIST_FIND_NO_DUPS changes search widgets, not ordinary .up-history.
+        self.assertEqual(shell.history()["items"], ["one", "two", "one"])
+        deduplicating = self.shell(user_rc="HISTSIZE=100\nsetopt hist_ignore_all_dups\n")
+        for draft in [": one", ": two", ": one"]:
+            _, generation = deduplicating.submit(draft)
+            deduplicating.ready_after(generation)
+        self.assertEqual(deduplicating.history()["items"], [": one", ": two"])
+
+    def test_history_queued_during_foreground_read_is_rejected_at_next_prompt(self):
+        shell = self.shell()
+        _, generation = shell.submit('read -r answer; print -rn -- "$answer" > "$HOME/result"')
+        shell.wait(lambda: shell.state()[0] == "running")
+        identifier = shell.stage_history(generation=generation)
+        self.assertIsNone(shell.history_response(identifier))
+        shell.raw("foreground input\r")
+        shell.ready_after(generation)
+        shell.raw(HISTORY_TRIGGER)
+        shell.wait(lambda: shell.history_response(identifier) is not None)
+        self.assertEqual(shell.history_response(identifier)["reason"], "stale-generation")
+        self.assertEqual(shell.result(), b"foreground input")
+
+    def test_history_filters_control_and_invalid_utf8_without_execution(self):
+        harmless = 'echo $(touch "$HOME/should-not-exist")'
+        shell = self.shell(user_rc="HISTSIZE=100\n"
+            f"print -sr -- {shlex.quote(harmless)}\n"
+            "print -sr -- ''\n"
+            "print -sr -- $'bad\\x1bcontrol'\n"
+            "print -sr -- $'bad\\0nul'\n"
+            "print -sr -- $'bad\\x80utf8'\n"
+            "print -sr -- $'bad\\xc3'\n")
+        response = shell.history()
+        self.assertEqual(response["items"], [harmless])
+        self.assertEqual(response["truncated"], "1")
+        self.assertFalse((shell.root / "should-not-exist").exists())
+
+    def test_history_duplicate_requests_and_prompt_changes_reclaim_storage(self):
+        shell = self.shell(user_rc="HISTSIZE=100\nprint -sr -- 'echo fixture'\n")
+        first = shell.history()
+        identifier = first["identifier"]
+        self.assertEqual(shell.history(identifier=identifier), first)
+        second = shell.history()
+        self.assertFalse((shell.bridge / "histories" / identifier).exists())
+        self.assertTrue((shell.bridge / "histories" / second["identifier"]).exists())
+        self.assertEqual(shell.history(identifier=identifier)["reason"], "duplicate-request")
+        self.assertEqual(len(list((shell.bridge / "histories").iterdir())), 1)
+        _, generation = shell.submit("true")
+        shell.ready_after(generation)
+        self.assertEqual(list((shell.bridge / "histories").iterdir()), [])
+        self.assertEqual(shell.history(generation=first["generation"])["reason"], "stale-generation")
+        self.assertFalse(list(shell.bridge.glob("history-consumed.*")))
+
+    def test_history_rejects_extra_request_payload_and_oversize(self):
+        shell = self.shell()
+        identifier = shell.stage_history()
+        with (shell.bridge / "history-request").open("ab") as request:
+            request.write(b"unexpected")
+        shell.raw(HISTORY_TRIGGER)
+        shell.wait(lambda: shell.history_response(identifier) is not None)
+        self.assertEqual(shell.history_response(identifier)["reason"], "malformed-request")
+        (shell.bridge / "history-request").write_bytes(b"x" * 259)
+        shell.raw(HISTORY_TRIGGER)
+        shell.wait(lambda: shell.history_response("-") is not None)
+        self.assertEqual(shell.history_response("-")["reason"], "oversized-request")
 
 
 @unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
