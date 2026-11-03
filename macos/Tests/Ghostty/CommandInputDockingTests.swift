@@ -28,8 +28,10 @@ struct CommandInputDockingTests {
         #expect(docking.hasDocked)
         #expect(placement.pinned)
         #expect(placement.origin == CGPoint(x: 0, y: 574))
-        #expect(placement.reservedHeight == 62)
-        #expect(placement.pinnedOffset == 62)
+        #expect(placement.reservedHeight == 44)
+        #expect(placement.pinnedOffset == 44)
+        let headerTop = metrics.containerHeight - placement.pinnedOffset
+        #expect(placement.origin.y - headerTop == layout.cellHeight)
     }
 
     @Test func crossingBottomNeverChangesDockedGeometryOrPTYReservation() {

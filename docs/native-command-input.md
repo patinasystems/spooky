@@ -52,17 +52,17 @@ text input, selection, undo, IME, menus, and accessibility retain their platform
 behavior. These changes do not remove the upstream SwiftUI application shell.
 
 Native command panes add four logical points of left/right padding to terminal
-geometry, plus four-point bottom and top gaps around each block separator.
-New prompts reserve two header rows so the caption keeps its readable scale;
-one-row scrollback retains its original layout. Output text keeps its normal
-cell size and selection coordinates.
+geometry and four-point bottom padding. New prompts and the dock reserve one
+compact header row, keeping the caption readable without an extra blank line
+before the input. The separator and caption use the compact four-point inset;
+older two-row scrollback retains its original geometry. Output text keeps its
+normal cell size and selection coordinates.
 The multiline editor has four-point padding on every side. Completion and
 terminal search share an AppKit overlay style, and Cmd+F routes from the editor
-to the existing terminal search engine. Clicking the printed directory opens an
-AppKit file-tree popover with lazy folder expansion and Copy Path. The click
-region comes from the renderer's caption geometry; branch/status text is not a
-directory target. Each folder lists at most 1,000 entries and shows a truncation
-message if more exist; symbolic links are shown without recursive traversal.
+to the existing terminal search engine. Clicking the printed directory copies
+its full absolute path; Command-click or Control-click opens it in Finder.
+The click region comes from the renderer's caption geometry; branch/status text
+is not a directory target. Directory clicks do not enumerate files or open a popover.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
@@ -71,8 +71,8 @@ is the behavior reference, not a dependency on Warp's application stack.
 
 ## One terminal transcript, grouped into blocks
 
-Each primary prompt has a stable block ID. The shell reserves two blank terminal
-rows for its GPU-rendered header, then marks the input position. A docked current
+Each primary prompt has a stable block ID. The shell reserves one blank terminal
+row for its GPU-rendered header, then marks the input position. A docked current
 header replaces its in-grid caption instead of drawing a second copy.
 ZLE renders the accepted
 command through its normal display/acceptance path. The native editor does not
@@ -103,7 +103,6 @@ Do not infer exact per-process output ownership from a block boundary.
 | [`CommandTextView.swift`](../macos/Sources/Features/Command%20Input/CommandTextView.swift) | Native editing, submit/newline/IME handling, independent undo, and text measurement. |
 | [`CommandInputView.swift`](../macos/Sources/Features/Command%20Input/CommandInputView.swift) | AppKit editor/scroll-view ownership and explicit callbacks. |
 | [`CommandCompletionController.swift`](../macos/Sources/Features/Command%20Input/CommandCompletionController.swift) | Debounced predictions, cached filtering, keyboard acceptance, and inline/list lifetime. |
-| [`CommandDirectoryPopover.swift`](../macos/Sources/Features/Command%20Input/CommandDirectoryPopover.swift) | Lazy AppKit file tree, bounded filesystem reader, and Copy Path. |
 | [`CommandInputDocking.swift`](../macos/Sources/Features/Command%20Input/CommandInputDocking.swift) | Stable per-pane inline-to-docked placement and reserved height. |
 | [`NativeCommandSurfaceHost.swift`](../macos/Sources/Features/Command%20Input/NativeCommandSurfaceHost.swift) | Inline or pinned native editor placement, cursor ownership, and bottom inset. |
 | [`CommandBlockLayout.swift`](../macos/Sources/Features/Command%20Input/CommandBlockLayout.swift) | Snapshot of core geometry and immutable block metadata. |

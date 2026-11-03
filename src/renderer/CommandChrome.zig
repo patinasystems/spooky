@@ -146,13 +146,9 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
         });
     }
     if (pinned_metadata) |metadata| {
-        const rows: u2 = rows: {
-            for (screen.command_blocks.blocks.items) |block| {
-                if (std.mem.eql(u8, &block.id, &self.pinned_id)) break :rows headerRows(block);
-            }
-            break :rows 2;
-        };
-        try headers.append(alloc, .{ .id = self.pinned_id, .row = 0, .rows = rows, .metadata = metadata, .current = true, .pinned = true });
+        // The dock reserves one caption row regardless of how many rows an
+        // older in-grid prompt reserved. Historical VT anchors stay intact.
+        try headers.append(alloc, .{ .id = self.pinned_id, .row = 0, .rows = 1, .metadata = metadata, .current = true, .pinned = true });
         result.pinned_offset_from_bottom = self.pinned_offset_from_bottom;
     }
     result.headers = try headers.toOwnedSlice(alloc);
@@ -160,7 +156,7 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
 }
 
 /// Only claim an extra chrome row when the first input anchor proves there
-/// is room. Legacy one-row prompts retain their previous layout after reloads.
+/// is room. Older two-row prompts retain their original scrollback geometry.
 fn headerRows(block: Blocks.Block) u2 {
     const header = block.header orelse return 1;
     const input = block.input orelse return 1;
@@ -256,8 +252,8 @@ const Text = struct {
 
 pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16 };
 
-/// Captions retain their existing readable scale. Two-row reservations add a
-/// second gap after the separator; legacy one-row reservations keep one gap.
+/// Captions retain their existing readable scale. Historical two-row headers
+/// have a second gap; compact one-row headers leave no extra blank input row.
 /// The terminal still owns all row positions and selection coordinates.
 pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32) CaptionLayout {
     const gap = @min(requested_gap, cell_height -| 1);
@@ -412,6 +408,7 @@ test "command chrome snapshots follow viewport and exclude erased and alternate 
         try t.expectEqual(@as(usize, 1), s.headers.len);
         try t.expectEqual(@as(u16, 0), s.headers[0].row);
         try t.expect(s.headers[0].pinned);
+        try t.expectEqual(@as(u2, 1), s.headers[0].rows);
     }
     term.setCursorPos(1, 1);
     try term.print('x');
@@ -427,6 +424,7 @@ test "command chrome snapshots follow viewport and exclude erased and alternate 
         defer t.allocator.free(s.headers);
         try t.expectEqual(@as(usize, 1), s.headers.len);
         try t.expect(s.headers[0].pinned);
+        try t.expectEqual(@as(u2, 1), s.headers[0].rows);
     }
     _ = try term.switchScreen(.alternate);
     const s = try chrome.snapshot(t.allocator, &term);
@@ -642,7 +640,7 @@ test "command chrome pinned current header replaces only its visible grid copy" 
     }
     _ = try chrome.update(t.allocator, true, 60, &.{
         .{ .id = "previous", .label = "/before", .suffix = "ok" },
-        .{ .id = "current", .label = "/now", .suffix = "", .current = true, .pinned = true },
+        .{ .id = "current", .label = "/now", .path_len = 4, .suffix = "", .current = true, .pinned = true },
     });
     const before = try term.plainString(t.allocator);
     defer t.allocator.free(before);
@@ -654,13 +652,20 @@ test "command chrome pinned current header replaces only its visible grid copy" 
         try t.expect(!s.headers[0].pinned);
         try t.expectEqualStrings("current", std.mem.sliceTo(&s.headers[1].id, 0));
         try t.expect(s.headers[1].pinned);
-        try t.expectEqual(@as(u2, 2), s.headers[1].rows);
+        try t.expectEqual(@as(u2, 2), s.headers[0].rows);
+        try t.expectEqual(@as(u2, 1), s.headers[1].rows);
+        // Even an older two-row prompt fits the one-row dock. Its click
+        // target ends exactly where the native editor begins, not below it.
+        const size: Size = .{ .screen = .{ .width = 168, .height = 160 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{ .left = 4, .right = 4, .bottom = 4 }, .command_padding = 4 };
+        const rect = pathRect(s.headers[1], size, 20, 8, s.pinned_offset_from_bottom).?;
+        try t.expectEqual(@as(f32, 116), rect.y + rect.height);
     }
     _ = try chrome.update(t.allocator, true, -1, &.{.{ .id = "current", .label = "/now", .suffix = "", .current = true }});
     const s = try chrome.snapshot(t.allocator, &term);
     defer t.allocator.free(s.headers);
     try t.expectEqual(@as(usize, 2), s.headers.len);
     try t.expect(!s.headers[0].pinned and !s.headers[1].pinned);
+    try t.expectEqual(@as(u2, 2), s.headers[1].rows);
     try t.expectEqual(@as(u16, 3), s.headers[1].row);
     const after = try term.plainString(t.allocator);
     defer t.allocator.free(after);

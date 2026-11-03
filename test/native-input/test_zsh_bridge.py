@@ -576,7 +576,7 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertIn(b"continued", shell.metadata(block, "executed-input"))
         self.assertEqual(shell.metadata(block, "status"), b"completed")
 
-    def test_primary_block_reserves_two_header_rows_and_finishes_in_order(self):
+    def test_primary_block_reserves_one_header_row_and_finishes_in_order(self):
         shell = self.shell
         self.assertEqual(len(shell.state()), 4)
         block = shell.state()[3]
@@ -591,7 +591,9 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertLess(markers.index(("B", block)), markers.index(("C", block)))
         self.assertLess(markers.index(("C", block)), markers.index(("D", block)))
         self.assertLess(markers.index(("D", block)), markers.index(("A", next_block)))
-        self.assertIn(f"\x1b]133;A;aid={block}\x07\r\n\r\n".encode(), shell.output)
+        header_start = f"\x1b]133;A;aid={block}\x07".encode()
+        self.assertIn(header_start + b"\r\n", shell.output)
+        self.assertNotIn(header_start + b"\r\n\r\n", shell.output)
         self.assertEqual(shell.metadata(block, "status"), b"completed")
         self.assertEqual(shell.metadata(block, "exit-status"), b"0")
         self.assertEqual(shell.metadata(next_block, "status"), b"editing")

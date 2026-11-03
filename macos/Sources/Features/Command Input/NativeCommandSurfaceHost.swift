@@ -24,19 +24,6 @@ final class NativeCommandSurfaceHost: NSView {
     private var synchronizing = false
     private var background = NSColor.black
     private var docking = CommandInputDocking()
-    private let directoryPopover = CommandDirectoryPopover()
-    private struct DirectoryAnchor: Equatable {
-        let id: String
-        let directory: URL
-        let rect: NSRect
-    }
-    private struct DirectoryContext: Equatable {
-        let layout: CommandTerminalLayout
-        let chrome: CommandChromePresentation
-        let bounds: NSRect
-    }
-    private var directoryAnchor: DirectoryAnchor?
-    private var directoryContext: DirectoryContext?
 
     override var isFlipped: Bool { true }
 
@@ -98,13 +85,11 @@ final class NativeCommandSurfaceHost: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        dismissDirectory()
         synchronize()
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        dismissDirectory()
         // Let the child surface publish its new core scale first. Logical
         // bounds may be unchanged when moving between 1x and 2x displays.
         DispatchQueue.main.async { [weak self] in
@@ -176,7 +161,6 @@ final class NativeCommandSurfaceHost: NSView {
             chrome.publish(to: surface)
             chromePresentation = chrome
         }
-        validateDirectoryAnchor(chrome: chrome)
 
         if !shown && window?.firstResponder === editor.textView {
             window?.makeFirstResponder(surfaceView)
@@ -214,47 +198,41 @@ final class NativeCommandSurfaceHost: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? {
         let target = super.hitTest(point)
         guard target === surfaceView, let event = NSApp.currentEvent,
-              event.type == .leftMouseDown, event.window === window,
+              event.window === window else { return target }
+        let isClick = event.type == .leftMouseDown ||
+            (event.type == .rightMouseDown && event.modifierFlags.contains(.control))
+        guard isClick,
               directory(at: convert(event.locationInWindow, from: nil)) != nil else { return target }
         return self
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let anchor = directory(at: convert(event.locationInWindow, from: nil)) else { return }
-        directoryAnchor = anchor
-        if let chrome = chromePresentation {
-            directoryContext = DirectoryContext(layout: session.layout, chrome: chrome, bounds: bounds)
+        guard let directory = directory(at: convert(event.locationInWindow, from: nil)) else { return }
+        if !event.modifierFlags.isDisjoint(with: [.command, .control]) {
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
+        } else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(directory.path, forType: .string)
         }
-        directoryPopover.show(directory: anchor.directory, anchorRect: anchor.rect, in: self)
     }
 
-    private func directory(at point: NSPoint) -> DirectoryAnchor? {
+    override func rightMouseDown(with event: NSEvent) {
+        // AppKit can deliver Control-click through the contextual-click path.
+        guard event.modifierFlags.contains(.control) else {
+            super.rightMouseDown(with: event)
+            return
+        }
+        mouseDown(with: event)
+    }
+
+    private func directory(at point: NSPoint) -> URL? {
         guard bounds.contains(point), let surface = surfaceView.surface else { return nil }
         var hit = ghostty_command_path_hit_s()
         guard ghostty_surface_command_path_at(surface, point.x, point.y, &hit) else { return nil }
         let id = withUnsafeBytes(of: hit.id) { String(bytes: $0.prefix { $0 != 0 }, encoding: .utf8) }
         guard let id, let path = session.blockMetadata[id]?.workingDirectory,
               path.hasPrefix("/") else { return nil }
-        return DirectoryAnchor(id: id, directory: URL(fileURLWithPath: path, isDirectory: true),
-                               rect: NSRect(x: hit.x, y: hit.y, width: hit.width, height: hit.height))
-    }
-
-    private func validateDirectoryAnchor(chrome: CommandChromePresentation) {
-        guard directoryPopover.isShown, let anchor = directoryAnchor else { return }
-        let context = DirectoryContext(layout: session.layout, chrome: chrome, bounds: bounds)
-        guard context != directoryContext else { return }
-        let center = NSPoint(x: anchor.rect.midX, y: anchor.rect.midY)
-        guard directory(at: center) == anchor else {
-            dismissDirectory()
-            return
-        }
-        directoryContext = context
-    }
-
-    private func dismissDirectory() {
-        directoryPopover.dismiss()
-        directoryAnchor = nil
-        directoryContext = nil
+        return URL(fileURLWithPath: path, isDirectory: true)
     }
 
     private func layoutNotice(foreground: NSColor) {

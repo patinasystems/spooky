@@ -29,12 +29,12 @@ struct CommandInputDocking {
         let pinned = recovering || hasDocked
         let line = max(1, layout.cellHeight)
         let reserved = editing && !transferring
-            ? (pinned ? editorHeight + line * 2 : max(0, editorHeight - line)) : 0
+            ? (pinned ? editorHeight + line : max(0, editorHeight - line)) : 0
         let x = max(0, (pinned ? layout.paddingLeft : layout.cursorX) - padding)
         let y = pinned ? max(0, containerHeight - editorHeight)
             : min(max(layout.paddingTop, layout.cursorY), max(0, containerHeight - editorHeight))
         return Placement(pinned: pinned, reservedHeight: reserved, origin: CGPoint(x: x, y: y),
                          shown: editing && (layout.cursorValid || pinned),
-                         pinnedOffset: editing && pinned && !transferring ? editorHeight + line * 2 : -1)
+                         pinnedOffset: editing && pinned && !transferring ? editorHeight + line : -1)
     }
 }

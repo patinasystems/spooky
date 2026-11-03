@@ -157,11 +157,11 @@ _patina_native_prepare_prompt() {
     _patina_native_metadata branch "$branch"
     _patina_native_metadata status editing
 
-    # A starts the header on a fresh line. Two explicit chrome rows keep
-    # four-point top/bottom gaps and the caption readable on a fixed VT grid.
+    # A reserves one compact chrome row before the native command input.
+    # A second row would leave a blank terminal line between caption and caret.
     # B may repeat during ZLE redisplay. The block identity remains unchanged.
     builtin print -rnu $_patina_native_tty -- \
-        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n\n'
+        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n'
     _patina_native_apply_prompt
     return 0
 }

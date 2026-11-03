@@ -63,10 +63,8 @@ local executor when this separate checkout is only on this Mac.
    without executing. Typing filters the list with fuzzy matching. Escape
    dismisses suggestions, and Option+Tab inserts a literal tab. Return with only
    an inline preview executes exactly the typed draft.
-6. Click a block's directory to browse its file tree. Expand folders on demand
-   and use Copy Path to copy that directory's absolute path. Each folder loads
-   at most 1,000 entries and shows a notice if more exist; symbolic links do not
-   expand recursively.
+6. Click a block's directory to copy its full absolute path. Command-click or
+   Control-click opens that directory in Finder.
 7. Use the terminal-input control or Escape (with no suggestions pending) for
    shell history and unsupported completion contexts. Native editing can resume
    at an empty primary prompt; clear or run any partially edited shell line.
