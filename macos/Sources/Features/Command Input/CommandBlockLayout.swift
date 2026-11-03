@@ -31,7 +31,16 @@ struct CommandTerminalLayout: Equatable {
     var cursorX: CGFloat = 0
     var cursorY: CGFloat = 0
     var lastStartedBlockID: String?
+    var lastPrimaryInputBlockID: String?
     var blocks: [CommandBlockAnchor] = []
+
+    /// A file-ready prompt is not presentable until its own B has parsed.
+    /// Visible block records may be clipped, erased, or outside their capacity.
+    /// The cursor can be outside the viewport while a pinned draft stays editable.
+    func hasParsedPrimaryInput(_ id: String?) -> Bool {
+        guard let id else { return false }
+        return primary && rows > 0 && columns > 0 && lastPrimaryInputBlockID == id
+    }
 
     @MainActor
     static func read(from surface: ghostty_surface_t, records: inout [ghostty_command_block_s]) -> Self? {
@@ -57,6 +66,10 @@ struct CommandTerminalLayout: Equatable {
         result.cursorX = layout.cursor_x
         result.cursorY = layout.cursor_y
         result.lastStartedBlockID = withUnsafeBytes(of: layout.last_started_id) { bytes in
+            let value = String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)
+            return value?.isEmpty == false ? value : nil
+        }
+        result.lastPrimaryInputBlockID = withUnsafeBytes(of: layout.last_primary_input_id) { bytes in
             let value = String(bytes: bytes.prefix { $0 != 0 }, encoding: .utf8)
             return value?.isEmpty == false ? value : nil
         }
@@ -109,19 +122,21 @@ struct CommandChromePresentation: Equatable {
         self.backingScale = backingScale
         var ids = Array(layout.blocks.map(\.id).prefix(127))
         if let currentID, !ids.contains(currentID) { ids.append(currentID) }
-        rows = ids.map { id in
-            let block = metadata[id]
+        rows = ids.compactMap { id in
+            // PTY markers and private metadata arrive independently. An unknown
+            // block has no truthful caption yet; never flash a guessed directory.
+            guard let block = metadata[id] else { return nil }
             let current = id == currentID
-            let cwd = block?.workingDirectory ?? "local zsh"
+            let cwd = block.workingDirectory
             var label = Self.displayPath(cwd)
             let pathByteCount = cwd.hasPrefix("/") && !(recovering && current) ? label.utf8.count : 0
-            if let branch = block?.branch, !branch.isEmpty { label += "  ⎇ \(branch)" }
+            if !block.branch.isEmpty { label += "  ⎇ \(block.branch)" }
             if recovering && current { label = "Retained draft (read only)" }
             var suffix = ""
-            if let status = block?.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
-            if let elapsed = block?.elapsed {
+            if let status = block.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
+            if let elapsed = block.elapsed {
                 suffix += String(format: "  %.3fs", elapsed)
-            } else if block?.status == "running" { suffix = "running" }
+            } else if block.status == "running" { suffix = "running" }
             return Row(id: id, label: label, pathByteCount: pathByteCount, suffix: suffix, current: current,
                        pinned: current && pinnedOffset >= 0)
         }

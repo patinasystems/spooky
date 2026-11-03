@@ -1577,6 +1577,7 @@ pub const CAPI = struct {
         cursor_x: f64,
         cursor_y: f64,
         last_started_id: [65]u8,
+        last_primary_input_id: [65]u8,
     };
 
     const CommandChrome = extern struct {
@@ -2104,6 +2105,7 @@ pub const CAPI = struct {
             .cursor_x = 0,
             .cursor_y = 0,
             .last_started_id = term.last_started_command_id,
+            .last_primary_input_id = term.last_primary_input_id,
         };
         if (!layout.primary) return 0;
         if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {

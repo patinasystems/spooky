@@ -16,8 +16,63 @@ struct CommandInputHandoffTests {
         #expect(handoff.canFinish(layout: layout, readyGeneration: nil, context: "start"))
     }
 
-    @Test func fastCommandReturnsDirectlyToNativePrompt() {
-        #expect(handoff.canFinish(layout: CommandTerminalLayout(), readyGeneration: "prompt-3", context: "start"))
+    @Test func fastCommandWaitsForItsNewPrimaryPromptToParse() {
+        var layout = parsedPrompt("pane-2")
+        layout.lastStartedBlockID = "pane-2"
+        #expect(!handoff.canFinish(layout: layout, readyGeneration: "prompt-3",
+                                  readyBlockID: "pane-3", context: "start"))
+        layout.lastPrimaryInputBlockID = "pane-3"
+        // Readiness is durable even with no drawable block anchors.
+        #expect(layout.blocks.isEmpty)
+        #expect(handoff.canFinish(layout: layout, readyGeneration: "prompt-3",
+                                 readyBlockID: "pane-3", context: "start"))
+    }
+
+    @Test func parsedPrimaryPromptNeedsGridDimensionsButAllowsScrollback() {
+        var layout = parsedPrompt("pane-3")
+        #expect(layout.hasParsedPrimaryInput("pane-3"))
+        #expect(!layout.hasParsedPrimaryInput("pane-2"))
+        layout.cursorValid = false
+        layout.atBottom = false
+        #expect(layout.hasParsedPrimaryInput("pane-3"))
+        layout.rows = 0
+        #expect(!layout.hasParsedPrimaryInput("pane-3"))
+    }
+
+    @MainActor
+    @Test func startupAndLaterReadyWaitForTheirOwnParsedPrompt() throws {
+        let session = try CommandInputSession()
+        func ready(_ id: String) -> CommandInputBridge.Snapshot {
+            .init(state: .init(kind: "ready", generation: id, context: "start", blockID: id),
+                  receipt: nil, metadata: [:])
+        }
+        session.receive(ready("123-1"))
+        #expect(!session.editorVisible)
+        #expect(!session.isEditable)
+        session.receiveLayout(parsedPrompt("123-1"))
+        #expect(session.editorVisible)
+        #expect(session.isEditable)
+        var scrolled = parsedPrompt("123-1")
+        scrolled.cursorValid = false
+        scrolled.atBottom = false
+        session.receiveLayout(scrolled)
+        #expect(session.editorVisible)
+        #expect(session.isEditable)
+        session.receive(ready("123-2"))
+        #expect(!session.editorVisible)
+        #expect(!session.isEditable)
+        session.receiveLayout(parsedPrompt("123-2"))
+        #expect(session.editorVisible)
+        #expect(session.isEditable)
+    }
+
+    private func parsedPrompt(_ id: String) -> CommandTerminalLayout {
+        var layout = CommandTerminalLayout()
+        layout.cursorValid = true
+        layout.columns = 80
+        layout.rows = 24
+        layout.lastPrimaryInputBlockID = id
+        return layout
     }
 
     @Test func continuationAndAlternateScreenReceiveTerminalInput() {
@@ -135,6 +190,7 @@ struct CommandInputHandoffTests {
             .init(state: .init(kind: kind, generation: generation, context: context, blockID: "123-1"),
                   receipt: nil, metadata: [:])
         }
+        session.receiveLayout(parsedPrompt("123-1"))
         session.receive(snapshot("ready", generation: "prompt-1", context: "start"))
         session.receive(snapshot("terminal", generation: "prompt-2", context: context))
         #expect(!session.editorVisible)
@@ -177,6 +233,23 @@ struct CommandInputHandoffTests {
         #expect(second.current)
     }
 
+    @Test func newMarkerWaitsForItsOwnMetadataWithoutInventingACaption() {
+        var layout = CommandTerminalLayout()
+        layout.blocks = [block("previous", flags: 15, complete: true), block("next", flags: 3)]
+        var metadata = ["previous": self.metadata("previous", directory: "/fixture/previous", status: "completed")]
+        let pending = CommandChromePresentation(layout: layout, metadata: metadata, currentID: "next",
+                                               pinnedOffset: 54, recovering: false)
+        #expect(pending.rows.map(\.id) == ["previous"])
+        #expect(pending.rows.first?.label == "/fixture/previous")
+        #expect(!pending.rows.contains { $0.pinned })
+        metadata["next"] = self.metadata("next", directory: "/fixture/new-directory", status: "editing")
+        let available = CommandChromePresentation(layout: layout, metadata: metadata, currentID: "next",
+                                                 pinnedOffset: 54, recovering: false)
+        #expect(available.rows.first == pending.rows.first)
+        #expect(available.rows.last?.label == "/fixture/new-directory")
+        #expect(available.rows.last?.pinned == true)
+    }
+
     @Test func scrollingAndReflowDoNotChangeChromeCaptions() throws {
         var layout = CommandTerminalLayout()
         layout.blocks = [block("first", flags: 3)]
@@ -211,7 +284,11 @@ struct CommandInputHandoffTests {
     @Test func boundedChromeBatchRetainsTheCurrentPrompt() {
         var layout = CommandTerminalLayout()
         layout.blocks = (0..<200).map { block("block-\($0)", flags: 3) }
-        let presentation = CommandChromePresentation(layout: layout, metadata: [:], currentID: "block-199",
+        let metadata = Dictionary(uniqueKeysWithValues: (0..<200).map { index in
+            let id = "block-\(index)"
+            return (id, self.metadata(id, directory: "/fixture/\(index)", status: "editing"))
+        })
+        let presentation = CommandChromePresentation(layout: layout, metadata: metadata, currentID: "block-199",
                                                      pinnedOffset: 54, recovering: false)
         #expect(presentation.rows.count <= 128)
         #expect(Set(presentation.rows.map(\.id)).count == presentation.rows.count)

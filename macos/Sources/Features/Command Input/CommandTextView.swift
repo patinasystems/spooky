@@ -68,6 +68,11 @@ final class CommandTextView: NSTextView {
         isAutomaticDashSubstitutionEnabled = false
         isAutomaticTextReplacementEnabled = false
         isAutomaticSpellingCorrectionEnabled = false
+        // Shell completion owns suggestions; AppKit still owns marked-text
+        // composition and the input method's candidate selection.
+        isAutomaticTextCompletionEnabled = false
+        if #available(macOS 14.0, *) { inlinePredictionType = .no }
+        if #available(macOS 15.0, *) { mathExpressionCompletionType = .no }
         isContinuousSpellCheckingEnabled = false
         isGrammarCheckingEnabled = false
         isAutomaticLinkDetectionEnabled = false
@@ -103,6 +108,12 @@ final class CommandTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
+        let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp)
+        let diagnostic = CommandInputDiagnostics.begin(.nativeKeyDown)
+        defer {
+            CommandInputDiagnostics.end(diagnostic)
+            CommandInputDiagnostics.endInput(input)
+        }
         // Let the input method consume Return/Escape while composing. A Return
         // that commits an IME candidate must never also execute the command.
         guard !hasMarkedText() else {
@@ -271,6 +282,8 @@ final class CommandTextView: NSTextView {
         guard modifiers == .command || modifiers == [.command, .shift] else {
             return super.performKeyEquivalent(with: event)
         }
+        let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp)
+        defer { CommandInputDiagnostics.endInput(input) }
 
         // Ghostty has no Cut menu item, and its configurable terminal shortcuts
         // need not match standard text editing. Keep native editing shortcuts
@@ -356,6 +369,7 @@ final class CommandTextView: NSTextView {
 
     override func didChangeText() {
         super.didChangeText()
+        CommandInputDiagnostics.mark(.textDidChange, id: CommandInputDiagnostics.currentInputID)
         if history.applying {
             completions.externalEdit()
         } else {

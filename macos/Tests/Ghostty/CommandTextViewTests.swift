@@ -599,6 +599,109 @@ struct CommandTextViewTests {
             viewport: viewport, documentHeight: 600).y == 0)
     }
 
+    @Test func completionHeaderAndReplacementChangesReuseNativeRows() {
+        let table = CommandReloadTestTable()
+        let popup = CommandCompletionView(table: table)
+        defer { popup.dismiss() }
+        let editor = makeSizedEditor(width: 400)
+        func candidate(_ name: String, replacement: String) -> CommandCompletionCandidate {
+            .init(displayText: name, detail: "folder", replacementText: replacement,
+                  replacementRange: NSRange(location: 0, length: 0))
+        }
+        let first = [candidate("alpha", replacement: "alpha"), candidate("beta", replacement: "beta")]
+        popup.show(items: first, message: nil, selected: 0,
+                   header: .init(title: "/w", status: "Searching…"), for: editor)
+        let initialReloads = table.reloadCount
+        #expect(initialReloads > 0)
+        let next = [candidate("alpha", replacement: "new/alpha"), candidate("beta", replacement: "new/beta")]
+        popup.show(items: next, message: nil, selected: 1,
+                   header: .init(title: "/w", status: CommandFilePicker.initialIndexMessage), for: editor)
+        #expect(table.reloadCount == initialReloads)
+        #expect(table.selectedRow == 1)
+        popup.show(items: next, message: nil, selected: 1,
+                   header: .init(title: "/w", status: CommandFilePicker.initialIndexMessage), for: editor)
+        #expect(table.reloadCount == initialReloads)
+    }
+
+    @Test func completionWidthStopsMeasuringOnceALabelRequiresTruncation() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let long = CommandCompletionCandidate(displayText: String(repeating: "広い", count: 60), detail: "",
+            replacementText: "exact shell buffer", replacementRange: NSRange(location: 0, length: 0))
+        let result = CommandCompletionView.measureContent(items: Array(repeating: long, count: 200),
+                                                          font: font, message: nil)
+        #expect(result.width == CommandOverlayStyle.maximumPopupWidth)
+        #expect(result.rows == 1)
+    }
+
+    @Test func completionWidthCanReachItsCapThroughALaterDescription() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        func item(_ detail: String) -> CommandCompletionCandidate {
+            .init(displayText: "checkout", detail: detail, replacementText: "checkout",
+                  replacementRange: NSRange(location: 0, length: 0))
+        }
+        let items = [item("branch"), item(String(repeating: "long description ", count: 20)), item("unused")]
+        let first = CommandCompletionView.measureContent(items: Array(items.prefix(1)), font: font, message: nil)
+        let result = CommandCompletionView.measureContent(items: items, font: font, message: nil)
+        #expect(first.width < CommandOverlayStyle.maximumPopupWidth)
+        #expect(result.width == CommandOverlayStyle.maximumPopupWidth)
+        #expect(result.rows == 2)
+    }
+
+    @Test func completionWidthPreservesUncappedColumnWidthsAndTheRowBudget() {
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let title = "some-command-with-é"
+        let detail = "Unicode résumé"
+        func item(_ title: String, _ detail: String) -> CommandCompletionCandidate {
+            .init(displayText: title, detail: detail, replacementText: title,
+                  replacementRange: NSRange(location: 0, length: 0))
+        }
+        var items = [item(title, ""), item("x", detail)]
+        items += Array(repeating: item("x", ""), count: 198)
+        // The existing budget excludes this deliberately oversized 201st row.
+        items.append(item(String(repeating: "wide", count: 100), ""))
+        let result = CommandCompletionView.measureContent(items: items, font: font, message: nil)
+        let titleWidth = (title as NSString).size(withAttributes: [.font: font]).width
+        let detailWidth = (detail as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
+        let expected = ceil(titleWidth + detailWidth + CommandOverlayStyle.inset * 7 + 8)
+        #expect(expected > CommandOverlayStyle.minimumPopupWidth)
+        #expect(expected < CommandOverlayStyle.maximumPopupWidth)
+        #expect(result.width == expected)
+        #expect(result.rows == 200)
+    }
+
+    @Test func completionRowsRefreshForChangedLabelsMessagesAndFont() throws {
+        let table = CommandReloadTestTable()
+        let popup = CommandCompletionView(table: table)
+        defer { popup.dismiss() }
+        let editor = makeSizedEditor(width: 400)
+        func candidate(_ name: String) -> CommandCompletionCandidate {
+            .init(displayText: name, detail: "", replacementText: name,
+                  replacementRange: NSRange(location: 0, length: 0))
+        }
+        popup.show(items: [candidate("alpha")], message: nil, selected: 0, for: editor)
+        var previous = table.reloadCount
+        popup.show(items: [candidate("beta")], message: nil, selected: 0, for: editor)
+        #expect(table.reloadCount > previous)
+        let row = try #require(popup.tableView(table, viewFor: table.tableColumns.first, row: 0) as? NSTableCellView)
+        #expect(row.textField?.stringValue == "beta")
+        previous = table.reloadCount
+        popup.show(items: [], message: "Searching…", selected: 0, for: editor)
+        #expect(table.reloadCount > previous)
+        previous = table.reloadCount
+        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        #expect(table.reloadCount > previous)
+        previous = table.reloadCount
+        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        #expect(table.reloadCount == previous)
+        editor.font = .monospacedSystemFont(ofSize: 30, weight: .regular)
+        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        #expect(table.reloadCount > previous)
+        let message = try #require(popup.tableView(table, viewFor: table.tableColumns.first, row: 0) as? NSTableCellView)
+        #expect(message.textField?.font == editor.font)
+        #expect(message.textField?.stringValue == CommandFilePicker.initialIndexMessage)
+        #expect(table.rowHeight >= CommandCompletionView.rowHeight(for: try #require(editor.font)))
+    }
+
     @Test func automaticSuggestionNeverMutatesDraftAndRightAcceptsIt() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
@@ -984,4 +1087,13 @@ struct CommandTextViewTests {
 private final class CommandFocusTestWindow: NSWindow {
     var simulatedKey = true
     override var isKeyWindow: Bool { simulatedKey }
+}
+
+@MainActor
+private final class CommandReloadTestTable: NSTableView {
+    private(set) var reloadCount = 0
+    override func reloadData() {
+        reloadCount += 1
+        super.reloadData()
+    }
 }

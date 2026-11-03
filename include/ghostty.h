@@ -565,6 +565,8 @@ typedef struct {
   // Latest parsed tagged primary-screen C, independent of visible anchors.
   // Empty before any C; preserved across screen clear, history eviction, RIS.
   char last_started_id[65];
+  // Latest matching parsed primary-screen B; durable across display erasure.
+  char last_primary_input_id[65];
 } ghostty_command_layout_s;
 
 // Metadata is copied synchronously and bounded by the implementation. Header

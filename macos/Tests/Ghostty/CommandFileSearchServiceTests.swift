@@ -3,6 +3,21 @@ import Testing
 @testable import Ghostty
 
 struct CommandFileSearchServiceTests {
+    @Test func diagnosticIndexOverridesAreOptInAndRequireAbsolutePaths() {
+        let disabled = CommandFileSearchService.diagnosticConfiguration(
+            enabled: false, indexDirectory: "/tmp/private-fixture", outputPath: "/tmp/measure.jsonl")
+        #expect(disabled.indexDirectory == nil)
+        #expect(disabled.outputPath == nil)
+        let enabled = CommandFileSearchService.diagnosticConfiguration(
+            enabled: true, indexDirectory: "/tmp/private-fixture", outputPath: "/tmp/measure.jsonl")
+        #expect(enabled.indexDirectory?.path == "/tmp/private-fixture")
+        #expect(enabled.outputPath == "/tmp/measure.jsonl")
+        let invalid = CommandFileSearchService.diagnosticConfiguration(
+            enabled: true, indexDirectory: "relative", outputPath: "/tmp/nul\0invalid")
+        #expect(invalid.indexDirectory == nil)
+        #expect(invalid.outputPath == nil)
+    }
+
     @Test func startupStartsOnceAndReportsReadinessWithoutInventingASearch() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

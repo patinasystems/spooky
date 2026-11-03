@@ -55,6 +55,8 @@ final class CommandOverlaySurface: NSView {
     override var isFlipped: Bool { true }
 
     override func layout() {
+        let diagnostic = CommandInputDiagnostics.begin(.overlayLayout)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         super.layout()
         CommandOverlayStyle.withoutAnimation {
             if clip.frame != bounds { clip.frame = bounds }
@@ -93,6 +95,7 @@ final class CommandOverlaySurface: NSView {
     }
 
     private func updateChrome() {
+        CommandInputDiagnostics.record(.overlayChromeUpdate)
         guard let clipLayer = clip.layer, let tintLayer = tint.layer else { return }
         let opaque = reduceTransparency
         CommandOverlayStyle.withoutAnimation {

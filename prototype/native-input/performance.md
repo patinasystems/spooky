@@ -482,3 +482,167 @@ The paired helper hashes were `abbb0614cd994435ad0476bed8336230104fcfdf14eb40702
 (rejected batching candidate). The final patch hash is
 `f2536ff72b1d34a2eddf3c43fa485744257e6ae0ffa0f1a6318f4cb0db4a8f00`.
 The measurements above must not be presented as final-build idle qualification.
+
+
+## November 3: index worker policy and live compositor capture
+
+The next candidate makes background worker policy explicit: the global index
+pool, subtree enumeration, and recovery stat pools use utility QoS and at most
+two workers. Previously recovery could create 12 stat workers and subtree scans
+four; several pools inherited priority. The separate two-worker filename query
+pool and FSEvents delivery retain user-initiated QoS. A process-isolated helper
+initializes this policy before any index work. Three focused upstream fixtures
+(including actual `pthread_get_qos_class_np` checks) and seven helper fixtures
+passed. The measured candidate's pre-signing helper hash was
+`b386865d59713ab950014edb44848efbffd97d5bf3a643406bb9db703cac0b54`;
+its patch hash was `b22b21be969f36fd91b8552a5c2d849309c6244a0f03cc20daa73fe8941fe831`.
+This establishes bounded worker priority/concurrency, not an isolated latency gain.
+
+Opt-in diagnostics distinguish crawl, build, save, prefault, access rescan,
+replay/live updates, compaction, relisting, and waiting. A searchable `ready`
+index can still be doing background work. The candidate's private fresh index
+crawled about 18.2 million names in 151.99 seconds, then built in 2.77 seconds
+and saved in 0.20 seconds. This is one loaded-machine observation; filesystem
+cache state, other jobs, and the normal app's watcher were uncontrolled.
+No personal index was deleted or replaced. See the
+[helper diagnostic settings](../../scripts/spooky/fsearch/README.md) for the
+opt-in log path and disposable index-directory override. Records contain no
+filenames, query text, or file contents.
+
+A 90-second Instruments 27 `Hitches`-only capture targeted the diagnostic app.
+The window was explicitly verified visible for the following intervals; earlier
+occluded-window observations were excluded. The index was ready throughout,
+with normal event updates interspersed with waits. Its helper used 20.38 CPU
+seconds over an 89.31-second sampled interval; this was active desktop/filesystem
+use, not an idle qualification.
+
+| Visible workload | App-tagged updated-frame records | Hitch intervals | Total hitch duration |
+| --- | ---: | ---: | ---: |
+| 16 alternating scroll gestures, 10.80 seconds | 531 | 8 | 166.67 ms |
+| 20 typed keys and 12 completion-list arrows | 17 | 1 | 16.67 ms |
+| Eight separate empty Return presses | — | 0 | 0 ms |
+
+Frame counts use matching swap/surface IDs between `hitches-updates` and
+`hitches-frame-lifetimes`, within the recorded action windows plus 200 ms to
+include trailing work. They are compositor records, not an FPS result. Their
+exported lifetime duration is not a verified input-to-display latency: this
+schema provides no explicit first-presentation field. Joining an input to the
+next app update is only temporal association, with no causal input-to-swap ID.
+One successful empty Return had no qualifying app update within 500 ms, showing
+that this join also misses some terminal-only updates. Accordingly, neither the
+raw frame lifetime nor the next-frame association is reported as key-to-pixel
+latency. CPU input/submit milestones are separate measurements.
+
+The full `Animation Hitches` template was too intrusive here: a 30-second
+baseline generated about 17.5 GiB of temporary trace data and took roughly four
+minutes to finalize to 1.2 GiB. Its workload and overhead were not matched to the
+candidate, so it supports no before/after improvement claim. The minimal
+90-second capture saved about 22 MiB. Run bounded captures through Pat, for example:
+
+```sh
+pat run --on local --cost heavy --cores 1 -- 'xcrun xctrace record --instrument Hitches --attach <candidate-pid> --time-limit 90s --output /tmp/spooky-hitches.trace --no-prompt'
+xcrun xctrace export /tmp/spooky-hitches.trace --toc
+```
+
+Export the schemas actually present in the trace; the installed Legacy Hitches
+schema names differ from Instruments 27's current names. The full baseline's
+`displayed-surfaces-interval` populated `cpu-to-display-latency` for only four
+records. Apple's installed display-model rules compute that field only when an
+app command-buffer dependency supplies a commit timestamp; merely adding the
+Display instrument does not guarantee it, and it still is not a keyboard-event
+latency. No GPU-completion timestamp was treated as a display timestamp.
+
+Private artifacts for this capture are `/tmp/spooky-latency-candidate-hitches-90s.trace`,
+`/tmp/spooky-candidate-visible90-report.json`, and `/tmp/spooky-visible-captures.json`.
+The remaining measurement gap is a causally matched visible-pixel endpoint during
+an active initial crawl, with identical instrumentation and workloads on both builds.
+
+### November 3: live native input and prompt handoff
+
+The supplied startup/newline recording was inspected with Framecap's persisted
+motion/OCR layers and native source frames. In native extraction
+`native-000004400000-000004470000-png`, `f000001.png` at 4.400 s shows the guessed
+“local zsh” caption; `f000005.png` at 4.466667 s shows the real directory and a
+one-row transcript displacement. The recording has no input-event clock, so it
+establishes visible instability, not a key-to-pixel latency number. Private
+recordings, screenshots, traces, and filename indexes remain outside Git.
+
+Separate ReleaseLocal baseline and candidate apps used the normal configured
+zsh, anonymous event timestamps, private search indexes, and real CUA key/wheel
+input. The host remained in use. Native input instrumentation is opt-in and
+writes bounded JSONL batches from a utility queue, never from keyDown. The
+baseline is source `330d17908` with instrumentation only; the candidate includes
+the changes in this commit. The final OS prose-prediction settings and capped
+width-measurement optimization were added after these timing captures; the
+numbers below do not claim their benefit.
+
+Eight docked empty Returns per version, with a ready index:
+
+| Application milestone from handler entry | Baseline median / max | Candidate median / max |
+| --- | ---: | ---: |
+| Terminal dimensions ready | 28.014 / 30.928 ms | 0.805 / 1.530 ms |
+| Shell receipt observed | 35.041 / 42.404 ms | 5.251 / 11.524 ms |
+| Native ownership handoff released | 51.793 / 64.449 ms | 24.890 / 50.427 ms |
+
+Including event queueing, event timestamp to handoff median was 56.092 versus
+25.411 ms. These are application milestones, **not display presentation**.
+Every baseline trial reserved 46→0→46 points and resized the core 32→34→32 rows.
+Every candidate trial retained 46 points and 32 rows throughout. The baseline
+restored its final grid 79–105 ms after handler entry. Empty commands now avoid
+that reflow entirely. Long-running commands still release native input space
+when the parsed command boundary gives ownership to the terminal; a fast command
+may also take that path when its next ready prompt is not yet known.
+
+A ready file is no longer sufficient to present a new prompt: a durable matching
+primary B marker must have reached the terminal parser. This fixes startup and
+empty-command races without requiring an on-screen cursor when drafting while
+browsing history. Unknown block metadata is omitted until available rather than
+rendering a guessed caption. Initial readiness wakes geometry observation
+immediately instead of inheriting a dormant 250 ms polling interval.
+
+Autocomplete measurements:
+
+| Workload | Baseline | Candidate |
+| --- | ---: | ---: |
+| Five cold-index query letters: median text-change→popup CPU stage | 3.927 ms | 0.087 ms |
+| Twenty ready-index edits: median popup CPU stage | 2.625 ms | 0.085 ms |
+| Same ready burst: table reloads | 21 | 4 |
+| Same ready burst: labels shaped for width | 500 | 120 |
+| Same ready burst: total popup CPU work | 59.79 ms | 11.00 ms |
+
+Unchanged initial-index retries previously rebuilt visible rows once per second
+(~4.4 ms each); the candidate emits no redundant popup updates during that idle
+retry state. New queries clear superseded rows and cannot accept stale results.
+Rendered-label equality reuses table presentation without reusing stale insertion
+ranges. The candidate did resize its popup four times versus once in that warm
+burst; these captures do not establish that pending-state transitions are
+visually perfect. Width measurement now stops once its monotonic 420-point cap
+is reached, preserving the exact width without shaping the remaining labels.
+
+A 30-second, 5 ms-interval stack sample during repeated typing found 4,837 of
+5,123 main-thread samples in the run-loop wait (94.4%). Of 50 sampled native
+keyDown stacks, 25 waited in WindowServer's SLSObscureCursor call and 25 used
+AppKit's text input context. Width measurement appeared in 39 samples, versus
+10 cell constructions; cells already use NSTableView's reuse mechanism.
+Sample counts overlap and are not CPU milliseconds. The pointer IPC is evidence
+of an OS wait, not proof that all remaining outliers share that cause or that
+CUA caused it. NSTextView's normal keyDown/input-method path is preserved.
+AppKit prose, inline, and math prediction are disabled for the shell editor;
+its own shell/file completions remain, and marked-text handling is unchanged.
+
+CUA screenshots confirmed output, native multiline growth, docked scrolling,
+return to inline placement after clear, and raw `cat` input followed by return
+to the editor. Screenshot calls serialize behind injected actions: observed
+first-change upper bounds were hundreds of milliseconds and cannot resolve the
+actual short display latency. The compositor limitations and observed hitches
+are recorded above. This work does **not** establish a 100× whole-app speedup or
+that every rendering hitch has been eliminated.
+
+Validation for this change: 134 distinct selected macOS test cases passed across
+editor, picker, handoff, docking, directory presentation, and file-search service
+suites (131 initially, then 56 editor cases including 3 added width tests).
+The native core passed 91 targeted prompt/command-block tests; the helper passed
+3 upstream policy/phase fixtures and 7 adapter tests. ReleaseFast GhosttyKit and
+the normal ReleaseLocal Spooky app built successfully. Production Info.plist
+contains no diagnostic defaults or private index overrides, and its signature
+has no get-task-allow debugging entitlement.

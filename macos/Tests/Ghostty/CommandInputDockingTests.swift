@@ -175,15 +175,35 @@ struct CommandInputDockingTests {
         #expect(place(&docking, layout: dockedGrid(history: 2)) == docked)
     }
 
-    @Test func transferReleasesPTYSpaceWithoutReevaluatingTheDock() {
+    @Test func transferPreservesPTYSpaceAndPinnedHeaderWithoutReevaluatingTheDock() {
         var docking = CommandInputDocking()
         let before = place(&docking, layout: fullInlineGrid())
         let transfer = docking.placement(layout: geometry(), editing: true, recovering: false,
                                          transferring: true, metrics: metrics)
-        #expect(transfer.reservedHeight == 0)
-        #expect(transfer.pinnedOffset == -1)
+        #expect(transfer.reservedHeight == before.reservedHeight)
+        #expect(transfer.pinnedOffset == before.pinnedOffset)
         #expect(transfer.origin == before.origin)
         #expect(place(&docking, layout: dockedGrid(history: 2)) == before)
+    }
+
+    @Test func inlineTransferDoesNotResizeThePTY() {
+        var docking = CommandInputDocking()
+        let before = place(&docking, layout: geometry())
+        let transfer = docking.placement(layout: geometry(), editing: true, recovering: false,
+                                         transferring: true, metrics: metrics)
+        #expect(transfer == before)
+    }
+
+    @Test func yieldingToTerminalReleasesReservationEvenWithPendingSubmission() {
+        var docking = CommandInputDocking()
+        _ = place(&docking, layout: fullInlineGrid())
+        for transferring in [true, false] {
+            let terminal = docking.placement(layout: geometry(), editing: false, recovering: false,
+                                             transferring: transferring, metrics: metrics)
+            #expect(!terminal.shown)
+            #expect(terminal.reservedHeight == 0)
+            #expect(terminal.pinnedOffset == -1)
+        }
     }
 
     private func place(_ docking: inout CommandInputDocking, layout: CommandTerminalLayout,

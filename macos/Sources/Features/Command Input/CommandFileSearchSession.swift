@@ -264,9 +264,9 @@ struct CommandFileSearchSession: Equatable {
     }
 }
 
-/// Owns picker state, generations, and async lookups. Displayed results may be
-/// stale while a newer query is pending, but only results computed for the
-/// current generation can be accepted or drilled into.
+/// Owns picker state, generations, and async lookups. A new query clears old
+/// rows immediately; only results for the current generation can be displayed,
+/// accepted, or drilled into.
 @MainActor
 final class CommandFilePicker {
     private(set) var session: CommandFileSearchSession?
@@ -301,7 +301,7 @@ final class CommandFilePicker {
     private let retryInitial: Duration
     private let retryMaximum: Duration
     private let indexPollInterval: Duration
-    static let initialIndexMessage = "Initial search index is being created…"
+    nonisolated static let initialIndexMessage = "Initial search index is being created…"
 
     private enum IndexPresentation: Equatable {
         case none, creating, failed(String)
@@ -430,9 +430,9 @@ final class CommandFilePicker {
                                                                 scope.map { URL(fileURLWithPath: $0) },
                                                                 CommandFilePicking.searchLimit)
                         } catch let failure as CommandFileSearchService.Failure {
-                            // A cold index is recoverable: keep the list, block
-                            // acceptance, and retry this same generation until
-                            // ready. Edits, dismissal, and focus loss cancel it.
+                            // A cold index is recoverable: show its status and
+                            // retry this generation until ready. Edits,
+                            // dismissal, and focus loss cancel it.
                             guard case .indexing = failure,
                                   attempts < CommandFilePicker.maximumIndexingRetries else { throw failure }
                             attempts += 1
@@ -512,15 +512,24 @@ final class CommandFilePicker {
     /// Returns false when the generation is no longer current (stop retrying).
     private func showIndexing(generation current: UInt64) -> Bool {
         guard session != nil, generation == current else { return false }
+        let previousHeader = header
+        let previousMessage = message
         queryHeader?.status = Self.initialIndexMessage
         if entries.isEmpty { queryMessage = Self.initialIndexMessage }
-        onChange()
+        // Retrying an unchanged cold query must not reshape/reload its popup.
+        if header != previousHeader || message != previousMessage { onChange() }
         return true
     }
 
     private func markPending() {
+        if preferredPath == nil, userMovedSelection, entries.indices.contains(selectedIndex) {
+            preferredPath = entries[selectedIndex].path
+        }
+        entries = []
+        selectedIndex = 0
+        resultsGeneration = nil
         queryHeader?.status = "Searching…"
-        if entries.isEmpty { queryMessage = "Searching…" }
+        queryMessage = "Searching…"
     }
 
     private func apply(_ results: [CommandFileSearchEntry], generation current: UInt64, empty: String,
@@ -530,7 +539,10 @@ final class CommandFilePicker {
         entries = results
         resultsGeneration = current
         selectedIndex = wanted.flatMap { path in results.firstIndex { $0.path == path } } ?? 0
-        if preferredPath != nil { preferredPath = nil; userMovedSelection = selectedIndex != 0 }
+        if preferredPath != nil {
+            preferredPath = nil
+            userMovedSelection = userMovedSelection || selectedIndex != 0
+        }
         queryMessage = results.isEmpty ? empty : nil
         queryHeader?.status = truncated ? "\(CommandFilePicking.searchLimit)+" : ""
     }
@@ -572,7 +584,9 @@ final class CommandFilePicker {
 
     private func updateIndexPresentation(_ value: IndexPresentation) {
         guard indexPresentation != value else { return }
+        let previousHeader = header
+        let previousMessage = message
         indexPresentation = value
-        onChange()
+        if header != previousHeader || message != previousMessage { onChange() }
     }
 }

@@ -76,6 +76,11 @@ pwd: std.ArrayList(u8),
 /// leave the native editor holding keyboard focus. A new Terminal starts empty.
 last_started_command_id: [65]u8 = @splat(0),
 
+/// Latest parsed B for a tagged primary prompt. Independent of visible anchors
+/// so the native editor can distinguish a ready file from a parsed input
+/// location even after erasure or history eviction. A alone is insufficient.
+last_primary_input_id: [65]u8 = @splat(0),
+
 /// Parsed prompt/between-command ownership for native input presentation. This
 /// closes the gaps before precmd finishes and the ready file reaches the app.
 /// It never changes terminal cursor modes, and the renderer separately gates
@@ -2883,7 +2888,14 @@ pub fn semanticPrompt(
                         self.native_prompt_active = kind == .end;
                     }
                 },
-                .input => {},
+                .input => {
+                    if (self.native_prompt_active and
+                        std.mem.eql(u8, id, std.mem.sliceTo(&self.native_prompt_id, 0)))
+                    {
+                        self.last_primary_input_id = @splat(0);
+                        @memcpy(self.last_primary_input_id[0..id.len], id);
+                    }
+                },
             }
             if (kind == .output) {
                 self.last_started_command_id = @splat(0);
@@ -17857,6 +17869,28 @@ test "Terminal: command blocks parsed start survives display clear and RIS" {
     try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_started_command_id, 0));
 }
 
+test "Terminal: native primary input waits for matching B and survives display erasure" {
+    var t = try init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    var stream = t.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=first\x07");
+    try testing.expectEqualStrings("", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    stream.nextSlice("\x1b]133;B;aid=other\x07");
+    try testing.expectEqualStrings("", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    stream.nextSlice("\x1b]133;B;aid=first\x07\x1b[2J\x1bc");
+    try testing.expectEqualStrings("first", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    stream.nextSlice("\x1b]133;A;aid=new\x07");
+    try testing.expectEqualStrings("first", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    stream.nextSlice("\x1b]133;P;k=s\x07\x1b]133;B;aid=new\x07");
+    try testing.expectEqualStrings("first", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    stream.nextSlice("\x1b]133;A;aid=new\x07\x1b]133;B;aid=new\x07");
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    _ = try t.switchScreen(.alternate);
+    stream.nextSlice("\x1b]133;A;aid=alt\x07\x1b]133;B;aid=alt\x07");
+    try testing.expectEqualStrings("new", std.mem.sliceTo(&t.last_primary_input_id, 0));
+}
+
 test "Terminal: command blocks parsed start survives complete history eviction" {
     var t = try init(testing.io, testing.allocator, .{
         .cols = 12,
@@ -17875,6 +17909,7 @@ test "Terminal: command blocks parsed start survives complete history eviction" 
     screen.command_blocks.prune(&screen.pages);
     try testing.expectEqual(@as(usize, 0), screen.command_blocks.blocks.items.len);
     try testing.expectEqualStrings("evicted", std.mem.sliceTo(&t.last_started_command_id, 0));
+    try testing.expectEqualStrings("evicted", std.mem.sliceTo(&t.last_primary_input_id, 0));
 }
 
 test "Terminal: native prompt ownership follows tagged primary lifecycle" {

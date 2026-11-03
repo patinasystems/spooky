@@ -84,6 +84,8 @@ def main():
     target_dir = output / "target"
     env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="13.0")
     if args.test:
+        run(cargo, "test", "-p", "fsearch", "spooky_index_diagnostic_tests", "--locked",
+            "--jobs", "4", "--target-dir", str(target_dir), env=env)
         run(cargo, "test", "--locked", "--jobs", "4", "--target-dir", str(target_dir), env=env)
     binaries = []
     for architecture in dict.fromkeys(args.architectures):

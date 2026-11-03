@@ -13,6 +13,8 @@ final class CommandCompletionController {
     private let ghost = CommandInlineSuggestionView()
     private var automaticTask: Task<Void, Never>?
     private var automaticSelection: NSRange?
+    private var latestEditInputID: UInt64?
+    private var requestInputID: UInt64?
     private var editing = false
     private var accepting = false
     private var message: String?
@@ -44,6 +46,9 @@ final class CommandCompletionController {
     func willEdit() { editing = true }
 
     func didEdit() {
+        let diagnostic = CommandInputDiagnostics.begin(.completionDidEdit)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        latestEditInputID = CommandInputDiagnostics.currentInputID
         revision &+= 1
         defer { editing = false }
         let typedAt = pendingFileTrigger
@@ -62,7 +67,8 @@ final class CommandCompletionController {
         }
         if typedAt, beginFilePicker() { return }
         if let filter, let request, canSuggest,
-           let matches = filter.items(in: textView.string, cursorUTF16: textView.selectedRange().location) {
+           let matches = filteredItems(filter, in: textView.string, cursorUTF16: textView.selectedRange().location) {
+            requestInputID = latestEditInputID
             self.request = .init(id: request.id, revision: revision, text: textView.string,
                                  cursorUTF16: textView.selectedRange().location, automatic: request.automatic)
             items = matches
@@ -127,6 +133,7 @@ final class CommandCompletionController {
     }
 
     private func requestCompletions(showList: Bool, automatic: Bool, broaden: Bool = true) {
+        let inputID = CommandInputDiagnostics.currentInputID ?? latestEditInputID
         dismiss()
         guard canSuggest, let textView else { return }
         let selection = textView.selectedRange()
@@ -135,21 +142,26 @@ final class CommandCompletionController {
                                              cursorUTF16: selection.location, automatic: automatic,
                                              queryText: query?.text, queryCursorUTF16: query?.cursorUTF16)
         request = value
+        requestInputID = inputID
         awaitingResponse = true
         listVisible = showList
         if showList { present() }
+        CommandInputDiagnostics.mark(.completionRequested, id: inputID)
         textView.onRequestCompletion(value)
     }
 
     func receive(_ response: CommandCompletionResponse) {
+        let diagnostic = CommandInputDiagnostics.begin(.completionResponse)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         guard let request, response.requestID == request.id, response.revision == request.revision else { return }
         guard isCurrent(request), canSuggest else { dismiss(); return }
+        CommandInputDiagnostics.mark(.completionResponseReceived, id: requestInputID)
         awaitingResponse = false
         let valid = response.items.filter { Self.valid($0, in: request.text) }
         filter = CommandCompletionFilter(request: request, items: valid)
         // A provider may return whole buffers, but native acceptance only owns
         // the active token. Never admit a rewrite of its surrounding command.
-        items = filter?.items(in: request.text, cursorUTF16: request.cursorUTF16) ?? []
+        items = filter.flatMap { filteredItems($0, in: request.text, cursorUTF16: request.cursorUTF16) } ?? []
         selectedIndex = 0
         message = items.isEmpty ? (response.message ?? "No matching completions") : nil
         present()
@@ -164,6 +176,7 @@ final class CommandCompletionController {
         if filePicker.isActive { filePicker.end() }
         cancelAutomatic()
         request = nil
+        requestInputID = nil
         awaitingResponse = false
         filter = nil
         items = []
@@ -285,10 +298,21 @@ final class CommandCompletionController {
             }
             popup?.show(items: items, message: awaitingResponse ? "Finding completions…" : message,
                         selected: selectedIndex, for: textView)
+            CommandInputDiagnostics.mark(.completionPresentationUpdated,
+                                         id: CommandInputDiagnostics.currentInputID ?? requestInputID)
         } else {
             popup?.dismiss()
             updateInlineSuggestion()
+            CommandInputDiagnostics.mark(.completionPresentationUpdated,
+                                         id: CommandInputDiagnostics.currentInputID ?? requestInputID)
         }
+    }
+
+    private func filteredItems(_ filter: CommandCompletionFilter, in text: String,
+                               cursorUTF16: Int) -> [CommandCompletionCandidate]? {
+        let diagnostic = CommandInputDiagnostics.begin(.completionFilter)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        return filter.items(in: text, cursorUTF16: cursorUTF16)
     }
 
     func updatePosition() {
@@ -389,6 +413,8 @@ extension CommandCompletionController {
         }()
         popup.show(items: items, message: filePicker.message, selected: selectedIndex,
                    header: filePicker.header, anchor: session.anchor, for: textView)
+        CommandInputDiagnostics.mark(.completionPresentationUpdated,
+                                     id: CommandInputDiagnostics.currentInputID ?? latestEditInputID)
     }
 
     /// Tab drills into a folder or accepts a file; Return accepts either;
@@ -485,6 +511,8 @@ private final class CommandInlineSuggestionView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func show(_ text: String, in editor: CommandTextView) {
+        let diagnostic = CommandInputDiagnostics.begin(.inlineSuggestionLayout)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         guard let window = editor.window else { return }
         let caret = editor.firstRect(forCharacterRange: editor.selectedRange(), actualRange: nil)
         let local = editor.convert(window.convertFromScreen(caret), from: nil)

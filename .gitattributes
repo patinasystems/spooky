@@ -10,6 +10,8 @@
 *.swift text eol=lf
 *.py text eol=lf
 *.sh text eol=lf
+# Unified patches legitimately contain a single-space empty context line.
+scripts/spooky/fsearch/names-only.patch whitespace=-blank-at-eol
 *.glsl text eol=lf
 *.blp text eol=lf
 

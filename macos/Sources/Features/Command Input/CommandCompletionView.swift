@@ -39,7 +39,7 @@ struct CommandCompletionResponse: Sendable {
 @MainActor
 final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let panel: CommandCompletionPanel
-    private let table = CommandCompletionTable()
+    private let table: NSTableView
     private let scrollView = NSScrollView()
     private let surface = CommandOverlaySurface(blending: .behindWindow, castsShadow: false)
     private let headerTitle = NSTextField(labelWithString: "")
@@ -52,7 +52,14 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     private var anchorLocation: Int?
     var onAccept: (Int) -> Void = { _ in }
 
-    override init() {
+    override convenience init() {
+        self.init(table: CommandCompletionTable())
+    }
+
+    /// An injected native table lets regressions observe actual reloads without
+    /// showing a window. Production uses the non-focusable completion table.
+    init(table: NSTableView) {
+        self.table = table
         panel = CommandCompletionPanel(
             contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered, defer: false
@@ -105,9 +112,21 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
 
     func show(items: [CommandCompletionCandidate], message: String?, selected: Int,
               header: CommandCompletionHeader? = nil, anchor: Int? = nil, for textView: NSTextView) {
+        let diagnostic = CommandInputDiagnostics.begin(.completionShow)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        let editorFont = textView.font ?? font
+        let fontChanged = editorFont != font
+        let headerChanged = self.header != header
+        let rowsChanged = fontChanged || self.items.count != items.count
+            || zip(self.items, items).contains { previous, current in
+                previous.displayText != current.displayText || previous.detail != current.detail
+            }
+            || (items.isEmpty && self.message != message)
+        // Replacement text/ranges still update even when their rendered labels
+        // are identical. This is presentation reuse, never acceptance reuse.
         self.items = items
         self.message = message
-        if self.header != header {
+        if headerChanged {
             self.header = header
             headerTitle.stringValue = header?.title ?? ""
             headerStatus.stringValue = header?.status ?? ""
@@ -117,17 +136,24 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         }
         // Match the editor's face so labels read as a continuation of the
         // typed token rather than a separate UI font.
-        if let editorFont = textView.font, editorFont != font { font = editorFont }
+        if fontChanged { font = editorFont }
         anchorLocation = anchor ?? Self.anchorLocation(for: items, in: textView)
-        contentWidth = header.map { Self.width(for: $0, contentWidth: measuredWidth()) } ?? measuredWidth()
-        let rowHeight = Self.rowHeight(for: font)
-        if table.rowHeight != rowHeight { table.rowHeight = rowHeight }
-        table.reloadData()
+        if rowsChanged || headerChanged {
+            contentWidth = header.map { Self.width(for: $0, contentWidth: measuredWidth()) } ?? measuredWidth()
+        }
+        if rowsChanged {
+            let rowHeight = Self.rowHeight(for: font)
+            if table.rowHeight != rowHeight { table.rowHeight = rowHeight }
+            CommandInputDiagnostics.record(.completionReload)
+            table.reloadData()
+        }
         updatePosition(for: textView)
         select(index: selected)
     }
 
     func select(index: Int) {
+        let diagnostic = CommandInputDiagnostics.begin(.completionSelection)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         guard items.indices.contains(index) else { return }
         CommandOverlayStyle.withoutAnimation {
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -200,26 +226,45 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     }
 
     private func measuredWidth() -> CGFloat {
+        let diagnostic = CommandInputDiagnostics.begin(.completionMeasureWidth)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        let result = Self.measureContent(items: items, font: font, message: message)
+        CommandInputDiagnostics.record(.completionWidthMeasuredRows, amount: result.rows)
+        return result.width
+    }
+
+    static func measureContent(items: [CommandCompletionCandidate], font: NSFont,
+                               message: String?) -> (width: CGFloat, rows: Int) {
         let titleAttributes: [NSAttributedString.Key: Any] = [.font: font]
         let detailAttributes: [NSAttributedString.Key: Any] = [.font: Self.detailFont]
+        let chrome = CommandOverlayStyle.inset * 4 + Self.labelPadding * 4
         var titleWidth: CGFloat = 0
         var detailWidth: CGFloat = 0
+        var rows = 0
         if items.isEmpty {
             titleWidth = ((message ?? "No completions") as NSString).size(withAttributes: titleAttributes).width
         }
         for item in items.prefix(Self.measuredItemLimit) {
+            rows += 1
             titleWidth = max(titleWidth, (item.displayText as NSString).size(withAttributes: titleAttributes).width)
             if !item.detail.isEmpty {
                 detailWidth = max(detailWidth, (item.detail as NSString).size(withAttributes: detailAttributes).width)
             }
+            // Both maxima and the optional gap only grow. Once the panel is
+            // capped, later glyph measurements cannot change its width.
+            let gap = detailWidth > 0 ? CommandOverlayStyle.inset * 3 : 0
+            if ceil(titleWidth + gap + detailWidth + chrome) >= CommandOverlayStyle.maximumPopupWidth {
+                return (CommandOverlayStyle.maximumPopupWidth, rows)
+            }
         }
         let gap = detailWidth > 0 ? CommandOverlayStyle.inset * 3 : 0
-        let chrome = CommandOverlayStyle.inset * 4 + Self.labelPadding * 4
-        return min(CommandOverlayStyle.maximumPopupWidth,
-                   max(CommandOverlayStyle.minimumPopupWidth, ceil(titleWidth + gap + detailWidth + chrome)))
+        return (min(CommandOverlayStyle.maximumPopupWidth,
+                    max(CommandOverlayStyle.minimumPopupWidth, ceil(titleWidth + gap + detailWidth + chrome))), rows)
     }
 
     func updatePosition(for textView: NSTextView) {
+        let diagnostic = CommandInputDiagnostics.begin(.completionPosition)
+        defer { CommandInputDiagnostics.end(diagnostic) }
         guard let parent = textView.window, parent.isVisible, parent.isKeyWindow,
               !textView.isHiddenOrHasHiddenAncestor,
               let screen = parent.screen ?? NSScreen.main else {
@@ -244,6 +289,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         let frame = NSRect(x: x, y: geometry.y, width: width, height: geometry.height)
         if panel.frame != frame {
             let resized = panel.frame.size != frame.size
+            CommandInputDiagnostics.record(resized ? .completionPopupResize : .completionPopupMove)
             panel.setFrame(frame, display: true, animate: false)
             if resized { panel.invalidateShadow() }
         }
@@ -350,6 +396,7 @@ private final class CommandCompletionCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(title: String, detail: String, font: NSFont, muted: Bool = false) {
+        CommandInputDiagnostics.record(.completionRowsConfigured)
         if self.title.font != font { self.title.font = font }
         self.title.textColor = muted ? CommandOverlayStyle.secondaryText : CommandOverlayStyle.primaryText
         self.title.stringValue = title.replacingOccurrences(of: "\n", with: "↵")

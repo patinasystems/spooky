@@ -26,7 +26,7 @@ struct CommandDirectoryPresentationTests {
         let metadata = CommandBlockMetadata(id: "a", workingDirectory: "/fixture", branch: "",
                                             status: "editing", exitStatus: nil, elapsed: nil)
         #expect(try #require(makePresentation(metadata: ["a": metadata], recovering: true).rows.first).pathByteCount == 0)
-        #expect(try #require(makePresentation(metadata: [:]).rows.first).pathByteCount == 0)
+        #expect(makePresentation(metadata: [:]).rows.isEmpty)
         let relative = CommandBlockMetadata(id: "a", workingDirectory: "relative", branch: "",
                                             status: "editing", exitStatus: nil, elapsed: nil)
         #expect(try #require(makePresentation(metadata: ["a": relative]).rows.first).pathByteCount == 0)

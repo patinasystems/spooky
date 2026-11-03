@@ -307,7 +307,7 @@ struct CommandFilePickerTests {
 
     // MARK: Picker generations
 
-    @Test func staleResultsAreShownButNeverAccepted() async {
+    @Test func newQueriesImmediatelyRemoveStaleResultsAndRejectLateReplies() async {
         let picker = CommandFilePicker(provider: provider(search: { query in [entry("/w/\(query).txt")] }),
                                        debounce: .zero)
         picker.begin(anchor: 4, cwd: "/w")
@@ -319,17 +319,54 @@ struct CommandFilePickerTests {
         #expect(picker.acceptance(at: 0, text: "cat @mai", cursor: 8)?.text == "mai.txt ")
 
         #expect(picker.refresh(text: "cat @main", cursor: 9))
-        #expect(picker.entries.map(\.name) == ["mai.txt"])
+        #expect(picker.entries.isEmpty)
         #expect(picker.acceptance(at: 0, text: "cat @main", cursor: 9) == nil)
         #expect(picker.selectedEntry == nil)
         await settle(picker)
         #expect(picker.acceptance(at: 0, text: "cat @main", cursor: 9)?.text == "main.txt ")
     }
 
+    @Test func coldSearchClearsDirectoryRowsAndUnchangedRetriesDoNotRepublish() async {
+        let calls = CallCounter()
+        let result = PickerResponseGate<[CommandFileSearchEntry]>()
+        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
+            search: { _, _, _, _ in
+                if calls.next() <= 3 { throw CommandFileSearchService.Failure.indexing("indexing: fixture") }
+                return await result.wait()
+            }, children: { _, _ in [entry("/w/Documents", dir: true), entry("/w/Desktop", dir: true)] },
+            indexState: { .creating }), debounce: .zero, retryInitial: .milliseconds(1),
+            retryMaximum: .milliseconds(1), indexPollInterval: .seconds(60))
+        defer { picker.end() }
+        var publications = 0
+        picker.onChange = { publications += 1 }
+        picker.begin(anchor: 0, cwd: "/w")
+        picker.refresh(text: "@", cursor: 1)
+        await settle(picker)
+        for _ in 0..<500 where picker.header?.status != CommandFilePicker.initialIndexMessage {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(picker.selectedEntry != nil)
+        let before = publications
+        picker.refresh(text: "@ghost", cursor: 6)
+        #expect(picker.entries.isEmpty)
+        #expect(picker.message == CommandFilePicker.initialIndexMessage)
+        #expect(picker.acceptance(at: 0, text: "@ghost", cursor: 6) == nil)
+        for _ in 0..<500 where calls.count < 4 { try? await Task.sleep(for: .milliseconds(1)) }
+        #expect(calls.count == 4)
+        #expect(publications == before)
+        #expect(!picker.resultsAreCurrent)
+        await result.release([entry("/w/ghostty")])
+        await settle(picker)
+        #expect(publications == before + 1)
+        #expect(picker.entries.map(\.name) == ["ghostty"])
+        #expect(picker.acceptance(at: 0, text: "@ghost", cursor: 6)?.text == "ghostty ")
+    }
+
     @Test func selectionStaysOnTheSamePathAcrossCompletedResults() async {
         let names = ["alpha", "alpine", "beta"]
         let picker = CommandFilePicker(provider: provider(search: { query in
-            names.filter { $0.hasPrefix(query) }.map { entry("/w/\($0)") }
+            if query == "al" { return [entry("/w/alpine")] }
+            return names.filter { $0.hasPrefix(query) }.map { entry("/w/\($0)") }
         }), debounce: .zero)
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@a", cursor: 2)
@@ -340,6 +377,11 @@ struct CommandFilePickerTests {
         picker.refresh(text: "@al", cursor: 3)
         await settle(picker)
         #expect(picker.selectedEntry?.name == "alpine")
+        #expect(picker.selectedIndex == 0)
+        picker.refresh(text: "@alp", cursor: 4)
+        await settle(picker)
+        #expect(picker.selectedEntry?.name == "alpine")
+        #expect(picker.selectedIndex == 1)
     }
 
     @Test func folderQueriesSearchTheFullIndexWithinTheScope() async throws {

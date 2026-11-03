@@ -24,6 +24,7 @@ final class NativeCommandSurfaceHost: NSView {
     private var synchronizing = false
     private var background = NSColor.black
     private var docking = CommandInputDocking()
+    private var diagnosticLayout: [String: Double]?
 
     override var isFlipped: Bool { true }
 
@@ -181,9 +182,9 @@ final class NativeCommandSurfaceHost: NSView {
         }
         editor.isHidden = !shown
         editor.setAccessibilityHidden(!shown)
-        // Keep the submitted draft over the old prompt while the PTY expands
-        // behind it. Following the terminal cursor here would expose its block
-        // caret before ZLE has redisplayed/accepted the submitted buffer.
+        // Keep the submitted draft over the old prompt until the terminal
+        // parses the ownership boundary. Following an intermediate cursor
+        // would move the editor before the shell has accepted the buffer.
         let editorFrame = transferring && !editor.frame.isEmpty ? editor.frame
             : NSRect(x: placement.origin.x, y: placement.origin.y,
                      width: max(1, bounds.width - placement.origin.x - max(0, geometry.paddingLeft - padding)), height: height)
@@ -211,6 +212,21 @@ final class NativeCommandSurfaceHost: NSView {
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
         layoutNotice(foreground: foreground)
+        if CommandInputDiagnostics.isEnabled {
+            let values: [String: Double] = [
+                "requested_rows": Double(requestedSize?.rows ?? 0), "core_rows": Double(geometry.rows),
+                "editing": editing ? 1 : 0, "transferring": transferring ? 1 : 0,
+                "pinned": placement.pinned ? 1 : 0, "shown": shown ? 1 : 0,
+                "reserved_height": placement.reservedHeight, "pinned_offset": placement.pinnedOffset,
+                "editor_y": editorFrame.minY, "editor_height": editorFrame.height,
+                "padding_top": geometry.paddingTop, "cursor_y": geometry.cursorY,
+                "scrollback_rows": Double(geometry.scrollbackRows), "container_height": bounds.height
+            ]
+            if values != diagnosticLayout {
+                diagnosticLayout = values
+                CommandInputDiagnostics.mark(.hostLayout, id: CommandInputDiagnostics.currentInputID, metrics: values)
+            }
+        }
     }
 
     // Intercept only a real directory-label click on the terminal itself.

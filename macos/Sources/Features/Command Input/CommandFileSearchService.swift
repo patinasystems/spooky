@@ -60,6 +60,7 @@ actor CommandFileSearchService {
 
     private let executableURL: URL
     private let indexDirectory: URL
+    private let diagnosticPath: String?
     private let timeout: Duration
     private var process: Process?
     private var input: FileHandle?
@@ -72,13 +73,45 @@ actor CommandFileSearchService {
 
     init(
         executableURL: URL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/spooky-fsearch"),
-        indexDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/Spooky/fsearch-names-v1", isDirectory: true),
+        indexDirectory: URL? = nil,
         timeout: Duration = .seconds(10)
     ) {
         self.executableURL = executableURL
-        self.indexDirectory = indexDirectory
+        let environment = ProcessInfo.processInfo.environment
+        let configuration = Self.diagnosticConfiguration(
+            enabled: CommandInputDiagnostics.isEnabled,
+            indexDirectory: environment["SPOOKY_FSEARCH_INDEX_DIRECTORY"]
+                ?? Bundle.main.object(forInfoDictionaryKey: "SpookyFileSearchDiagnosticIndexDirectory") as? String,
+            outputPath: environment["SPOOKY_FSEARCH_DIAGNOSTICS_PATH"]
+                ?? Bundle.main.object(forInfoDictionaryKey: "SpookyFileSearchDiagnosticsPath") as? String
+        )
+        self.indexDirectory = indexDirectory ?? configuration.indexDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/Spooky/fsearch-names-v1", isDirectory: true)
+        diagnosticPath = configuration.outputPath
         self.timeout = timeout
+    }
+
+    struct DiagnosticConfiguration: Sendable, Equatable {
+        let indexDirectory: URL?
+        let outputPath: String?
+    }
+
+    /// Candidate-only overrides are inert unless diagnostics are explicitly enabled.
+    static func diagnosticConfiguration(
+        enabled: Bool,
+        indexDirectory: String?,
+        outputPath: String?
+    ) -> DiagnosticConfiguration {
+        func absolutePath(_ path: String?) -> String? {
+            guard let path, path.hasPrefix("/"), !path.contains("\0"), path.utf8.count <= 4_096 else { return nil }
+            return path
+        }
+        guard enabled else { return DiagnosticConfiguration(indexDirectory: nil, outputPath: nil) }
+        return DiagnosticConfiguration(
+            indexDirectory: absolutePath(indexDirectory).map { URL(fileURLWithPath: $0, isDirectory: true) },
+            outputPath: absolutePath(outputPath)
+        )
     }
 
     /// Called at app launch. Starting again reuses the same engine/process.
@@ -198,6 +231,7 @@ actor CommandFileSearchService {
         var environment = ProcessInfo.processInfo.environment
         environment["MallocSpaceEfficient"] = "1"
         environment["RAYON_NUM_THREADS"] = "2"
+        environment["SPOOKY_FSEARCH_DIAGNOSTICS_PATH"] = diagnosticPath
         process.environment = environment
         process.standardInput = stdin
         process.standardOutput = stdout

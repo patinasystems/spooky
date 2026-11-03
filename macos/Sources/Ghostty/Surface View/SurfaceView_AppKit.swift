@@ -1094,6 +1094,8 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp, kind: .scroll)
+            defer { CommandInputDiagnostics.endInput(input) }
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1137,6 +1139,9 @@ extension Ghostty {
         }
 
         override func keyDown(with event: NSEvent) {
+            let input = CommandInputDiagnostics.currentInputID == nil
+                ? CommandInputDiagnostics.beginInput(timestamp: event.timestamp) : nil
+            defer { CommandInputDiagnostics.endInput(input) }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return

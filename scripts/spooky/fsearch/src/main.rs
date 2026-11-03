@@ -3,11 +3,81 @@ use fsearch::{Engine, Options, Query};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_LINE: usize = 16 * 1024;
 const MAX_QUERY: usize = 1024;
 const MAX_RESULTS: usize = 200;
+
+#[derive(Default)]
+struct Diagnostics {
+    query_count: AtomicU64,
+    query_ns: AtomicU64,
+    query_max_ns: AtomicU64,
+    status_count: AtomicU64,
+    cancel_count: AtomicU64,
+}
+
+impl Diagnostics {
+    fn start(engine: Engine, startup_ns: u64) -> Option<Arc<Self>> {
+        let path = std::env::var_os("SPOOKY_FSEARCH_DIAGNOSTICS_PATH")?;
+        let mut output = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path).ok()?;
+        let diagnostics = Arc::new(Self::default());
+        let counters = diagnostics.clone();
+        std::thread::Builder::new().name("spooky-fsearch-diagnostics".into()).spawn(move || {
+            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+            loop {
+                let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+                unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+                let cpu_seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
+                let record = serde_json::json!({
+                    "kind": "file-search-performance", "schema": 1, "pid": std::process::id(),
+                    "uptime_ns": uptime_ns(),
+                    "wall_time_s": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64(),
+                    "startup_open_ns": startup_ns,
+                    "cpu_user_s": cpu_seconds(usage.ru_utime), "cpu_system_s": cpu_seconds(usage.ru_stime),
+                    "query_count": counters.query_count.load(Ordering::Relaxed),
+                    "query_total_ns": counters.query_ns.load(Ordering::Relaxed),
+                    "query_max_ns": counters.query_max_ns.load(Ordering::Relaxed),
+                    "status_count": counters.status_count.load(Ordering::Relaxed),
+                    "cancel_count": counters.cancel_count.load(Ordering::Relaxed),
+                    "index": engine.diagnostic_snapshot(),
+                });
+                if serde_json::to_writer(&mut output, &record).is_err() || output.write_all(b"\n").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }).ok()?;
+        Some(diagnostics)
+    }
+
+    fn query_finished(&self, elapsed: Duration) {
+        let ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
+        self.query_count.fetch_add(1, Ordering::Relaxed);
+        self.query_ns.fetch_add(ns, Ordering::Relaxed);
+        self.query_max_ns.fetch_max(ns, Ordering::Relaxed);
+    }
+}
+
+fn uptime_ns() -> u64 {
+    #[repr(C)]
+    struct Timebase { numer: u32, denom: u32 }
+    unsafe extern "C" {
+        fn mach_absolute_time() -> u64;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    static TIMEBASE: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let (numer, denom) = *TIMEBASE.get_or_init(|| {
+        let mut info = Timebase { numer: 1, denom: 1 };
+        unsafe { mach_timebase_info(&mut info) };
+        (info.numer, info.denom.max(1))
+    });
+    (unsafe { mach_absolute_time() } as u128 * numer as u128 / denom as u128) as u64
+}
 
 #[derive(Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -155,14 +225,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index = std::env::args_os().nth(1).map(PathBuf::from).ok_or("missing index directory")?;
     if !index.is_absolute() { return Err("index directory must be absolute".into()); }
     let home = std::env::var("HOME")?;
+    fsearch::configure_filename_helper_workers()?;
     // Startup indexing is independent of picker/search requests. Saved indexes
     // load on the engine's worker; status reports ready only after publication.
+    let startup = Instant::now();
     let engine = Engine::start_names_only(Options { dir: index, home, skip: None })?;
+    let diagnostics = Diagnostics::start(engine.clone(), startup.elapsed().as_nanos() as u64);
     let work = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
     let output = Arc::new(Mutex::new(io::stdout()));
     let worker_queue = Arc::clone(&work);
     let worker_output = Arc::clone(&output);
     let search_engine = engine.clone();
+    let search_diagnostics = diagnostics.clone();
     std::thread::Builder::new().name("spooky-fsearch-requests".into()).spawn(move || {
         fsearch::no_materialize();
         loop {
@@ -175,7 +249,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 queue.cancelled = false;
                 request
             };
+            let started = search_diagnostics.as_ref().map(|_| Instant::now());
             let result = search(&search_engine, &request);
+            if let (Some(diagnostics), Some(started)) = (&search_diagnostics, started) {
+                diagnostics.query_finished(started.elapsed());
+            }
             let was_cancelled = {
                 let mut queue = worker_queue.0.lock().unwrap();
                 queue.active = None;
@@ -201,6 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         // A readiness poll must neither queue behind nor supersede a search.
         if request.op == "status" {
+            if let Some(diagnostics) = &diagnostics { diagnostics.status_count.fetch_add(1, Ordering::Relaxed); }
             let state = if engine.status().ready { "ready" } else { "creating" };
             respond(&output, Response { id: &request.id, entries: Vec::new(), error: None,
                                        cancelled: false, state: Some(state) });
@@ -208,6 +287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let replaced = {
             let mut queue = work.0.lock().unwrap();
+            if request.op == "cancel" {
+                if let Some(diagnostics) = &diagnostics { diagnostics.cancel_count.fetch_add(1, Ordering::Relaxed); }
+            }
             if request.op == "cancel" { queue.cancel(&request.id) } else { queue.enqueue(request) }
         };
         if let Some(replaced) = replaced { cancelled(&output, &replaced.id); }
@@ -223,6 +305,18 @@ mod tests {
 
     fn request(id: &str, query: &str) -> Request {
         Request { id: id.into(), op: "search".into(), query: query.into(), near: "/tmp".into(), scope: None, limit: 100 }
+    }
+
+    #[test]
+    fn diagnostics_clock_and_query_counters_are_monotonic() {
+        let before = uptime_ns();
+        let counters = Diagnostics::default();
+        counters.query_finished(Duration::from_nanos(20));
+        counters.query_finished(Duration::from_nanos(10));
+        assert_eq!(counters.query_count.load(Ordering::Relaxed), 2);
+        assert_eq!(counters.query_ns.load(Ordering::Relaxed), 30);
+        assert_eq!(counters.query_max_ns.load(Ordering::Relaxed), 20);
+        assert!(uptime_ns() >= before);
     }
 
     #[test]

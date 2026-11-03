@@ -41,14 +41,17 @@ struct CommandInputDocking {
         }
         let pinned = recovering || hasDocked
         let line = max(1, layout.cellHeight)
-        let reserved = editing && !transferring
+        // Retain the editor's grid reservation until the shell has actually
+        // yielded ownership. Releasing it on Return expands/reflows the PTY,
+        // then immediately shrinks it again for empty and fast commands.
+        let reserved = editing
             ? (pinned ? editorHeight + line : max(0, editorHeight - line)) : 0
         let x = max(0, (pinned ? layout.paddingLeft : layout.cursorX) - padding)
         let y = pinned ? max(0, containerHeight - editorHeight)
             : min(max(layout.paddingTop, layout.cursorY), max(0, containerHeight - editorHeight))
         return Placement(pinned: pinned, reservedHeight: reserved, origin: CGPoint(x: x, y: y),
                          shown: editing && (layout.cursorValid || pinned),
-                         pinnedOffset: editing && pinned && !transferring ? editorHeight + line : -1)
+                         pinnedOffset: editing && pinned ? editorHeight + line : -1)
     }
 
     /// Mirror PageList's row-resize behavior without walking history. Growth
