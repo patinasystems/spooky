@@ -590,6 +590,48 @@ class NativeInputBridgeTests(unittest.TestCase):
             shell.result(), 'first line\nsecond "quoted" line\n日本語 👩🏽‍💻 é\n'.encode()
         )
 
+    def test_accepted_prompt_never_republishes_ready_during_final_redraw(self):
+        shell = self.shell
+        # Record the real published state after each call. This observes ZLE's
+        # actual pre-redraw/line-finish ordering without adding a user widget.
+        _, generation = shell.submit(
+            'functions[_probe_publish]=$functions[_patina_native_publish]\n'
+            '_patina_native_publish() { _probe_publish "$@"; '
+            'builtin print -r -- "$_patina_native_last_state" >> "$_PROBE_DIR/states"; }'
+        )
+        shell.ready_after(generation)
+        for draft in ("", ":", "echo )"):
+            with self.subTest(draft=draft):
+                (shell.root / "states").write_bytes(b"")
+                _, generation = shell.submit(draft)
+                shell.ready_after(generation)
+                shell.wait(lambda: shell.state()[1].encode() in (shell.result("states") or b""))
+                records = [line.split(b"\t") for line in shell.result("states").splitlines()]
+                old_prompt = [record[0] for record in records if record[1].decode() == generation]
+                self.assertIn(b"running", old_prompt)
+                self.assertNotIn(b"ready", old_prompt)
+                self.assertEqual(shell.state()[0], "ready")
+
+    def test_accepted_generation_does_not_suppress_later_terminal_edits_or_retry(self):
+        shell = self.shell
+        _, generation = shell.submit("if true; then")
+        shell.wait(lambda: shell.state()[2] == "cont")
+        self.assertNotEqual(shell.state()[1], generation)
+        shell.raw(b"\x03")
+        shell.ready_after(generation)
+        current = shell.state()[1]
+        shell.raw("echo pending")
+        shell.wait(lambda: shell.state()[0] == "terminal")
+        shell.raw(b"\x15")  # Kill the ordinary terminal line without accepting it.
+        shell.wait(lambda: shell.state()[0] == "ready")
+        self.assertEqual(shell.state()[1], current)
+        shell.submit(":", generation=generation)
+        self.assertEqual(shell.receipt()[2], "stale-generation")
+        self.assertEqual(shell.state()[0], "ready")
+        _, generation = shell.submit(":")
+        shell.ready_after(generation)
+        self.assertEqual(shell.receipt()[0], "accepted")
+
     def test_incomplete_input_yields_to_terminal_continuation(self):
         shell = self.shell
         block = shell.state()[3]
@@ -608,7 +650,7 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertIn(b"continued", shell.metadata(block, "executed-input"))
         self.assertEqual(shell.metadata(block, "status"), b"completed")
 
-    def test_primary_block_reserves_one_header_row_and_finishes_in_order(self):
+    def test_primary_block_reserves_two_header_rows_and_finishes_in_order(self):
         shell = self.shell
         self.assertEqual(len(shell.state()), 4)
         block = shell.state()[3]
@@ -624,8 +666,8 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertLess(markers.index(("C", block)), markers.index(("D", block)))
         self.assertLess(markers.index(("D", block)), markers.index(("A", next_block)))
         header_start = f"\x1b]133;A;aid={block}\x07".encode()
-        self.assertIn(header_start + b"\r\n", shell.output)
-        self.assertNotIn(header_start + b"\r\n\r\n", shell.output)
+        self.assertIn(header_start + b"\r\n\r\n", shell.output)
+        self.assertNotIn(header_start + b"\r\n\r\n\r\n", shell.output)
         self.assertEqual(shell.metadata(block, "status"), b"completed")
         self.assertEqual(shell.metadata(block, "exit-status"), b"0")
         self.assertEqual(shell.metadata(next_block, "status"), b"editing")

@@ -13,10 +13,13 @@ final class CommandInputFileEvents: @unchecked Sendable {
     private var sources: [URL: DispatchSourceFileSystemObject] = [:]
     private var liveBlock: String?
     private var scheduled: DispatchWorkItem?
+    private var scheduleGeneration: UInt64 = 0
+    private let coalescingInterval: TimeInterval
     private let watchdog: DispatchSourceTimer
 
-    init(directory: URL, watchdogInterval: TimeInterval = 2) {
+    init(directory: URL, watchdogInterval: TimeInterval = 2, coalescingInterval: TimeInterval = 0.002) {
         self.directory = directory
+        self.coalescingInterval = max(0, coalescingInterval)
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         events = stream.stream
         continuation = stream.continuation
@@ -45,8 +48,21 @@ final class CommandInputFileEvents: @unchecked Sendable {
         continuation.finish()
     }
 
-    func requestRefresh() {
-        queue.async { [weak self] in self?.publishSoon() }
+    func requestRefresh(immediate: Bool = false) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if immediate {
+                // A parsed boundary is already coalesced by the PTY batch.
+                // Supersede a pending filesystem delay without launching a
+                // second snapshot reader or allowing its stale work to publish.
+                self.scheduleGeneration &+= 1
+                self.scheduled?.cancel()
+                self.scheduled = nil
+                self.continuation.yield(())
+            } else {
+                self.publishSoon()
+            }
+        }
     }
 
     func updateLiveBlock(_ id: String?) {
@@ -93,14 +109,16 @@ final class CommandInputFileEvents: @unchecked Sendable {
 
     private func publishSoon() {
         guard scheduled == nil else { return }
+        scheduleGeneration &+= 1
+        let generation = scheduleGeneration
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
+            guard let self, self.scheduleGeneration == generation else { return }
             self.scheduled = nil
             self.continuation.yield(())
         }
         scheduled = work
         // Atomic state/receipt publications should become visible within a
         // frame. A small coalescing window still combines filesystem bursts.
-        queue.asyncAfter(deadline: .now() + .milliseconds(2), execute: work)
+        queue.asyncAfter(deadline: .now() + coalescingInterval, execute: work)
     }
 }

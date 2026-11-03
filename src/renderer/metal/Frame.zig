@@ -12,6 +12,7 @@ const Target = @import("Target.zig");
 const RenderPass = @import("RenderPass.zig");
 
 const Health = @import("../../renderer.zig").Health;
+const NativePresentation = @import("../NativePresentation.zig");
 
 const log = std.log.scoped(.metal);
 
@@ -48,6 +49,7 @@ pub fn begin(
             .renderer = renderer,
             .target = target,
             .sync = false,
+            .native_presentation = .{},
         },
         &bufferCompleted,
     );
@@ -60,6 +62,7 @@ const CompletionBlock = objc.Block(struct {
     renderer: *Renderer,
     target: *Target,
     sync: bool,
+    native_presentation: NativePresentation.Snapshot,
 }, .{
     objc.c.id, // MTLCommandBuffer
 }, void);
@@ -82,6 +85,7 @@ fn bufferCompleted(
         block.renderer.api.present(
             block.target.*,
             block.sync,
+            block.native_presentation,
         ) catch |err| {
             log.err("Failed to present render target: err={}", .{err});
         };
@@ -128,4 +132,9 @@ pub inline fn complete(self: *Self, sync: bool) void {
         self.block.sync = true;
         CompletionBlock.invoke(&self.block, .{self.buffer.value});
     }
+}
+
+/// Called only once all render passes have encoded successfully.
+pub fn setNativePresentation(self: *Self, snapshot: NativePresentation.Snapshot) void {
+    self.block.native_presentation = snapshot;
 }

@@ -97,9 +97,10 @@ final class CommandTextView: NSTextView {
             height: .greatestFiniteMagnitude
         )
         setAccessibilityLabel("Command input")
-        setAccessibilityHelp("Edit a command. Right accepts a suggestion; Tab or Down opens options. "
+        setAccessibilityHelp("Edit a command. Right or Tab accepts a suggestion; Up/Down selects options. "
+                             + "Return accepts after menu navigation; otherwise it runs the typed command. "
                              + "Up on the first visual line recalls shell history; Down on the last returns to your draft. "
-                             + "Return submits; Shift Return adds a line. Type @ to insert a file path. "
+                             + "Shift Return adds a line. Type @ to insert a file path. "
                              + "Escape dismisses suggestions or returns to the terminal.")
     }
 
@@ -337,7 +338,11 @@ final class CommandTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { history.reset(); dismissCompletions() }
+        if window == nil {
+            completions.setPopupPreparationEnabled(false)
+            history.reset()
+            dismissCompletions()
+        }
         applyFocusRequest()
     }
 

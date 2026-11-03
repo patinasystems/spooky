@@ -44,6 +44,9 @@ pub const Region = struct {
 };
 
 blocks: std.ArrayList(Block) = .empty,
+/// Invalidates bounded hover ownership without hashing/scanning all anchors
+/// on every renderer frame. Pin movement is separately guarded by grid/viewport.
+revision: u64 = 0,
 
 pub fn deinit(self: *CommandBlocks, alloc: Allocator, pages: *PageList) void {
     for (self.blocks.items) |*block| block.deinit(pages);
@@ -61,12 +64,14 @@ pub fn prune(self: *CommandBlocks, pages: *PageList) void {
         if (block.complete and !block.alive()) {
             block.deinit(pages);
             _ = self.blocks.orderedRemove(i);
+            self.revision +%= 1;
             continue;
         }
         inline for (.{ "header", "input", "output", "end" }) |field| {
             if (@field(block, field)) |p| if (p.garbage) {
                 pages.untrackPin(p);
                 @field(block, field) = null;
+                self.revision +%= 1;
             };
         }
         i += 1;
@@ -106,6 +111,7 @@ pub fn mark(
             },
         }
         block.marked |= bit;
+        self.revision +%= 1;
         if (kind == .end) {
             block.complete = true;
             block.end_inclusive = end_inclusive;
@@ -124,6 +130,7 @@ pub fn mark(
     var block: Block = .{ .id_len = @intCast(id.len), .header = tracked };
     @memcpy(block.id[0..id.len], id);
     try self.blocks.append(alloc, block);
+    self.revision +%= 1;
 }
 
 /// Clearing cells does not make PageList pins garbage. Explicitly invalidate
@@ -137,6 +144,7 @@ pub fn invalidateRows(self: *CommandBlocks, pages: *PageList, first: Pin, last: 
                 if (!row_pin.before(first) and !last.before(row_pin)) {
                     pages.untrackPin(p);
                     @field(block, field) = null;
+                    self.revision +%= 1;
                 }
             }
         }
@@ -147,6 +155,7 @@ pub fn invalidateRows(self: *CommandBlocks, pages: *PageList, first: Pin, last: 
         if (!block.alive()) {
             block.deinit(pages);
             _ = self.blocks.orderedRemove(i);
+            self.revision +%= 1;
         } else i += 1;
     }
 }
@@ -159,6 +168,7 @@ pub fn invalidateHeader(self: *CommandBlocks, pages: *PageList, pin: Pin) void {
             if (header.node == pin.node and header.y == pin.y) {
                 pages.untrackPin(header);
                 block.header = null;
+                self.revision +%= 1;
             }
         }
     }

@@ -1,7 +1,407 @@
 # Native input integration measurements
 
-These measurements cover the prototype's native input and shell bridge. They do
-not establish terminal rendering throughput or a general efficiency claim.
+The newest measurements include source-event-to-WindowServer pixels. Older
+sections below describe earlier revisions and app/shell-side timings; they do
+not establish rendering throughput or stock-Ghostty parity.
+
+## Final presentation and interaction checks, 2026-11-03
+
+The final diagnostic candidate adds presentation acknowledgement to the existing
+Metal IOSurface layer. A bounded native text echo survives parsed C until the
+matching command frame is assigned to that layer; keyboard ownership still
+changes at C. The echo has a 100 ms fail-open ceiling and skips commands larger
+than 16 KiB. It adds no transcript renderer, filesystem work, or history scan to
+the draw path. Empty submissions retain the separate coherent-presentation gate.
+
+Native-scale, own-window recordings on the actively used Mac measured:
+
+| Workload | Qualifying sample | Median source-event-to-pixel bounds |
+| --- | --- | --- |
+| Warm plain typing, all covered observations | 14 of 16 glyphs | 9.63–31.88 ms |
+| Warm plain typing, observation gaps at most 50 ms | 11 glyphs | 13.74–31.32 ms |
+| Warm `@ghostty` typing | 8 glyphs | 15.25–31.10 ms |
+| Numbered-row wheel scrolling | 16 movements | 22.70–39.77 ms |
+| Cold-index plain typing, visible subset | 13 of 16 glyphs | 24.88–81.94 ms |
+
+These are last-absent/first-present WindowServer pixel bounds, not physical
+scanout or independent population estimates. The complete warm typing sample
+retains its wide observation gaps; the tighter subset is not a replacement for
+it. Two initial warm glyphs preceded the first observation. The completion menu
+is a separate window, so these numbers measure editor text while it is open,
+not the menu's own pixels. Other Xcode jobs were running; our builds and offline
+decoding were stopped during capture. No controlled stock-parity or 10× claim
+follows from these runs.
+
+One warm 200-row `printf` reached visible output in **45.47–62.86 ms**. Frames
+620–623 retain the draft (the native caret disappears at 622), then frame 624
+shows numbered output. No blank frame or hollow/block terminal cursor was
+observed in that top region; the nearby maximum observation gap was 18.13 ms.
+This is one fixture, not proof against sub-frame flashes or every TUI handoff.
+
+The numbered scroll sequence has no missing ROI frames or recorded occlusion.
+Its largest upper bound was 59.76 ms. The left footer caption/separator was
+byte-identical through 141 observations; the caret kept its vertical position
+apart from its blink/antialias edge. In the repeated-Return capture, ten uniquely
+identifiable movements were exactly 102 physical pixels (three terminal rows),
+with no captured one- or two-row intermediate. Later identical headers and a
+183 ms observation gap prevent claiming that all 24 Returns were individually
+verified. Scrolling still moves in integer terminal rows.
+
+Cold typing has unresolved tails: two visible glyphs took 133.39–151.07 ms and
+129.19–143.94 ms. Their handlers finished at 33.95 ms and 15.11 ms; most delay
+followed handler completion. Final observation gaps were only 17.69/14.75 ms,
+so this cannot be dismissed as missing capture alone. The filename helper was
+still crawling and averaged about 4% of one core in the enclosing interval.
+AppKit drawing, transaction publication, compositor work, and host scheduling
+are not separated by this instrumentation; index causality is unproven. Cold
+picker/submit intervals that became occluded or moved off-Space are excluded.
+This remains a performance limitation, not a completed stock-smoothness claim.
+
+Live computer-use checks separately verified the combined suggestion/menu,
+Tab acceptance, accent-colored submitted commands, Cmd+F from the editor,
+return to inline placement after `clear`, and output-path copying with spaces,
+Unicode, and historical working directories. Command-click opened the correct
+fixture directory in Finder. Final native verification passed 247 test
+declarations / 251 executions across 21 suites; the diagnostic build and strict
+code-signature verification passed. The final exact-source presentation/accent
+core run passed 84 tests and all 104 build steps. Package metadata guards passed
+six tests.
+
+Local evidence: `/tmp/spooky-v8-typing-report.md`,
+`/tmp/spooky-v8-typing-analysis.json`, `/tmp/spooky-v8-scroll-report.md`, and
+`/tmp/spooky-v8-scroll-events.json`. The diagnostic executable SHA-256 is
+`c0b8f7d57e095f69c0c2acf92dc4e440aad6b7f9303083f5ac990ab489d7244f`.
+Private raw captures, screenshots, and filename indexes are not committed.
+
+## Timestamped window capture, 2026-11-03
+
+The baseline is `07c87e03f1a398cb148fa0333f68fdd0f433e601`, with only the
+diagnostic recorder added. The intermediate candidate adds parser-driven
+handoff, fractional scroll remainder preservation, synchronous initial editor
+measurement, and lower-priority background filename indexing. The reference
+uses the baseline's same core with native input disabled. **It is not the
+installed stock Ghostty build.** The subsequent footer/focus/startup changes
+must be assessed separately from these intermediate measurements.
+
+The opt-in `CommandWindowCapture` records only its own diagnostic NSWindow,
+without audio, microphone, mouse cursor, or other applications. ScreenCaptureKit
+display timestamps share the uptime clock with original `NSEvent.timestamp`.
+Lossless BGRA regions preserve native pixels for glyph checks; the full movie
+supports visual context and Framecap inspection. The recorder and its framework
+imports are excluded unless `SPOOKY_WINDOW_CAPTURE` is defined at build time;
+that diagnostic build additionally requires the explicit enable flag and output
+directory. Normal releases contain neither the recorder nor its call site, and
+packaging rejects diagnostic capture/profiling metadata. Raw media and file-search
+indexes stay local. `SpookyWindowCaptureVideo=false` selects lossless ROI-only
+capture, with identical timestamps and visibility records but no H264 writer.
+
+Each result is an interval from the last frame missing a target glyph/output to
+the first frame containing it. Target pixels were checked, rather than treating
+caret blinking or arbitrary image changes as a response. This measures
+WindowServer presentation, **not physical display scanout or photons**. Capture
+records source events, callback delays, frame status, missing pixels, and window
+visibility; key loss alone is allowed, while hidden/fully occluded/inactive-Space
+intervals are rejected. Observation gaps are not automatically dropped frames.
+Run the offline analyzer with `uv run --script test/native-input/analyze_window_capture.py --help`; its
+candidate matches remain unconfirmed until the target glyph is inspected.
+
+Native-scale warm runs, with no concurrent build/probe workload:
+
+| Workload | Baseline median interval | Intermediate candidate | Same-core native input off |
+| --- | ---: | ---: | ---: |
+| Plain typing, 16 glyphs | 20.28–44.18 ms | 19.29–36.07 ms | 23.41–40.54 ms |
+| Typing `@ghostty`, 8 glyphs | 42.08–64.42 ms | 26.47–43.72 ms | — |
+| Wheel event → numbered-row movement | 38.71–60.69 ms | 35.50–56.55 ms | 14.58–32.16 ms |
+
+Plain-typing p95 intervals are 49.61–75.56, 35.36–54.88, and 31.69–49.04 ms,
+respectively. Typing intervals overlap; this does not establish a general ranking.
+Scrolling remains slower than the reference in this run. Baseline/reference
+scroll summaries contain 16 events each; the candidate contains 14, excluding
+two wide observation gaps (79.1/67.1 ms) from the tight-interval summary while
+retaining them in the raw report. All 48 movements were visually confirmed.
+Source-to-handler medians across all 16 scroll events were 16.610/8.845/2.554 ms;
+the handlers themselves took median 7.75/9.90/6.56 microseconds. No host layout
+or bridge-event burst explained the queue gaps. The loaded filename index was
+still replaying filesystem events, at unequal load between runs: "ready" does
+not mean idle. This is a comparison confound, not proof of an indexing feedback
+loop or a renderer-only cause.
+
+One `printf` submission printing 200 numbered rows reached visible output in
+57.38–75.33 ms before and 14.48–31.95 ms in the candidate; the reference was
+28.99–42.99 ms. Baseline capture frame 1284 (Framecap 27.173333 s) is blank
+between draft and output frame 1285 (27.191667 s). Candidate retains the draft
+through frame 1240 (21.006667 s), then shows output in 1241 (21.023333 s).
+This supports removing the blank handoff frame for that fixture, not a 10× claim
+or a latency percentile. Input queue delays differ between these trials.
+
+Rapid bursts sent 24 Return events per run, not hardware autorepeat. Baseline
+accepted 10 over a 530.85 ms source burst; candidate accepted 14 over 231.65 ms.
+These are not controlled throughput figures. Frames show two-row output advances
+and a later completed-header placement, rather than a captured one-row advance.
+That evidence motivated fixing parsed-header ownership and footer accounting;
+it does not justify an artificial rendering hold.
+
+Earlier cold-index pilot captures used a slightly resampled canvas and different
+load/cadence. Their candidate typing intervals were worse (eligible median
+22.90–53.83 ms versus 14.02–32.61 ms), with higher capture callback delays.
+They establish neither an improvement nor a clean regression attribution. Do
+not omit that pilot or combine it with native-scale warm results.
+
+Local evidence: `/tmp/spooky-warm-v3-glyph-reference.{json,md}`,
+`/tmp/spooky-submit-pixel-report.{json,md}`,
+`/tmp/spooky-scroll-pixel-report.md`, `/tmp/spooky-scroll-work-audit.json`, and
+`/tmp/spooky-key-to-pixel-confirmed.{json,md}`. Native capture directories use
+`/tmp/spooky-pixels-{baseline,candidate}-warm-v3-capture` and
+`/tmp/spooky-pixels-core-reference-capture`. The per-event reports retain exact
+frame IDs, timestamps, exclusions, and source-to-handler delays.
+
+### Shell work and rendering corrections
+
+Parsed primary B/C boundaries now wake the serialized state/geometry observer
+after releasing the terminal lock. Eight bounded 1 ms retries handle a busy
+snapshot; the ordinary 33 ms observer remains recovery, rather than the primary
+handoff clock. Presentation retains the draft's block ID until matching parsed
+readiness, including C and the next B arriving together. It does not optimistically
+clear input or release terminal cursor ownership.
+
+The adapter skips publishing the old generation's ready state after a native
+accept. A paired configured-shell ABBA probe (30 samples per variant) measured
+trigger-to-new-ready-and-matching-B median 6.069→5.299 ms, p95 6.761→5.924 ms.
+The traced path dropped from 13 to 11 atomic state publications; worker creation
+still costs about 2.3 ms. This is a modest shell-only improvement, with normal
+user startup and hooks preserved. Evidence: `/tmp/spooky-shell-stage-report.md`.
+
+Precision scrolling now subtracts only emitted whole-cell pixels from its
+accumulator, retaining fractional overshoot on both axes and direction changes.
+The previous inherited calculation effectively discarded that remainder.
+Rendering still advances by terminal rows; this is not fractional-pixel scrolling.
+Background names-only index/apply/recovery workers use background QoS; interactive
+query/FSEvents work retains its previous priority. This preserves search coverage
+and trades some cold-index throughput for foreground responsiveness, without
+claiming the priority change alone caused the measured UI differences.
+
+### Follow-up footer, focus, and startup changes
+
+The intermediate recording exposed about 42 extra points between the final
+historical block and the docked input: two real prompt rows remained inside the
+grid while the same header/editor space was reserved outside it. The follow-up
+uses the same compact grid reservation for inline and docked editing, covering
+only a validated empty A/B tail with an opaque footer in the existing Metal
+command batch. One resolved boundary now governs cells/images, captions, path
+hits, selection, page movement, and the scrollbar. Subtracting the same covered
+rows from scrollbar total and visible length preserves its maximum offset.
+The AppKit scrollbar thumb uses that effective visible fraction.
+
+Validation examines at most two prompt rows and an O(1) Kitty-placement check;
+it does not traverse history or perform I/O. Raw, alternate, continuation,
+overwritten, stale, or image-bearing tails retain the full reservation.
+While editing, background output revokes the core crop immediately; AppKit's
+opaque editor can remain until its next geometry update and fallback resize.
+During submission, the existing transfer policy retains the composer over ZLE
+echo until the shell boundary. An empty submission's pre-B hook output can also
+remain behind that composer even when the frame-retention gate fails open;
+the gate itself does not guarantee immediate visibility through the native
+overlay. Program output after C uses the ordinary terminal path. The core resize now
+preserves native-owned prompt cells instead of clearing background bytes as ZLE
+input. A separate private-PTY probe confirms that ZLE itself still emits CR and
+erase-to-end on SIGWINCH: completed lines survive, but partial output without a
+newline can be erased by the shell. The change does not filter those escapes or
+replay output. Core preservation is not a same-frame whole-composition guarantee.
+
+Completed header visibility follows the parsed prompt ID, so terminal rows and
+their historical captions need not wait for a separate GUI metadata publication.
+Native NSTextView focus now counts as focus for its selected active terminal
+pane; previously it explicitly marked the core unfocused and lowered renderer
+thread priority. Inactive windows, other panes, hidden editors, and modal/search
+responders remain excluded. Cursor suppression is independent of focus.
+
+Initial native horizontal/bottom padding is seeded after resolving an actual
+interactive zsh command and before PTY initialization. A core regression
+reproduces the old startup defect: shrinking columns after ZLE writes its
+full-width blank PROMPT_SP line reflows that line and moves B down one row.
+Preseeding avoids that native-padding resize. This does not replace upstream's
+initial drawable/backing-size negotiation. Editor font measurement is available
+synchronously before subsequent reservation calculations; unchanged viewport
+presentation skips the new core setter and terminal mutex entirely.
+
+These follow-up changes have source/regression evidence and the separate
+captures below; do not attribute the earlier table to this later build.
+The final focused core run passed 168 tests (one optimized-only benchmark
+skipped), and the native verification runs passed 109 distinct Swift tests.
+The combined Swift run initially exposed a fixed-sleep assumption in a
+completion test; awaiting its observable request resolved that scheduling
+failure, with the complete editor and scroller suites passing on rerun.
+The ReleaseFast core and ReleaseLocal diagnostic app both built successfully.
+Logs: `/tmp/spooky-viewport-core-tests-final.log`,
+`/tmp/spooky-viewport-swift-tests.log`, `/tmp/spooky-viewport-swift-retest.log`,
+and `/tmp/spooky-pixels-candidate-v4-build.log`. All 69 shell PTY tests passed
+earlier in this pass; the adapter has not changed since that run.
+
+### Follow-up pixel checks and remaining two-step Return
+
+The first v4 attempt became occluded and moved to an inactive Space before
+typing. Its stale Metal pixels are excluded, even though accessibility kept
+reporting live content. A second, visible v4b capture confirmed that the extra
+two-row gap disappeared: the final numbered output row moved 68 native pixels
+closer to the unchanged footer. Wheel scrolling and a subsequent real scrollbar
+thumb drag kept the editor fixed. The thumb moved from 1 to 0.571428 and back to
+1. Native scrollbar coordinates were checked against the visible overlay.
+
+In that v4b run, 16 plain glyphs had median bounds 11.06–27.38 ms, and eight
+picker glyphs 14.54–31.04 ms. Sixteen ordered scroll movements had median bounds
+28.92–45.72 ms (p95 39.41–56.03 ms). One pair of closely spaced source events
+required matching the distinct numbered-row positions instead of assigning a
+frame to the nearest event. The nonoverlapping subset of 15 events was
+28.85–45.27 ms. Index replay used about 26% of one core, and input cadence also
+differed from the earlier runs; these are observations, not a controlled speedup.
+
+The same live test caught a keyboard-routing regression from the focus fix:
+Cmd-V reached the terminal instead of NSTextView. Its nonempty submission is
+excluded. Pane focus now controls renderer priority while actual first-responder
+ownership controls terminal keyboard bindings. An offscreen native-window test
+covers multiline paste, Cmd-A, Cmd-F, and restoration of terminal ownership.
+
+The corrected v5 recording verified the command in the native editor before
+Return, then traced native acceptance and the matching parser boundary. One
+200-row `printf` submission retained the draft until output, with visible-output
+bounds 30.03–64.05 ms. Plain typing had median bounds 13.98–30.99 ms. Seven of
+eight picker glyphs have wide observation bounds and are excluded from a tight
+summary, while retained in the report: observation gaps reached 95.80 and
+73.25 ms, and capture callback backlog reached about 165 ms. No capture status
+reported missing, idle, or suspended frames. UI processing continued; the first
+`@` handler itself took 20.23 ms, so both real cold-popup work and the recorder's
+encoding/write queue need separate attention. Index CPU during this interval
+was about 0.53% of one core, not a full cold crawl.
+
+Unlike the earlier coarse capture, v5 resolves a real one-row intermediate:
+Framecap frame 1415 at 36.873333 s shows row 0186; frame 1416 at 36.890 s shows
+0187 without the completed header; frame 1417 at 36.906667 s shows 0188 and the
+header. The consecutive source-frame gaps were 15.95/16.85 ms and visibility
+remained valid. ZLE's accept-line newline precedes the later tagged A/newline/B
+prompt redraw. This is the remaining coherent-presentation defect, not evidence
+that the footer itself moved.
+
+The subsequent candidate adds an empty-submit presentation gate immediately
+before the native widget trigger. Parsing continues, but the renderer retains
+its previously drawn frame while only the old B's blank tail has changed.
+The next B or C, visible output, raw/alternate/continuation input, scrolling,
+selection, resizing, or other terminal interaction releases it. Inspection is
+bounded to the final two command records and eight tail rows. A 100 ms absolute
+watchdog is a fail-open ceiling, not a minimum delay; repeated requests cannot
+extend it. Split PROMPT_SP writes exposing visible `%` fail open, so the gate
+does not hide arbitrary shell-hook output. This leaves custom or fragmented
+shell output on the normal render path. Pixel verification is still pending.
+
+The first completion panel is also prepared, hidden, after a 150 ms quiet ready
+prompt interval. Typing restarts that timer, and detaching/disabling cancels it.
+This moves unavoidable AppKit construction off the first `@` keystroke rather
+than reducing total construction work. It neither shows the panel nor starts a
+query. A separate construction timing distinguishes this cost from row layout.
+
+Path interaction uses the existing GPU chrome/text batch and font atlas. Active
+hover validation reads only its bounded line or cached header. Initial historic
+ownership lookup has a shared 256-page-link budget, and unresolved relative
+names retain normal selection. Filesystem validation is off the UI actor with
+an expiring bounded cache; no renderer/frame callback performs file I/O.
+
+The combined candidate core run passed 125 tests with one intentional benchmark
+skip, and the ReleaseFast framework completed all 243 build steps. Nineteen
+native suites then passed 225 test declarations / 227 executions including
+parameterized cases, with no failures or skips. These cover the new path
+resolver/click/drag lifecycle, popup preparation, submit-gate ordering, focus and
+keyboard routing, editor behavior, and scroller synchronization. Logs:
+`/tmp/spooky-path-gate-core-tests.log`,
+`/tmp/spooky-path-gate-releasefast.log`, `/tmp/spooky-v6-native-tests.log`.
+
+Local evidence: `/tmp/spooky-v4b-pixel-report.md`,
+`/tmp/spooky-scroll-footer-v4b-report.md`,
+`/tmp/spooky-v3-v4b-footer-native.png`, `/tmp/spooky-v5-pixel-report.md`, and
+`/tmp/spooky-v5-one-row-intermediate-native.png`. Source captures are
+`/tmp/spooky-pixels-candidate-footer-v4b-capture` and
+`/tmp/spooky-pixels-candidate-routing-v5-capture`. V5 has no completed scroll
+workload because computer use lost the visible window before those events.
+
+### V6 lossless ROI repeat
+
+The v6 warm-index repeat disabled H264 and captured a native 600×250 region.
+All 24 typed glyph endpoints remained visible with no visibility exclusions.
+The native editor's pasted `printf` value was verified before submission. The
+entire typing, picker, submit, 24-Return burst, and 16-wheel-event workload ran
+in one computer-use call, avoiding the long inter-action pauses of earlier runs.
+
+| Workload | Median source-event-to-pixel interval |
+| --- | ---: |
+| Plain typing, 16 glyphs | 11.38–28.95 ms |
+| Picker typing, 8 glyphs | 13.04–30.00 ms |
+| Scrolling, 15 identifiable movements | 31.56–48.82 ms |
+
+The first `@` handler fell from 20.23 ms in v5 to 4.16 ms; hidden startup
+construction took 4.41 ms. Its actual visible interval, however, was
+29.64–51.79 ms versus 29.09–48.60 ms in v5, and its input queue wait increased
+from 3.37 to 13.87 ms. This demonstrates moving construction off the keystroke,
+not an end-to-end speedup. The helper was ready/replaying in compaction, using
+about 6.3% of one core over the enclosing sample; two query timings reached
+319.5 ms. This was not a fully idle index or a fresh initial crawl.
+
+Thirteen identifiable Return transitions moved directly by two rows, with zero
+one-row intermediates across 87 Return-phase observations. Twelve tight empty
+Return bounds had median 48.31–66.09 ms. Later identical blank headers and
+50.94/66.59 ms observation gaps prevent certifying every accepted Return.
+The footer lies outside this ROI. One nonempty submit retained its draft until
+output, but its bounds were wide, 43.41–93.59 ms, across a 50.18 ms observation
+gap. This is excluded from a tight-latency summary and does not support a
+submit-speedup claim.
+
+The final wheel event returned the host to live end but changed no distinguishable
+ROI pixels because identical headers repeated there. Its pixel latency is
+excluded rather than calling it a dropped event or a no-op. The other 15
+movements have nonoverlapping intervals with gaps at most 30.78 ms; p95 bounds
+are 49.83–68.24 ms. Raw-only capture still had callback lag near 146 ms and a
+105.5 ms gap after the final picker glyph appeared, so H264 was not the sole
+source of observation delays. All endpoints remain WindowServer observations,
+not physical scanout.
+
+Evidence: `/tmp/spooky-v6-pixel-report.md`,
+`/tmp/spooky-v6-glyph-analysis.json`, `/tmp/spooky-v6-submit-analysis.json`,
+`/tmp/spooky-v6-return-analysis.json`, and
+`/tmp/spooky-scroll-v6-ordered-analysis.json`. Capture:
+`/tmp/spooky-pixels-candidate-warm-v6-capture`; source hashes:
+`/tmp/spooky-pixels-v6-source.json`. V6 predates the subsequent two-row header
+spacing and multiclick fixes; those require separate native/pixel checks.
+
+### V7 cold-index follow-up
+
+A fresh private index was still crawling during the native-scale, raw-only V7
+capture (two-row headers, before the presentation acknowledgement fix).
+Sixteen plain keys had a median source-to-visible interval of 10.60–26.89 ms
+and p95 23.24–39.76 ms. Eight `@ghostty` keys had a median of 11.98–28.65 ms
+and p95 40.41–57.77 ms. The keys arrived in short bursts, producing six and
+three distinct endpoint frames respectively; these are correlated per-key
+bounds, not 24 independent display updates. No target interval had a visibility
+exclusion or observation gap over 50 ms. The warm V6 intervals overlap these
+results; this is not evidence of a cold-index speedup.
+
+The helper remained in `crawl`, not ready, and used 1.310 CPU seconds across a
+1.067-second bracketing interval (about 1.23 cores). This establishes concurrent
+indexing, not its causal contribution to any individual keystroke. The first
+`@` handler took 5.57 ms. The separate popup window is excluded from this
+own-window ROI, so these numbers measure typed glyphs rather than result latency.
+
+The nonempty `printf` fixture reached numbered output in 42.55–59.72 ms.
+Frame 1370 retained the draft, frame 1371 at 22.913865 s showed a blank region
+under the cwd, and frame 1372 at 22.931038 s first showed output. This is a real
+observed blank intermediate outside the empty-submit gate. The shell boundary
+and native handoff occurred 12.73 ms after the source event, before these pixels.
+This motivated a separate acknowledgement from actual Metal layer assignment,
+while retaining immediate shell input ownership at the parsed boundary.
+
+The rapid-Return and scrolling actions occurred after this 35.031-second
+recording ended; their CPU logs cannot establish pixel latency or coherence.
+A separate footer run exhausted its raw-pixel budget before its first keyboard
+input and is also excluded from those claims. Private reports and exact frame
+IDs are in `/tmp/spooky-v7-cold-pixel-report.md` and the accompanying glyph,
+submit, and workload JSON files. Neither recording qualifies final spacing or
+scroll smoothness.
 
 ## Automatic completion and folder browsing
 

@@ -26,6 +26,9 @@ layout(binding = 1, std140) uniform Globals {
     uniform float command_pinned_y;
     uniform float command_gap;
     uniform float command_caption_scale;
+    uniform float native_clip_bottom;
+    uniform float command_padded_y;
+    uniform float command_padded_separator_y;
 };
 
 // Bools

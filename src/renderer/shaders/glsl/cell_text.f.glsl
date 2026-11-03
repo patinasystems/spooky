@@ -20,6 +20,8 @@ const uint ATLAS_SOLID = 2u;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
+    if ((in_data.chrome_flags & 8u) == 0 && native_clip_bottom >= 0 &&
+        screen_size.y - gl_FragCoord.y >= native_clip_bottom) discard;
     if ((in_data.chrome_flags & 4u) != 0 && (in_data.chrome_flags & 8u) == 0) {
         float y = screen_size.y - gl_FragCoord.y;
         float bottom = grid_padding.x + float(unpack2u16(grid_size_packed_2u16).y) * cell_size.y;

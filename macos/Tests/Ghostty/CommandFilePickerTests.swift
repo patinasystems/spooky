@@ -95,9 +95,10 @@ struct CommandFilePickerTests {
 
     @Test func dismissingCancelsIndexingRetries() async {
         let calls = CallCounter()
+        let secondRequest = PickerResponseGate<Void>()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
             search: { _, _, _, _ in
-                _ = calls.next()
+                if calls.next() == 2 { await secondRequest.wait() }
                 throw CommandFileSearchService.Failure.indexing("Indexing files")
             },
             children: { _, _ in [] }), debounce: .zero, retryInitial: .milliseconds(1), retryMaximum: .milliseconds(1))
@@ -107,10 +108,12 @@ struct CommandFilePickerTests {
         #expect(picker.header?.status == CommandFilePicker.initialIndexMessage)
         #expect(picker.message == CommandFilePicker.initialIndexMessage)
         picker.end()
-        let stopped = calls.count
+        #expect(calls.count == 2)
+        await secondRequest.release(())
         try? await Task.sleep(for: .milliseconds(30))
-        #expect(calls.count == stopped)
+        #expect(calls.count == 2)
         #expect(!picker.isActive)
+        #expect(picker.header == nil)
     }
 
     @Test func otherSearchErrorsStillShowTheirMessage() async {

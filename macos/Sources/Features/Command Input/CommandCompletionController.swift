@@ -9,7 +9,10 @@ final class CommandCompletionController {
     private var request: CommandCompletionRequest?
     private var awaitingResponse = false
     private var filter: CommandCompletionFilter?
-    private var popup: CommandCompletionView?
+    private(set) var popup: CommandCompletionView?
+    private var popupPreparationTask: Task<Void, Never>?
+    private var popupPreparationEnabled = false
+    private var popupPreparationDelay: Duration = .milliseconds(150)
     private let ghost = CommandInlineSuggestionView()
     private var automaticTask: Task<Void, Never>?
     private var automaticSelection: NSRange?
@@ -21,6 +24,9 @@ final class CommandCompletionController {
     private(set) var items: [CommandCompletionCandidate] = []
     private(set) var selectedIndex = 0
     private(set) var listVisible = false
+    /// Automatic results are visible without changing Return's submit action.
+    /// Explicit menu navigation or a manual request makes Return accept a row.
+    private var listEngaged = false
     private(set) var inlineSuggestion: String?
     /// The `@` file picker shares this popup but never zsh's request state.
     private(set) var filePicker = CommandFilePicker()
@@ -41,7 +47,46 @@ final class CommandCompletionController {
         picker.onChange = { [weak self] in self?.filePickerDidChange() }
     }
 
-    deinit { automaticTask?.cancel() }
+    deinit { automaticTask?.cancel(); popupPreparationTask?.cancel() }
+
+    /// Construct the one retained native panel after a quiet ready-prompt turn.
+    /// This does not order a window, assign focus, or request any candidates.
+    func setPopupPreparationEnabled(_ enabled: Bool, after delay: Duration = .milliseconds(150)) {
+        popupPreparationEnabled = enabled
+        popupPreparationDelay = delay
+        if enabled { schedulePopupPreparation() } else { popupPreparationTask?.cancel(); popupPreparationTask = nil }
+    }
+
+    private func schedulePopupPreparation() {
+        guard popupPreparationEnabled, popup == nil, popupPreparationTask == nil,
+              let textView, let window = textView.window else { return }
+        let current = revision
+        let delay = popupPreparationDelay
+        popupPreparationTask = Task { [weak self, weak window] in
+            do { try await Task.sleep(for: delay) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.popupPreparationTask = nil
+            guard self.popupPreparationEnabled, self.revision == current,
+                  let textView = self.textView, let window, textView.window === window,
+                  window.isVisible, window.isKeyWindow,
+                  textView.isEditable, !textView.isHiddenOrHasHiddenAncestor else { return }
+            _ = self.ensurePopup()
+        }
+    }
+
+    private func ensurePopup() -> CommandCompletionView {
+        popupPreparationTask?.cancel()
+        popupPreparationTask = nil
+        if let popup { return popup }
+        // Wrap the constructor call, including its stored-property/material
+        // initializers and the convenience initializer's native table.
+        let diagnostic = CommandInputDiagnostics.begin(.completionConstruction)
+        defer { CommandInputDiagnostics.end(diagnostic) }
+        let view = CommandCompletionView()
+        view.onAccept = { [weak self] in self?.accept(at: $0) }
+        popup = view
+        return view
+    }
 
     func willEdit() { editing = true }
 
@@ -49,12 +94,16 @@ final class CommandCompletionController {
         let diagnostic = CommandInputDiagnostics.begin(.completionDidEdit)
         defer { CommandInputDiagnostics.end(diagnostic) }
         latestEditInputID = CommandInputDiagnostics.currentInputID
+        popupPreparationTask?.cancel()
+        popupPreparationTask = nil
+        defer { schedulePopupPreparation() }
         revision &+= 1
         defer { editing = false }
         let typedAt = pendingFileTrigger
         pendingFileTrigger = false
         guard !accepting else { return }
         cancelAutomatic()
+        listEngaged = false
         guard let textView, !textView.string.isEmpty else { dismiss(); return }
         if filePicker.isActive {
             if canSuggest, filePicker.refresh(text: textView.string, cursor: textView.selectedRange().location) {
@@ -85,8 +134,11 @@ final class CommandCompletionController {
     }
 
     func externalEdit() {
+        popupPreparationTask?.cancel()
+        popupPreparationTask = nil
         revision &+= 1
         dismiss()
+        schedulePopupPreparation()
     }
 
     func selectionChanged() {
@@ -128,12 +180,14 @@ final class CommandCompletionController {
 
     /// Shared by the debouncer and deterministic tests; never accepts a result.
     func requestAutomaticNow() {
-        guard canSuggest, let textView, !textView.string.isEmpty, textView.string.utf8.count <= 16_384 else { return }
+        guard canSuggest, let textView, !textView.history.isBrowsing,
+              !textView.string.isEmpty, textView.string.utf8.count <= 16_384 else { return }
         requestCompletions(showList: listVisible, automatic: true, broaden: request == nil || !items.isEmpty)
     }
 
     private func requestCompletions(showList: Bool, automatic: Bool, broaden: Bool = true) {
         let inputID = CommandInputDiagnostics.currentInputID ?? latestEditInputID
+        let engaged = listEngaged || (showList && !automatic)
         dismiss()
         guard canSuggest, let textView else { return }
         let selection = textView.selectedRange()
@@ -145,6 +199,7 @@ final class CommandCompletionController {
         requestInputID = inputID
         awaitingResponse = true
         listVisible = showList
+        listEngaged = engaged
         if showList { present() }
         CommandInputDiagnostics.mark(.completionRequested, id: inputID)
         textView.onRequestCompletion(value)
@@ -182,6 +237,7 @@ final class CommandCompletionController {
         items = []
         message = nil
         listVisible = false
+        listEngaged = false
         inlineSuggestion = nil
         ghost.removeFromSuperview()
         popup?.dismiss()
@@ -205,12 +261,12 @@ final class CommandCompletionController {
         }
         guard modifiers.isSubset(of: [.shift]) else { return false }
         switch event.keyCode {
-        case 48: // Tab reveals; a second Tab accepts. Shift Tab navigates back.
-            if listVisible, !items.isEmpty {
+        case 48: // Available recommendations accept immediately; Shift Tab moves back.
+            if !items.isEmpty {
                 if modifiers.contains(.shift) { moveSelection(-1) } else { accept(at: selectedIndex) }
             } else { revealList() }
             return true
-        case 125: // Down reveals without skipping the best match.
+        case 125: // A visible list moves to the next recommendation.
             guard listVisible || inlineSuggestion != nil else { return false }
             if listVisible, !items.isEmpty { moveSelection(1) } else { revealList() }
             return true
@@ -218,17 +274,17 @@ final class CommandCompletionController {
             guard listVisible, !items.isEmpty else { return false }
             moveSelection(-1)
             return true
-        case 124: // Right accepts only an actually available inline preview.
-            guard modifiers.isEmpty, !listVisible, inlineSuggestion != nil else { return false }
+        case 124: // Right accepts the selected inline preview, including with the list open.
+            guard modifiers.isEmpty, inlineSuggestion != nil else { return false }
             accept(at: selectedIndex)
             return true
         case 36, 76:
             guard modifiers.isEmpty else { dismiss(); return false }
-            if listVisible {
+            if listVisible && listEngaged {
                 if !items.isEmpty { accept(at: selectedIndex) }
                 return true
             }
-            // Inline predictions are not command text. Return runs the draft.
+            // Passive predictions are not command text. Return runs the draft.
             dismiss()
             return false
         default:
@@ -243,6 +299,7 @@ final class CommandCompletionController {
             requestCompletions(showList: true, automatic: false, broaden: false)
         } else if request != nil {
             listVisible = true
+            listEngaged = true
             present()
         } else {
             requestCompletions(showList: true, automatic: false)
@@ -263,8 +320,10 @@ final class CommandCompletionController {
 
     private func moveSelection(_ delta: Int) {
         guard !items.isEmpty else { return }
+        listEngaged = true
         selectedIndex = (selectedIndex + delta + items.count) % items.count
         popup?.select(index: selectedIndex)
+        updateInlineSuggestion()
     }
 
     private func accept(at index: Int) {
@@ -288,21 +347,18 @@ final class CommandCompletionController {
     private func present() {
         if filePicker.isActive { presentFilePicker(); return }
         guard let textView else { return }
+        // Every ready set is visible immediately. The ghost remains separate
+        // from the document and mirrors the selected menu item.
+        if !items.isEmpty { listVisible = true }
+        updateInlineSuggestion()
         if listVisible {
-            inlineSuggestion = nil
-            ghost.removeFromSuperview()
             guard textView.window?.isVisible == true else { return }
-            if popup == nil {
-                popup = CommandCompletionView()
-                popup?.onAccept = { [weak self] in self?.accept(at: $0) }
-            }
-            popup?.show(items: items, message: awaitingResponse ? "Finding completions…" : message,
-                        selected: selectedIndex, for: textView)
+            ensurePopup().show(items: items, message: awaitingResponse ? "Finding completions…" : message,
+                               selected: selectedIndex, for: textView)
             CommandInputDiagnostics.mark(.completionPresentationUpdated,
                                          id: CommandInputDiagnostics.currentInputID ?? requestInputID)
         } else {
             popup?.dismiss()
-            updateInlineSuggestion()
             CommandInputDiagnostics.mark(.completionPresentationUpdated,
                                          id: CommandInputDiagnostics.currentInputID ?? requestInputID)
         }
@@ -319,7 +375,8 @@ final class CommandCompletionController {
         guard let textView else { return }
         if listVisible {
             popup?.updatePosition(for: textView)
-        } else if canSuggest, let inlineSuggestion {
+        }
+        if canSuggest, let inlineSuggestion {
             // Draft/candidate edits compute this projection in present();
             // selection changes invalidate it. A geometry or appearance
             // update must not rebuild and validate the command again.
@@ -332,8 +389,9 @@ final class CommandCompletionController {
     }
 
     private func updateInlineSuggestion() {
-        guard canSuggest, !listVisible, let textView, let candidate = items.first,
-              let preview = Self.preview(candidate, text: textView.string, cursor: textView.selectedRange().location) else {
+        guard canSuggest, let textView, items.indices.contains(selectedIndex),
+              let preview = Self.preview(items[selectedIndex], text: textView.string,
+                                         cursor: textView.selectedRange().location) else {
             inlineSuggestion = nil
             ghost.removeFromSuperview()
             return
@@ -405,12 +463,7 @@ extension CommandCompletionController {
         items = filePicker.candidates()
         selectedIndex = filePicker.selectedIndex
         guard textView.window?.isVisible == true else { return }
-        let popup = popup ?? {
-            let view = CommandCompletionView()
-            view.onAccept = { [weak self] in self?.accept(at: $0) }
-            self.popup = view
-            return view
-        }()
+        let popup = ensurePopup()
         popup.show(items: items, message: filePicker.message, selected: selectedIndex,
                    header: filePicker.header, anchor: session.anchor, for: textView)
         CommandInputDiagnostics.mark(.completionPresentationUpdated,

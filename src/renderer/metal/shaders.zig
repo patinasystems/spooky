@@ -257,6 +257,9 @@ pub const Uniforms = extern struct {
     command_pinned_y: f32 align(4) = 0,
     command_gap: f32 align(4) = 0,
     command_caption_scale: f32 align(4) = 1,
+    native_clip_bottom: f32 align(4) = -1,
+    command_padded_y: f32 align(4) = 0,
+    command_padded_separator_y: f32 align(4) = 0,
 
     const PaddingExtend = packed struct(u8) {
         left: bool = false,
@@ -282,7 +285,8 @@ pub const CellText = extern struct {
         is_pinned_command: bool = false,
         command_top_gap: bool = false,
         command_above_viewport: bool = false,
-        _padding: u2 = 0,
+        is_path_overlay: bool = false,
+        is_command_separator: bool = false,
     } align(1) = .{},
 
     pub const Atlas = enum(u8) {

@@ -194,7 +194,7 @@ struct CommandHistoryControllerTests {
         defer { window.close() }
         var histories = 0
         editor.onRequestHistory = { _ in histories += 1 }
-        try showCompletions(editor, list: true)
+        try showCompletions(editor)
         try arrow(editor, older: true)
         #expect(histories == 0)
         #expect(editor.textView.selectedCompletionIndex == 1)
@@ -210,16 +210,19 @@ struct CommandHistoryControllerTests {
         #expect(histories == 0)
     }
 
-    @Test func downRevealsInlinePredictionUntilBrowsingHistory() throws {
+    @Test func automaticMenuNavigatesOptionsButDoesNotInterruptHistoryBrowsing() throws {
         let (editor, window) = makeEditor("git c")
         defer { window.close() }
-        try showCompletions(editor, list: false)
+        try showCompletions(editor)
         try arrow(editor, older: false)
         #expect(editor.textView.completions.listVisible)
         editor.dismissCompletions()
         editor.receiveHistory(response(try request(editor), entries: ["git ch"]))
-        try showCompletions(editor, list: false)
-        #expect(editor.textView.completions.inlineSuggestion != nil)
+        var automaticRequests = 0
+        editor.onRequestCompletion = { _ in automaticRequests += 1 }
+        editor.textView.completions.requestAutomaticNow()
+        #expect(automaticRequests == 0)
+        #expect(editor.textView.completions.inlineSuggestion == nil)
         try arrow(editor, older: false)
         #expect(editor.textView.string == "git c")
         #expect(!editor.textView.completions.listVisible)
@@ -275,7 +278,7 @@ struct CommandHistoryControllerTests {
             isARepeat: false, keyCode: older ? 126 : 125)))
     }
 
-    private func showCompletions(_ editor: CommandInputView, list: Bool) throws {
+    private func showCompletions(_ editor: CommandInputView) throws {
         var value: CommandCompletionRequest?
         editor.onRequestCompletion = { value = $0 }
         editor.textView.completions.requestAutomaticNow()
@@ -286,7 +289,6 @@ struct CommandHistoryControllerTests {
             .init(displayText: "cherry-pick", detail: "", replacementText: "git cherry-pick",
                   replacementRange: NSRange(location: 0, length: request.text.utf16.count))
         ]))
-        if list { try arrow(editor, older: false) }
     }
 }
 

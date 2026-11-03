@@ -88,6 +88,12 @@ def read_bundle(app: Path) -> dict:
         raise ValueError("Preview must keep upstream Ghostty updates disabled")
     if info.get("SUFeedURL"):
         raise ValueError("Preview must not advertise an update feed")
+    if (any(key.startswith("SpookyWindowCapture") for key in info)
+            or info.get("SpookyPerformanceDiagnostics")
+            or info.get("SpookyPerformanceDiagnosticsPath")
+            or info.get("SpookyFileSearchDiagnosticsPath")
+            or info.get("SpookyFileSearchDiagnosticIndexDirectory")):
+        raise ValueError("Preview must not contain diagnostic capture or profiling settings")
     version = info.get("CFBundleShortVersionString", "")
     if not isinstance(version, str) or not re.fullmatch(r"[0-9][A-Za-z0-9.-]{0,63}", version):
         raise ValueError("Bundle has an invalid release version")

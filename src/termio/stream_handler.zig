@@ -89,6 +89,10 @@ pub const StreamHandler = struct {
     /// to wake up the termio thread.
     termio_messaged: bool = false,
 
+    /// Coalesced while parsing a PTY batch. Termio publishes this only after
+    /// releasing the terminal mutex, so the app can read the durable IDs.
+    native_input_boundary_pending: bool = false,
+
     /// This is set to true when we've seen a title escape sequence. We use
     /// this to determine if we need to default the window title.
     seen_title: bool = false,
@@ -200,6 +204,28 @@ pub const StreamHandler = struct {
         comptime action: Stream.Action.Tag,
         value: Stream.Action.Value(action),
     ) !void {
+        // The empty-native-submit gate considers final blank tail cells at a
+        // frame boundary. Ordinary ZLE CR/LF/SGR/PROMPT_SP and tail cleanup may
+        // therefore complete in one read, but moving/erasing outside that tail
+        // or entering an unrelated protocol fails open immediately.
+        if (self.renderer_state.native_submission.deadline_ms != null) {
+            const safe_tail_action = switch (action) {
+                .print,
+                .print_slice,
+                .print_repeat,
+                .carriage_return,
+                .linefeed,
+                .set_attributes,
+                .erase_display_below,
+                .erase_line_right,
+                .semantic_prompt,
+                .report_pwd,
+                => true,
+                .set_mode, .reset_mode => value.mode == .bracketed_paste or value.mode == .cursor_visible,
+                else => false,
+            };
+            if (!safe_tail_action) self.renderer_state.native_submission.cancel();
+        }
         // The branch hints here are based on real world data
         // which indicates that the most common actions are:
         //
@@ -1470,6 +1496,26 @@ pub const StreamHandler = struct {
         }
     }
 
+    const NativeInputBoundary = struct {
+        input: [65]u8,
+        output: [65]u8,
+        primary_prompt: bool,
+
+        fn capture(term: *const terminal.Terminal) NativeInputBoundary {
+            return .{
+                .input = term.last_primary_input_id,
+                .output = term.last_started_command_id,
+                .primary_prompt = term.native_prompt_active,
+            };
+        }
+
+        fn changed(self: NativeInputBoundary, term: *const terminal.Terminal) bool {
+            return !std.mem.eql(u8, &self.input, &term.last_primary_input_id) or
+                !std.mem.eql(u8, &self.output, &term.last_started_command_id) or
+                (self.primary_prompt and !term.native_prompt_active);
+        }
+    };
+
     fn semanticPrompt(
         self: *StreamHandler,
         cmd: Stream.Action.SemanticPrompt,
@@ -1501,9 +1547,12 @@ pub const StreamHandler = struct {
             => {},
         }
 
-        // We do this last so failures are still processed correctly
-        // above.
+        // We do this last so failures are still processed correctly above.
+        // A alone is not an input boundary. Terminal validates tagged primary
+        // B/C identities; secondary P may also yield the prompt to raw input.
+        const before = NativeInputBoundary.capture(self.terminal);
         try self.terminal.semanticPrompt(cmd);
+        if (before.changed(self.terminal)) self.native_input_boundary_pending = true;
     }
 
     fn reportPwd(self: *StreamHandler, url: []const u8) !void {
@@ -2142,4 +2191,65 @@ test "tmux active_window notification is handled" {
     try handler.dcsCommand(&pane);
     try testing.expect(!handler.termio_messaged);
     try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "native input boundary notifications ignore A duplicates invalid and alternate markers" {
+    const testing = std.testing;
+    var term = try terminal.Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer term.deinit(testing.allocator);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    const empty = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;A;aid=first\x07");
+    try testing.expect(!empty.changed(&term));
+    const header = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;B;aid=wrong\x07");
+    try testing.expect(!header.changed(&term));
+    stream.nextSlice("\x1b]133;B;aid=first\x07");
+    try testing.expect(header.changed(&term));
+    const input = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;B;aid=first\x07");
+    try testing.expect(!input.changed(&term));
+    _ = try term.switchScreen(.alternate);
+    stream.nextSlice("\x1b]133;A;aid=alt\x07\x1b]133;B;aid=alt\x07\x1b]133;C;aid=alt\x07");
+    try testing.expect(!input.changed(&term));
+}
+
+test "native input boundary notifications retain C and next B through one batch" {
+    const testing = std.testing;
+    var term = try terminal.Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer term.deinit(testing.allocator);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=first\x07\x1b]133;B;aid=first\x07");
+    const input = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;C;aid=first\x07");
+    try testing.expect(input.changed(&term));
+    const output = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;D;0;aid=first\x07\x1b]133;A;aid=second\x07\x1b]133;B;aid=second\x07");
+    try testing.expect(output.changed(&term));
+    try testing.expectEqualStrings("first", std.mem.sliceTo(&term.last_started_command_id, 0));
+    try testing.expectEqualStrings("second", std.mem.sliceTo(&term.last_primary_input_id, 0));
+    const second = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;P;k=s\x07");
+    try testing.expect(second.changed(&term));
+}
+
+test "native input boundary notifications wake for an empty command without C" {
+    const testing = std.testing;
+    var term = try terminal.Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer term.deinit(testing.allocator);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=first\x07\x1b]133;B;aid=first\x07");
+    const input = StreamHandler.NativeInputBoundary.capture(&term);
+    // Empty accept-line has no preexec/C. Its next B still needs to wake the
+    // native editor, including when D/A/B are delivered in one PTY batch.
+    stream.nextSlice("\x1b]133;D;0;aid=first\x07\x1b]133;A;aid=second\x07\x1b]133;B;aid=second\x07");
+    try testing.expect(input.changed(&term));
+    try testing.expectEqualStrings("", std.mem.sliceTo(&term.last_started_command_id, 0));
+    try testing.expectEqualStrings("second", std.mem.sliceTo(&term.last_primary_input_id, 0));
+    const second = StreamHandler.NativeInputBoundary.capture(&term);
+    stream.nextSlice("\x1b]133;B;aid=second\x07");
+    try testing.expect(!second.changed(&term));
 }

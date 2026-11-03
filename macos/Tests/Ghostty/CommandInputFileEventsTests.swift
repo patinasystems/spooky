@@ -63,6 +63,24 @@ struct CommandInputFileEventsTests {
         try await counter.wait(for: previous + 1)
     }
 
+    @Test func parserBoundarySupersedesLongFilesystemCoalescingDelay() async throws {
+        let fixture = try Fixture()
+        let watcher = CommandInputFileEvents(directory: fixture.directory, watchdogInterval: 60,
+                                             coalescingInterval: 60)
+        defer { withExtendedLifetime(watcher) {} }
+        let counter = EventCounter()
+        let consumer = Task { for await _ in watcher.events { await counter.increment() } }
+        defer { consumer.cancel() }
+        // Initial observation and this request would normally wait 60 seconds.
+        // The parser signal must publish through the same serialized consumer.
+        watcher.requestRefresh()
+        watcher.requestRefresh(immediate: true)
+        try await counter.wait(for: 1)
+        watcher.requestRefresh()
+        watcher.requestRefresh(immediate: true)
+        try await counter.wait(for: 2)
+    }
+
     private final class Fixture {
         let directory: URL
 

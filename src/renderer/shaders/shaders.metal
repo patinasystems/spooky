@@ -27,6 +27,9 @@ struct Uniforms {
   float command_pinned_y;
   float command_gap;
   float command_caption_scale;
+  float native_clip_bottom;
+  float command_padded_y;
+  float command_padded_separator_y;
 };
 
 //-------------------------------------------------------------------
@@ -456,6 +459,7 @@ fragment float4 cell_bg_fragment(
   constant Uniforms& uniforms [[buffer(1)]],
   constant uchar4 *cells [[buffer(2)]]
 ) {
+  if (uniforms.native_clip_bottom >= 0 && in.position.y >= uniforms.native_clip_bottom) discard_fragment();
   int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
 
   float4 bg = float4(0.0);
@@ -528,6 +532,8 @@ enum CellTextBools : uint8_t {
   IS_PINNED_COMMAND = 8u,
   COMMAND_TOP_GAP = 16u,
   COMMAND_ABOVE_VIEWPORT = 32u,
+  IS_PATH_OVERLAY = 64u,
+  IS_COMMAND_SEPARATOR = 128u,
 };
 
 struct CellTextVertexIn {
@@ -592,11 +598,16 @@ vertex CellTextVertexOut cell_text_vertex(
   CellTextVertexOut out;
   out.atlas = in.atlas;
   out.chrome_flags = in.bools;
+  if ((in.bools & IS_PATH_OVERLAY) != 0)
+    cell_pos = float2(in.grid_pos) - float2(uniforms.grid_padding.w, uniforms.grid_padding.x);
   if ((in.bools & COMMAND_ABOVE_VIEWPORT) != 0) cell_pos.y -= uniforms.cell_size.y;
-  if ((in.bools & IS_PINNED_COMMAND) != 0) cell_pos.y = uniforms.command_pinned_y;
+  if ((in.bools & IS_PINNED_COMMAND) != 0 && (in.bools & IS_PATH_OVERLAY) == 0) cell_pos.y = uniforms.command_pinned_y;
   if (in.atlas == ATLAS_SOLID) {
+    if ((in.bools & IS_COMMAND_SEPARATOR) != 0)
+      cell_pos.y += (in.bools & COMMAND_TOP_GAP) != 0 ? uniforms.command_padded_separator_y : uniforms.command_gap;
     float2 position = float2(-uniforms.grid_padding.w + uniforms.screen_size.x * corner.x,
                             cell_pos.y + float(in.bearings.y) + float(in.glyph_size.y) * corner.y);
+    if ((in.bools & IS_PATH_OVERLAY) != 0) position = cell_pos + float2(in.glyph_size) * corner;
     out.position = uniforms.projection_matrix * float4(position, 0.0, 1.0);
     out.color = load_color(in.color, uniforms.use_display_p3, uniforms.use_linear_blending);
     out.bg_color = float4(0.0);
@@ -634,11 +645,13 @@ vertex CellTextVertexOut cell_text_vertex(
   float2 offset = float2(in.bearings);
 
   offset.y = uniforms.cell_size.y - offset.y;
-  if ((in.bools & IS_COMMAND_CHROME) != 0) {
-    cell_pos.x *= uniforms.command_caption_scale;
-    cell_pos.y += uniforms.command_gap * ((in.bools & COMMAND_TOP_GAP) != 0 ? 2.0 : 1.0);
-    size *= uniforms.command_caption_scale;
-    offset *= uniforms.command_caption_scale;
+  if ((in.bools & IS_COMMAND_CHROME) != 0 && (in.bools & IS_PATH_OVERLAY) == 0) {
+    bool padded = (in.bools & COMMAND_TOP_GAP) != 0;
+    float scale = padded ? 0.875 : uniforms.command_caption_scale;
+    cell_pos.x *= scale;
+    cell_pos.y += padded ? uniforms.command_padded_y : uniforms.command_gap;
+    size *= scale;
+    offset *= scale;
   }
 
   // Calculate the final position of the cell which uses our glyph size
@@ -662,7 +675,7 @@ vertex CellTextVertexOut cell_text_vertex(
 
   // Compact captions can have virtual columns beyond the real VT grid.
   // Their opaque background is global; never index terminal cells with them.
-  if ((in.bools & IS_COMMAND_CHROME) != 0) {
+  if ((in.bools & (IS_COMMAND_CHROME | IS_PATH_OVERLAY)) != 0) {
     out.bg_color = load_color(uchar4(uniforms.bg_color.rgb, 255), uniforms.use_display_p3, true);
   } else {
     out.bg_color = load_color(bg_colors[in.grid_pos.y * uniforms.grid_size.x + in.grid_pos.x],
@@ -680,7 +693,7 @@ vertex CellTextVertexOut cell_text_vertex(
   }
 
   // Check if current position is under cursor (including wide cursor)
-  bool is_cursor_pos = (
+  bool is_cursor_pos = (in.bools & IS_PATH_OVERLAY) == 0 && (
       in.grid_pos.x == uniforms.cursor_pos.x ||
       uniforms.cursor_wide &&
         in.grid_pos.x == uniforms.cursor_pos.x + 1
@@ -705,6 +718,8 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if ((in.chrome_flags & IS_PINNED_COMMAND) == 0 && uniforms.native_clip_bottom >= 0 &&
+      in.position.y >= uniforms.native_clip_bottom) discard_fragment();
   if ((in.chrome_flags & IS_COMMAND_CHROME) != 0 &&
       (in.chrome_flags & IS_PINNED_COMMAND) == 0) {
     const float top = uniforms.grid_padding.x;
@@ -871,6 +886,7 @@ fragment float4 image_fragment(
     filter::linear
   );
 
+  if (uniforms.native_clip_bottom >= 0 && in.position.y >= uniforms.native_clip_bottom) discard_fragment();
   float4 rgba = image.sample(textureSampler, in.tex_coord);
 
   if (!uniforms.use_linear_blending) {

@@ -16,15 +16,35 @@ final class NativeCommandSurfaceHost: NSView {
         let suppressed: Bool
     }
     private var cursorPresentation: CursorPresentation?
+    private struct AccentPresentation: Equatable {
+        let surface: ghostty_surface_t
+        let enabled: Bool
+        let color: CommandInputAccent?
+    }
+    private var resolvedAccent: CommandInputAccent?
+    private var accentPresentation: AccentPresentation?
+    private struct ViewportPresentation: Equatable {
+        let surface: ghostty_surface_t
+        let height: CGFloat
+        let coveredRows: UInt32
+        let transferring: Bool
+        let backingScale: CGFloat
+    }
+    private var viewportPresentation: ViewportPresentation?
     private let notice = NSTextField(wrappingLabelWithString: "")
     private let editButton = NSButton(title: "Edit Command", target: nil, action: nil)
     private let terminalButton = NSButton(title: "Use Terminal", target: nil, action: nil)
     private let draftButton = NSButton(title: "View Draft", target: nil, action: nil)
-    private var measuredHeight: CGFloat = 0
     private var synchronizing = false
     private var background = NSColor.black
     private var docking = CommandInputDocking()
     private var diagnosticLayout: [String: Double]?
+    private let pathResolver = CommandPathResolver()
+    private lazy var paths = makePathInteraction()
+    private var submittedEcho: CommandSubmittedEchoView?
+    private var echoPreparationTask: Task<Void, Never>?
+    private var echoContainerSize: NSSize?
+    private let workspaceNotifications = NSWorkspace.shared.notificationCenter
 
     override var isFlipped: Bool { true }
 
@@ -63,44 +83,149 @@ final class NativeCommandSurfaceHost: NSView {
         session.onHistory = { [weak self] in self?.editor.receiveHistory($0) }
         editor.canRequestFocus = { [weak self] in self?.canFocusEditor ?? false }
         editor.onFocusChanged = { [weak self] focused in
-            guard focused, let self else { return }
-            self.surfaceView.focusDidChange(false)
-            self.surfaceView.setCursorVisibility(true)
-            if let controller = self.window?.windowController as? BaseTerminalController,
-               controller.focusedSurface !== self.surfaceView {
-                controller.focusedSurfaceDidChange(to: self.surfaceView)
+            guard let self else { return }
+            if focused {
+                self.surfaceView.setCursorVisibility(true)
+                if let controller = self.window?.windowController as? BaseTerminalController,
+                   controller.focusedSurface !== self.surfaceView {
+                    controller.focusedSurfaceDidChange(to: self.surfaceView)
+                }
+            }
+            // AppKit updates firstResponder after become/resign returns. Read
+            // ownership then, including search fields, other panes and windows.
+            DispatchQueue.main.async { [weak self] in
+                (self?.window?.windowController as? BaseTerminalController)?.syncFocusToSurfaceTree()
             }
         }
-        editor.onContentHeightChanged = { [weak self] height in
-            guard let self, abs(self.measuredHeight - height) > 0.25 else { return }
-            self.measuredHeight = height
-            self.synchronize()
-        }
+        editor.onContentHeightChanged = { [weak self] _ in self?.synchronize() }
         session.onChange = { [weak self] in self?.synchronize() }
+        session.onRetainSubmittedEcho = { [weak self] in self?.retainSubmittedEcho() ?? false }
+        session.onReleaseSubmittedEcho = { [weak self] in
+            self?.submittedEcho?.clear()
+            self?.echoContainerSize = nil
+        }
+        surfaceView.commandPathInteraction = paths
+        NotificationCenter.default.addObserver(self, selector: #selector(pathViewportChanged),
+                                               name: .ghosttyDidUpdateScrollbar, object: surfaceView)
+        NotificationCenter.default.addObserver(self, selector: #selector(systemColorsChanged),
+                                               name: NSColor.systemColorsDidChangeNotification, object: nil)
+        for name in [NSWindow.didResignKeyNotification, NSWindow.didResizeNotification,
+                     NSWindow.didChangeScreenNotification, NSWindow.didChangeOcclusionStateNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(echoWindowChanged(_:)), name: name, object: nil)
+        }
+        workspaceNotifications.addObserver(self, selector: #selector(echoSpaceChanged),
+                                           name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        refreshAccent()
         synchronize()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        echoPreparationTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+        workspaceNotifications.removeObserver(self)
+    }
+
     override func layout() {
         super.layout()
+        if let echoContainerSize, echoContainerSize != bounds.size { session.cancelSubmittedEcho() }
         synchronize()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        echoPreparationTask?.cancel()
+        echoPreparationTask = nil
+        session.cancelSubmittedEcho()
+        paths.pointerExited()
+        refreshAccent()
         synchronize()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAccent()
+    }
+
+    @objc private func systemColorsChanged() { refreshAccent() }
+
+    private func refreshAccent() {
+        resolvedAccent = CommandInputAccent.resolve(appearance: effectiveAppearance)
+        publishAccent()
+    }
+
+    private func prepareSubmittedEcho() {
+        guard submittedEcho == nil, echoPreparationTask == nil, session.isEditable, window != nil else { return }
+        echoPreparationTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            guard let self else { return }
+            self.echoPreparationTask = nil
+            guard self.session.isEditable, self.window?.isVisible == true else { return }
+            _ = self.ensureSubmittedEcho()
+        }
+    }
+
+    private func ensureSubmittedEcho() -> CommandSubmittedEchoView {
+        if let submittedEcho { return submittedEcho }
+        let measurement = CommandInputDiagnostics.begin(.submissionEchoConstruction)
+        defer { CommandInputDiagnostics.end(measurement) }
+        let echo = CommandSubmittedEchoView()
+        // A newly editable prompt always wins if it occupies the same pixels.
+        addSubview(echo, positioned: .below, relativeTo: editor)
+        submittedEcho = echo
+        return echo
+    }
+
+    private func retainSubmittedEcho() -> Bool {
+        guard !editor.isHidden, !session.draft.isEmpty,
+              session.draft.utf8.count <= CommandSubmittedEchoView.maximumBytes, let window,
+              window.isKeyWindow, window.isOnActiveSpace, window.occlusionState.contains(.visible) else { return false }
+        let echo = ensureSubmittedEcho()
+        guard echo.retainPresentation(from: editor, background: background) else { return false }
+        echoContainerSize = bounds.size
+        return true
+    }
+
+    @objc private func echoWindowChanged(_ notification: Notification) {
+        guard let changed = notification.object as? NSWindow, changed === window else { return }
+        session.cancelSubmittedEcho()
+    }
+
+    @objc private func echoSpaceChanged() { session.cancelSubmittedEcho() }
+
+    private func publishAccent() {
+        guard let surface = surfaceView.surface else { accentPresentation = nil; return }
+        let value = AccentPresentation(surface: surface, enabled: session.hasNativeIntegration, color: resolvedAccent)
+        guard value != accentPresentation else { return }
+        ghostty_surface_set_native_input_accent(surface, value.enabled && value.color != nil,
+                                               value.color?.red ?? 0, value.color?.green ?? 0, value.color?.blue ?? 0)
+        accentPresentation = value
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        session.cancelSubmittedEcho()
         // Let the child surface publish its new core scale first. Logical
         // bounds may be unchanged when moving between 1x and 2x displays.
         DispatchQueue.main.async { [weak self] in
             self?.chromePresentation = nil
+            self?.viewportPresentation = nil
+            self?.paths.pointerExited()
             self?.synchronize()
         }
     }
+
+    static func focusedEditor(for surface: Ghostty.SurfaceView) -> NSView? {
+        var ancestor = surface.superview
+        while let view = ancestor {
+            if let host = view as? NativeCommandSurfaceHost { return host.editor.textView }
+            ancestor = view.superview
+        }
+        return nil
+    }
+
+    private var footerHitTop: CGFloat?
 
     private var canFocusEditor: Bool {
         guard let window, window.isKeyWindow else { return false }
@@ -115,11 +240,21 @@ final class NativeCommandSurfaceHost: NSView {
         defer { CommandInputDiagnostics.end(measurement) }
         synchronizing = true
         defer { synchronizing = false }
+        publishAccent()
         let geometry = session.layout
         let line = max(1, geometry.cellHeight)
         let padding = CommandInputView.padding
+        background = configColor("background", fallback: .black)
+        let foreground = configColor("foreground", fallback: .textColor)
+        layer?.backgroundColor = background.cgColor
+        // Font and draft measurements update immediately; their callbacks stay
+        // deferred. Never resize the PTY using a stale default-font height and
+        // correct it one run-loop turn later across a terminal-row boundary.
+        editor.configureAppearance(font: session.editorFont, textColor: foreground,
+                                   backgroundColor: background, minimumLineHeight: line)
+        editor.setDraft(session.draft)
         let minimumHeight = line + padding * 2
-        let height = min(max(minimumHeight, measuredHeight),
+        let height = min(max(minimumHeight, editor.contentHeight),
                          max(minimumHeight, min(line * 12 + padding * 2, bounds.height * 0.45)))
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission
@@ -151,13 +286,24 @@ final class NativeCommandSurfaceHost: NSView {
                 cursorPresentation = cursor
             }
             let integrated = session.hasNativeIntegration
-            ghostty_surface_set_native_input_padding(surface, integrated ? padding : 0,
-                                                     integrated ? placement.reservedHeight + padding : 0)
+            let viewport = ViewportPresentation(
+                surface: surface,
+                height: shown && placement.pinned && !recovering ? placement.pinnedOffset : 0,
+                coveredRows: placement.coveredRows, transferring: transferring,
+                backingScale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)).height)
+            if viewport != viewportPresentation {
+                ghostty_surface_set_native_input_viewport(surface, viewport.height,
+                                                         viewport.coveredRows, viewport.transferring)
+                viewportPresentation = viewport
+            }
+            if !(session.isAwaitingInitialNativePrompt && ghostty_surface_native_input_bootstrap(surface)) {
+                ghostty_surface_set_native_input_padding(surface, integrated ? padding : 0,
+                                                         integrated ? placement.reservedHeight + padding : 0)
+            }
+        } else {
+            viewportPresentation = nil
         }
 
-        background = configColor("background", fallback: .black)
-        let foreground = configColor("foreground", fallback: .textColor)
-        layer?.backgroundColor = background.cgColor
         let terminalFrame = bounds
         if terminalView.frame != terminalFrame {
             terminalView.frame = terminalFrame
@@ -167,8 +313,11 @@ final class NativeCommandSurfaceHost: NSView {
         // compare applied terminal dimensions with the requested surface size.
         terminalView.layoutSubtreeIfNeeded()
 
+        // Protocol readiness can precede parsed B. Keep the caption tied to
+        // the draft that is actually on screen until both can advance together.
+        let chromeID = editing || transferring ? session.presentedBlockID : session.currentBlockID
         let chrome = CommandChromePresentation(
-            layout: geometry, metadata: session.blockMetadata, currentID: session.currentBlockID,
+            layout: geometry, metadata: session.blockMetadata, currentID: chromeID,
             pinnedOffset: placement.pinnedOffset,
             recovering: recovering,
             backingScale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)).height)
@@ -198,9 +347,7 @@ final class NativeCommandSurfaceHost: NSView {
         let footerHeight = shown && placement.pinned
             ? max(placement.pinnedOffset, bounds.maxY - editorFrame.minY) : 0
         terminalView.setNativeFooterHeight(footerHeight)
-        editor.configureAppearance(font: session.editorFont, textColor: foreground,
-                                   backgroundColor: background, minimumLineHeight: line)
-        editor.setDraft(session.draft)
+        footerHitTop = footerHeight > 0 ? bounds.height - footerHeight : nil
         editor.setHistoryContext(session.historyContext)
         // Raw metadata: a valid directory name may itself end in a newline.
         let cwd = session.currentBlockID.flatMap { session.blockMetadata[$0]?.workingDirectory }
@@ -209,9 +356,12 @@ final class NativeCommandSurfaceHost: NSView {
             editor.textView.fileSearchDirectory = fileSearchDirectory
         }
         editor.setEditable(session.isEditable && shown && !recovering && !surfaceView.readonly)
+        editor.textView.completions.setPopupPreparationEnabled(editor.textView.isEditable)
+        prepareSubmittedEcho()
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
         layoutNotice(foreground: foreground)
+        paths.refresh()
         if CommandInputDiagnostics.isEnabled {
             let values: [String: Double] = [
                 "requested_rows": Double(requestedSize?.rows ?? 0), "core_rows": Double(geometry.rows),
@@ -229,29 +379,33 @@ final class NativeCommandSurfaceHost: NSView {
         }
     }
 
-    // Intercept only a real directory-label click on the terminal itself.
-    // Scrollbars, branch/status captions, native controls, and terminal text
-    // retain their existing event handling. Geometry is resolved at the click.
+    // Native controls and scrollbars retain their normal hit targets. A path
+    // claims only a validated click; a drag is replayed into terminal selection.
     override func hitTest(_ point: NSPoint) -> NSView? {
         let target = super.hitTest(point)
         guard target === surfaceView, let event = NSApp.currentEvent,
               event.window === window else { return target }
         let isClick = event.type == .leftMouseDown ||
             (event.type == .rightMouseDown && event.modifierFlags.contains(.control))
-        guard isClick,
-              directory(at: convert(event.locationInWindow, from: nil)) != nil else { return target }
+        let location = convert(event.locationInWindow, from: nil)
+        if let footerHitTop, location.y >= footerHitTop,
+           [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(event.type) { return self }
+        guard isClick, paths.claimsClick(at: location, modifiers: event.modifierFlags,
+                                        clickCount: event.clickCount) else { return target }
         return self
     }
 
+    override func scrollWheel(with event: NSEvent) { surfaceView.scrollWheel(with: event) }
+
     override func mouseDown(with event: NSEvent) {
-        guard let directory = directory(at: convert(event.locationInWindow, from: nil)) else { return }
-        if !event.modifierFlags.isDisjoint(with: [.command, .control]) {
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
-        } else {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(directory.path, forType: .string)
-        }
+        if let surface = surfaceView.surface { ghostty_surface_cancel_native_submission(surface) }
+        paths.mouseDown(with: event)
     }
+
+    override func mouseUp(with event: NSEvent) { paths.mouseUp(with: event) }
+    override func mouseDragged(with event: NSEvent) { paths.mouseDragged(with: event) }
+    override func rightMouseUp(with event: NSEvent) { paths.mouseUp(with: event) }
+    override func rightMouseDragged(with event: NSEvent) { paths.mouseDragged(with: event) }
 
     override func rightMouseDown(with event: NSEvent) {
         // AppKit can deliver Control-click through the contextual-click path.
@@ -262,15 +416,62 @@ final class NativeCommandSurfaceHost: NSView {
         mouseDown(with: event)
     }
 
-    private func directory(at point: NSPoint) -> URL? {
-        guard bounds.contains(point), let surface = surfaceView.surface else { return nil }
-        var hit = ghostty_command_path_hit_s()
-        guard ghostty_surface_command_path_at(surface, point.x, point.y, &hit) else { return nil }
-        let id = withUnsafeBytes(of: hit.id) { String(bytes: $0.prefix { $0 != 0 }, encoding: .utf8) }
-        guard let id, let path = session.blockMetadata[id]?.workingDirectory,
-              path.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true)
+    private func makePathInteraction() -> CommandPathInteractionController {
+        let resolver = pathResolver
+        return CommandPathInteractionController(view: self, callbacks: .init(
+            probe: { [weak self] in self?.probePath(at: $0) ?? .none },
+            publish: { [weak self] in self?.publishPath(id: $0, match: $1, open: $2) },
+            clear: { [weak self] in
+                if let surface = self?.surfaceView.surface { ghostty_surface_path_clear(surface) }
+            },
+            pointer: { [weak surfaceView] in surfaceView?.setCommandPathHovering($0) },
+            forward: { [weak surfaceView] in surfaceView?.forwardPathSelectionEvent($0) }
+        ), resolve: { await resolver.match($0) })
     }
+
+    private func probePath(at point: NSPoint) -> CommandPathInteractionController.ProbeResult {
+        guard bounds.contains(point), let superview,
+              let surface = surfaceView.surface else { return .none }
+        // Search fields, the native editor, and the scroller must never inherit
+        // an output path's hover simply because their rectangles overlap Metal.
+        // Call the superclass directly: asking the window to hit-test again
+        // during mouseDown would recurse through this host's interception.
+        let target = super.hitTest(convert(point, to: superview))
+        guard target === surfaceView || target === self else { return .none }
+        var probe = ghostty_path_probe_s()
+        switch ghostty_surface_path_probe(surface, point.x, point.y, &probe) {
+        case GHOSTTY_PATH_PROBE_BUSY: return .busy
+        case GHOSTTY_PATH_PROBE_HIT: break
+        default: return .none
+        }
+        let text = withUnsafeBytes(of: probe.text) { String(bytes: $0.prefix(Int(probe.text_len)), encoding: .utf8) }
+        let uri = withUnsafeBytes(of: probe.uri) { String(bytes: $0.prefix(Int(probe.uri_len)), encoding: .utf8) }
+        let id = withUnsafeBytes(of: probe.block_id) { String(bytes: $0.prefix { $0 != 0 }, encoding: .utf8) }
+        guard let text, let uri else { return .none }
+        let kind: CommandPathProbe.Kind
+        switch probe.kind {
+        case GHOSTTY_PATH_KIND_HEADER: kind = .header
+        case GHOSTTY_PATH_KIND_LOCAL_OSC8: kind = .localLink
+        default: kind = .output
+        }
+        return .hit(CommandPathProbe(id: probe.hit_id, kind: kind, text: text, hoverByte: Int(probe.hover_byte), uri: uri,
+                                     workingDirectory: id.flatMap { session.blockMetadata[$0]?.workingDirectory }))
+    }
+
+    private func publishPath(id: UInt64, match: CommandPathMatch, open: Bool) -> [NSRect]? {
+        guard let surface = surfaceView.surface else { return nil }
+        var result = ghostty_path_rects_s()
+        guard ghostty_surface_path_publish(surface, id, UInt32(match.start), UInt32(match.length), open, &result) else {
+            return nil
+        }
+        return withUnsafeBytes(of: result.rects) { bytes in
+            bytes.bindMemory(to: ghostty_path_rect_s.self).prefix(min(8, Int(result.count))).map {
+                NSRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+            }
+        }
+    }
+
+    @objc private func pathViewportChanged() { paths.geometryWillChange(); paths.refresh() }
 
     private func layoutNotice(foreground: NSColor) {
         let message = session.notice

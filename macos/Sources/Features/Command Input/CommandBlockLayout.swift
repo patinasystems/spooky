@@ -23,6 +23,7 @@ struct CommandTerminalLayout: Equatable {
     var rows: UInt32 = 0
     var scrollbackRows: UInt64 = 0
     var activeCursorRow: UInt32 = 0
+    var compactPromptRows: UInt32 = 0
     var unreservedGridHeight: CGFloat = 0
     var cellWidth: CGFloat = 8
     var cellHeight: CGFloat = 18
@@ -58,6 +59,7 @@ struct CommandTerminalLayout: Equatable {
         result.rows = layout.rows
         result.scrollbackRows = layout.scrollback_rows
         result.activeCursorRow = layout.active_cursor_row
+        result.compactPromptRows = layout.compact_prompt_rows
         result.unreservedGridHeight = layout.unreserved_grid_height
         result.cellWidth = max(1, layout.cell_width)
         result.cellHeight = max(1, layout.cell_height)

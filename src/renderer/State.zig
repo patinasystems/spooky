@@ -37,8 +37,18 @@ native_input_cursor_suppressed: bool = false,
 /// disables that policy without changing the shell's cursor modes.
 native_input_enabled: bool = false,
 native_input_terminal_requested: bool = false,
+/// Resolved system accent, published by the native host only when it changes.
+/// Nil preserves upstream foreground colors on all other frontends.
+native_input_accent: ?terminalpkg.color.RGB = null,
 /// Captions only; positions are resolved from terminal pins by the renderer.
 command_chrome: renderer.CommandChrome = .{},
+/// Footer presentation does not change the terminal grid or its scroll offsets.
+native_viewport: renderer.NativeViewport = .{},
+/// One host-validated local path, copied and bounded; never owns filesystem I/O.
+path_hover: renderer.PathHover = .{},
+/// Only suppresses intermediate blank redraws for an empty native submission.
+/// Parsing, PTY writes, shell hooks, and DEC2026 remain independent.
+native_submission: renderer.NativeSubmissionGate = .{},
 
 /// Mouse state. This only contains state relevant to what renderers
 /// need about the mouse.
@@ -61,6 +71,20 @@ handoff_gen: std.atomic.Value(u32) = .init(0),
 /// demanding critical section (the renderer's frame snapshot) is
 /// microseconds, so one millisecond is generous.
 const handoff_timeout_ns = 1 * std.time.ns_per_ms;
+
+/// Native editing, unlike a raw shell editor, has no ZLE text to redraw.
+/// Caller holds mutex; continuation and alternate ownership remain upstream.
+pub fn preservesNativePrompt(self: *const State) bool {
+    return self.native_input_enabled and !self.native_input_terminal_requested and
+        self.terminal.screens.active_key == .primary and self.terminal.native_prompt_active;
+}
+
+/// Caller holds mutex. The same bounds govern paint, input, and scrollbars.
+pub fn nativeViewport(self: *const State, size: renderer.Size) renderer.NativeViewport.Resolved {
+    if (!self.native_input_enabled or self.native_input_terminal_requested)
+        return .{ .rows = self.terminal.rows };
+    return self.native_viewport.resolve(self.terminal, size);
+}
 
 /// Acquire `mutex` while signaling demand for it. Use this instead of
 /// locking the mutex directly on threads that must not be starved by
@@ -243,4 +267,27 @@ test "preedit range shifts left at right edge" {
     try testing.expectEqual(@as(terminalpkg.size.CellCountInt, 8), range.start);
     try testing.expectEqual(@as(terminalpkg.size.CellCountInt, 9), range.end);
     try testing.expectEqual(@as(usize, 0), range.cp_offset);
+}
+
+test "native viewport prompt preservation yields to raw secondary and alternate editors" {
+    const t = std.testing;
+    var term = try terminalpkg.Terminal.init(t.io, t.allocator, .{ .cols = 20, .rows = 4 });
+    defer term.deinit(t.allocator);
+    var mutex: std.Io.Mutex = .init;
+    var state: State = .{ .mutex = &mutex, .terminal = &term, .native_input_enabled = true };
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=focus" });
+    try term.linefeed();
+    try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=focus" });
+    try t.expect(state.preservesNativePrompt());
+    state.native_input_terminal_requested = true;
+    try t.expect(!state.preservesNativePrompt());
+    state.native_input_terminal_requested = false;
+    state.native_input_enabled = false;
+    try t.expect(!state.preservesNativePrompt());
+    state.native_input_enabled = true;
+    try term.semanticPrompt(.{ .action = .prompt_start, .options_unvalidated = "k=s" });
+    try t.expect(!state.preservesNativePrompt());
+    term.native_prompt_active = true;
+    _ = try term.switchScreen(.alternate);
+    try t.expect(!state.preservesNativePrompt());
 }

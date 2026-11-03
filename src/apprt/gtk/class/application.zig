@@ -805,6 +805,10 @@ pub const Application = extern struct {
             .search_total => Action.searchTotal(target, value),
             .search_selected => Action.searchSelected(target, value),
 
+            // Native command input is currently implemented by the macOS app.
+            .native_input_boundary => return false,
+            .native_input_presented => return false,
+
             // Unimplemented
             .secure_input,
             .close_all_windows,

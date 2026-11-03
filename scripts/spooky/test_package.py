@@ -66,6 +66,24 @@ class PackageAdmissionTests(unittest.TestCase):
                     read_bundle(self.app)
                 residue.rmdir()
 
+    def test_rejects_diagnostic_capture_and_private_index_settings(self):
+        for key, value in [
+            ("SpookyWindowCaptureEnabled", True),
+            ("SpookyWindowCaptureDirectory", "/tmp/test-window"),
+            ("SpookyWindowCaptureVideo", False),
+            ("SpookyPerformanceDiagnostics", True),
+            ("SpookyPerformanceDiagnosticsPath", "/tmp/test-ui.jsonl"),
+            ("SpookyFileSearchDiagnosticsPath", "/tmp/test-index.jsonl"),
+            ("SpookyFileSearchDiagnosticIndexDirectory", "/tmp/test-index"),
+        ]:
+            with self.subTest(key=key):
+                self.info[key] = value
+                self.write_info()
+                with self.assertRaisesRegex(ValueError, "diagnostic"):
+                    read_bundle(self.app)
+                del self.info[key]
+                self.write_info()
+
     def test_preserves_internal_framework_symlinks_but_rejects_external_ones(self):
         actual = self.app / "Contents/Actual"
         actual.mkdir()

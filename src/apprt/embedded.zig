@@ -1569,6 +1569,7 @@ pub const CAPI = struct {
         rows: u32,
         scrollback_rows: u64,
         active_cursor_row: u32,
+        compact_prompt_rows: u32,
         unreserved_grid_height: f64,
         cell_width: f64,
         cell_height: f64,
@@ -1598,6 +1599,20 @@ pub const CAPI = struct {
         width: f64,
         height: f64,
     };
+
+    const PathRect = extern struct { x: f64, y: f64, width: f64, height: f64 };
+    const PathRects = extern struct { count: u32, rects: [8]PathRect };
+
+    fn pathRects(result: *PathRects, snapshot: renderer.PathHover.Snapshot, scale: apprt.ContentScale) void {
+        result.* = std.mem.zeroes(PathRects);
+        result.count = snapshot.count;
+        for (snapshot.rects[0..snapshot.count], 0..) |rect, i| result.rects[i] = .{
+            .x = @as(f64, rect.x) / scale.x,
+            .y = @as(f64, rect.y) / scale.y,
+            .width = @as(f64, rect.width) / scale.x,
+            .height = @as(f64, rect.height) / scale.y,
+        };
+    }
 
     // ghostty_clipboard_content_s
     //
@@ -2097,6 +2112,7 @@ pub const CAPI = struct {
             .rows = screen.pages.rows,
             .scrollback_rows = scrollbar.total -| scrollbar.len,
             .active_cursor_row = screen.cursor.y,
+            .compact_prompt_rows = renderer.NativeViewport.promptTailRows(term),
             .unreserved_grid_height = @as(f64, @floatFromInt(unreserved.terminal().height)) / scale.y,
             .cell_width = cell_width,
             .cell_height = cell_height,
@@ -2194,7 +2210,7 @@ pub const CAPI = struct {
         const grid = size.grid();
         if (grid.columns != term.cols or grid.rows != term.rows) return false;
         const scale = surface.content_scale;
-        const hit = state.command_chrome.pathAt(core.alloc, term, size, @floatCast(x * scale.x), @floatCast(y * scale.y)) catch return false;
+        const hit = state.command_chrome.pathAtViewport(core.alloc, term, size, @floatCast(x * scale.x), @floatCast(y * scale.y), state.nativeViewport(size)) catch return false;
         const rect = hit orelse return false;
         result.* = .{
             .id = rect.id,
@@ -2206,6 +2222,57 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Nonblocking, bounded text probe. Local path resolution belongs to the
+    /// native host's background service, never the renderer/terminal lock.
+    export fn ghostty_surface_path_probe(surface: *Surface, x: f64, y: f64, result: *renderer.PathHover.Probe) c_int {
+        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return 0;
+        const core = &surface.core_surface;
+        const state = &core.renderer_state;
+        if (!state.mutex.tryLock()) return 2;
+        const was_published = state.path_hover.published;
+        const probe = state.path_hover.probeAt(state.terminal, &state.command_chrome, core.size, state.nativeViewport(core.size), @floatCast(x * surface.content_scale.x), @floatCast(y * surface.content_scale.y));
+        const needs_refresh = was_published and !state.path_hover.published;
+        state.mutex.unlock(global.io());
+        if (needs_refresh) surface.refresh();
+        result.* = probe orelse return 0;
+        return 1;
+    }
+
+    export fn ghostty_surface_path_publish(surface: *Surface, id: u64, start: u32, length: u32, open: bool, result: *PathRects) bool {
+        const core = &surface.core_surface;
+        const state = &core.renderer_state;
+        if (!state.mutex.tryLock()) return false;
+        const snapshot = state.path_hover.publish(state.terminal, &state.command_chrome, core.size, state.nativeViewport(core.size), id, start, length, open);
+        state.mutex.unlock(global.io());
+        // A rejected publication may also have invalidated previously painted
+        // text. Refresh is cheap/coalesced, and cannot leave stale hover paint.
+        surface.refresh();
+        pathRects(result, snapshot orelse return false, surface.content_scale);
+        return true;
+    }
+
+    export fn ghostty_surface_path_clear(surface: *Surface) void {
+        const state = &surface.core_surface.renderer_state;
+        state.path_hover.requestClear();
+        surface.refresh();
+    }
+
+    export fn ghostty_surface_begin_native_empty_submission(surface: *Surface) bool {
+        const core = &surface.core_surface;
+        const state = &core.renderer_state;
+        if (!state.mutex.tryLock()) return false;
+        const admitted = state.native_input_enabled and !state.native_input_terminal_requested and
+            state.native_submission.begin(state.terminal, core.size, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
+        state.mutex.unlock(global.io());
+        if (admitted) surface.refresh();
+        return admitted;
+    }
+
+    export fn ghostty_surface_cancel_native_submission(surface: *Surface) void {
+        surface.core_surface.renderer_state.native_submission.requestCancel();
+        surface.refresh();
+    }
+
     /// Reserve native UI inside the existing Metal drawable's bottom padding.
     export fn ghostty_surface_set_native_input_inset(surface: *Surface, bottom: f64) void {
         if (!std.math.isFinite(bottom) or bottom < 0) return;
@@ -2213,6 +2280,11 @@ pub const CAPI = struct {
         surface.core_surface.setNativeInputInset(pixels) catch |err| {
             log.err("error updating native input inset err={}", .{err});
         };
+    }
+
+    /// True only while confirmed native zsh retains its pre-PTY startup insets.
+    export fn ghostty_surface_native_input_bootstrap(surface: *Surface) bool {
+        return surface.core_surface.native_input_bootstrap;
     }
 
     /// Native command margins plus the editor's bottom reservation, in logical points.
@@ -2225,6 +2297,22 @@ pub const CAPI = struct {
         ) catch |err| {
             log.err("error updating native input padding err={}", .{err});
         };
+    }
+
+    /// Publish native footer bounds independently of caption availability.
+    export fn ghostty_surface_set_native_input_viewport(surface: *Surface, height: f64, covered_rows: u32, transferring: bool) void {
+        if (!std.math.isFinite(height) or height < 0 or covered_rows > 3) return;
+        const value: renderer.NativeViewport = .{
+            .footer_height = renderer.Size.scaledInset(@min(height, 1_000_000), surface.content_scale.y),
+            .covered_rows = @intCast(covered_rows),
+            .transferring = transferring,
+        };
+        const state = &surface.core_surface.renderer_state;
+        state.mutex.lockUncancelable(global.io());
+        const changed = !std.meta.eql(state.native_viewport, value);
+        state.native_viewport = value;
+        state.mutex.unlock(global.io());
+        if (changed) surface.refresh();
     }
 
     /// Returns the PID of the foreground process for the surface PTY.
@@ -2271,6 +2359,17 @@ pub const CAPI = struct {
         state.native_input_cursor_suppressed = suppressed;
         state.native_input_enabled = enabled;
         state.native_input_terminal_requested = terminal_requested;
+        state.mutex.unlock(global.io());
+        if (changed) surface.refresh();
+    }
+
+    /// Publish the resolved native system accent without changing shell styles.
+    export fn ghostty_surface_set_native_input_accent(surface: *Surface, enabled: bool, red: u8, green: u8, blue: u8) void {
+        const state = &surface.core_surface.renderer_state;
+        const color: ?terminal.color.RGB = if (enabled) .{ .r = red, .g = green, .b = blue } else null;
+        state.mutex.lockUncancelable(global.io());
+        const changed = !std.meta.eql(state.native_input_accent, color);
+        state.native_input_accent = color;
         state.mutex.unlock(global.io());
         if (changed) surface.refresh();
     }
@@ -2391,6 +2490,28 @@ pub const CAPI = struct {
                 @truncate(@as(c_uint, @bitCast(mods))),
             )),
         );
+    }
+
+    /// Continue a platform click sequence whose earlier press another UI owned.
+    export fn ghostty_surface_mouse_button_with_click_count(
+        surface: *Surface,
+        action: input.MouseButtonState,
+        button: input.MouseButton,
+        mods: c_int,
+        click_count: u32,
+    ) bool {
+        return surface.core_surface.mouseButtonCallbackWithClickCount(
+            action,
+            button,
+            @bitCast(@as(
+                input.Mods.Backing,
+                @truncate(@as(c_uint, @bitCast(mods))),
+            )),
+            if (click_count == 0) null else @intCast(@min(click_count, 3)),
+        ) catch |err| {
+            log.err("error in mouse button callback err={}", .{err});
+            return false;
+        };
     }
 
     /// Update the mouse position within the view.
@@ -2762,6 +2883,8 @@ pub const CAPI = struct {
             const sel = sel: {
                 const screen: *terminal.Screen = surface.renderer_state.terminal.screens.active;
                 const pos = try ptr.getCursorPos();
+                if (surface.renderer_state.nativeViewport(surface.size).clip_bottom) |bottom|
+                    if (pos.y >= @as(f64, @floatFromInt(bottom))) return false;
                 const pt_viewport = surface.posToViewport(pos.x, pos.y);
                 const pin = screen.pages.pin(.{
                     .viewport = .{

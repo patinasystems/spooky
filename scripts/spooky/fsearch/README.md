@@ -32,11 +32,18 @@ after dependency updates, regenerate with `build.py --update-licenses` and revie
 The app starts one process during normal app launch and uses a private
 `~/Library/Application Support/Spooky/fsearch-names-v1` index. The helper indexes names
 in the background using upstream filesystem watching and permission-aware skips.
-Its background index workers have explicit utility QoS and pools capped at two threads,
-including subtree scans and recovery stat passes. Filename queries use a separate
+Its index/apply workers use explicit background QoS, including subtree scans and recovery
+stat passes; worker pools remain capped at two threads. Background QoS requests lower
+CPU and disk I/O priority together. A separate thread-scoped `IOPOL_THROTTLE` is deliberately
+not combined with QoS: macOS removes the thread's QoS when that legacy policy is set.
+On-demand scoped scans retain utility QoS, while filename queries use a separate
 two-thread user-initiated pool; event delivery keeps user-initiated QoS to avoid dropped
 filesystem events. These limits prioritize interactive work; they do not reduce the
-amount of filesystem metadata that the initial index must read.
+amount of filesystem metadata that the initial index must read. Background scheduling
+can make a cold crawl slower in exchange for prioritizing interactive work. I/O throttling
+is not a CPU cap: cached directory enumeration and large build-event bursts can still
+consume CPU without issuing disk I/O. This policy has no measured latency improvement
+claim until the matched capture is repeated.
 `startIndexing()` is idempotent; `indexState()` reports `creating` until the engine has
 published the loaded or newly built name index, then `ready`. The helper answers status
 outside its query queue, so polling cannot cancel or wait behind a search. The picker

@@ -180,7 +180,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         command_cells_rebuilt: bool = false,
         command_chrome_dirty: bool = true,
         command_chrome_revision: u64 = 0,
+        command_base_cells: usize = 0,
+        path_hover: renderer.PathHover.Snapshot = .{},
+        /// Absolute one-shot fail-open deadline; repeated draws never extend it.
+        native_submission_deadline_ms: ?i64 = null,
+        native_viewport: renderer.NativeViewport.Resolved = .{ .rows = 0 },
         native_input_cursor_suppressed: bool = false,
+        native_input_accent: renderer.CommandInputAccent = .{},
+        /// Copied into the encoded Metal frame, never read from the live parser
+        /// by a GPU-completion callback. Protected by draw_mutex.
+        native_presentation: renderer.NativePresentation.Snapshot = .{},
         command_caption_cache: std.AutoArrayHashMapUnmanaged([65]u8, CommandCaption) = .{},
         command_scratch: ?terminal.Terminal = null,
         command_scratch_state: terminal.RenderState = .empty,
@@ -1189,8 +1198,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :kitty @max(next -| now_ms, draw_interval_ms);
             };
 
-            // An update wake includes a draw, so it wins ties.
-            if (kitty_delay) |k| {
+            const update_delay: ?u64 = if (self.native_submission_deadline_ms) |deadline| gate: {
+                const now = std.Io.Timestamp.now(global.io(), .awake).toMilliseconds();
+                const delay: u64 = @intCast(@max(1, deadline - now));
+                break :gate if (kitty_delay) |k| @min(delay, k) else delay;
+            } else kitty_delay;
+
+            // An update wake includes a draw, so it wins ties. The native
+            // deadline uses this existing timer even if no further PTY bytes
+            // arrive. It is a watchdog, never a minimum presentation delay.
+            if (update_delay) |k| {
                 if (shader_delay == null or k <= shader_delay.?) {
                     return .{ .delay_ms = k, .kind = .update };
                 }
@@ -1434,6 +1451,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 overlay_features: []const Overlay.Feature,
                 command_chrome: ?renderer.CommandChrome.Snapshot,
                 native_input_cursor_suppressed: bool,
+                native_input_accent: renderer.CommandInputAccent,
+                native_presented_id: [65]u8,
+                native_presentation_valid: bool,
+                native_viewport: renderer.NativeViewport.Resolved,
+                path_hover: renderer.PathHover.Snapshot,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1453,9 +1475,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // If we're in a synchronized output state, we pause all rendering.
                 if (state.terminal.modes.get(.synchronized_output)) {
+                    state.native_submission.cancel();
+                    self.native_submission_deadline_ms = null;
                     log.debug("synchronized output started, skipping render", .{});
                     return;
                 }
+
+                // There must be a previously complete frame to retain.
+                if (self.terminal_state.cols == 0 or self.cells.size.rows == 0) state.native_submission.cancel();
+                if (state.native_submission.shouldHold(state.terminal, self.size, state.native_input_enabled, state.native_input_terminal_requested, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds())) {
+                    self.native_submission_deadline_ms = state.native_submission.deadline_ms;
+                    // Keep every terminal dirty flag intact. The parser and
+                    // shell continue; C/new B/output/interaction ends this.
+                    return;
+                }
+                self.native_submission_deadline_ms = null;
 
                 // If scroll-to-bottom on output is enabled, check if the final line
                 // changed by comparing the bottom-right pin. If the node pointer or
@@ -1528,7 +1562,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // naturally limits the number of calls to this method (it
                 // can be expensive) and also makes it so we don't need another
                 // cross-thread mailbox message within the IO path.
-                const scrollbar = state.terminal.screens.active.pages.scrollbar();
+                const native_viewport = state.nativeViewport(self.size);
+                const scrollbar = native_viewport.scrollbar(state.terminal.screens.active.pages.scrollbar());
 
                 // Get our preedit state
                 const preedit: ?renderer.State.Preedit = preedit: {
@@ -1589,10 +1624,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
-                    .command_chrome = if (self.command_chrome_dirty or
+                    .native_viewport = native_viewport,
+                    .native_presentation_valid = state.native_input_enabled and
+                        !state.native_input_terminal_requested and state.terminal.screens.active_key == .primary and
+                        state.terminal.last_started_command_id[0] != 0 and
+                        (native_viewport.clip_bottom == null or !state.native_viewport.transferring or
+                            renderer.NativeViewport.promptTailRows(state.terminal) > 0),
+                    .native_presented_id = state.terminal.last_started_command_id,
+                    .native_input_accent = renderer.CommandInputAccent.snapshot(state.terminal, if (state.native_input_enabled) state.native_input_accent else null),
+                    .path_hover = state.path_hover.snapshot(state.terminal, &state.command_chrome, self.size, native_viewport),
+                    .command_chrome = if (!std.meta.eql(self.native_viewport, native_viewport) or self.command_chrome_dirty or
                         state.command_chrome.revision != self.command_chrome_revision or
                         self.terminal_state.dirty != .false)
-                        try state.command_chrome.snapshot(arena_alloc, state.terminal)
+                        try state.command_chrome.snapshotWithFooter(arena_alloc, state.terminal, native_viewport.footer_top != null)
                     else
                         null,
                     .native_input_cursor_suppressed = state.terminal.screens.active_key == .primary and
@@ -1691,6 +1735,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.has_custom_shaders and self.native_input_cursor_suppressed != critical.native_input_cursor_suppressed)
                     self.cells_rebuilt = true;
                 self.native_input_cursor_suppressed = critical.native_input_cursor_suppressed;
+                if (!std.meta.eql(self.native_input_accent, critical.native_input_accent)) {
+                    self.native_input_accent = critical.native_input_accent;
+                    // C commits already-rendered input without changing its
+                    // text. Accent and pending-region changes need fresh colors.
+                    self.terminal_state.dirty = .full;
+                }
+                self.native_viewport = critical.native_viewport;
+                self.uniforms.native_clip_bottom = if (critical.native_viewport.clip_bottom) |v| @floatFromInt(v) else -1;
                 // Clear before any fallible row rebuild: an allocation failure
                 // must never leave a cached hollow terminal caret over NSTextView.
                 if (critical.native_input_cursor_suppressed) {
@@ -1703,6 +1755,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
 
                 // Build our GPU cells
+                var cells_valid = true;
                 self.rebuildCells(
                     critical.preedit,
                     renderer.cursorStyle(&self.terminal_state, .{
@@ -1718,15 +1771,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // our old buffer (frozen contents) and log it.
                     comptime assert(@TypeOf(err) == error{OutOfMemory});
                     log.warn("error rebuilding GPU cells err={}", .{err});
+                    cells_valid = false;
                 };
 
                 if (critical.native_input_cursor_suppressed) assert(self.cells.getCursorGlyph() == null);
                 if (critical.command_chrome) |snapshot| {
                     self.rebuildCommandChrome(snapshot) catch |err| {
                         self.command_cells.clearRetainingCapacity();
+                        self.command_base_cells = 0;
                         self.command_cells_rebuilt = true;
                         self.command_chrome_dirty = true;
                         log.warn("error rebuilding command chrome err={}", .{err});
+                    };
+                }
+                if (critical.command_chrome != null or !std.meta.eql(self.path_hover, critical.path_hover)) {
+                    self.rebuildPathHover(critical.path_hover) catch |err| {
+                        self.command_cells.items.len = @min(self.command_base_cells, self.command_cells.items.len);
+                        self.command_cells_rebuilt = true;
+                        self.path_hover = .{};
+                        log.warn("error rebuilding local path hover err={}", .{err});
                     };
                 }
 
@@ -1769,6 +1832,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();
+                if (cells_valid) {
+                    self.native_presentation.serial +%= 1;
+                    self.native_presentation.block_id = critical.native_presented_id;
+                    self.native_presentation.acknowledge = critical.native_presentation_valid;
+                }
             }
 
             // Start the display link now that the rebuilt frame is ready.
@@ -2122,6 +2190,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
+            if (@hasDecl(GraphicsAPI.Frame, "setNativePresentation"))
+                frame_ctx.setNativePresentation(self.native_presentation);
             return false;
         }
 
@@ -2702,21 +2772,39 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         fn rebuildCommandChrome(self: *Self, snapshot: renderer.CommandChrome.Snapshot) !void {
             self.command_cells.clearRetainingCapacity();
+            self.command_base_cells = 0;
             self.command_cells_rebuilt = true;
             self.command_chrome_dirty = true;
             const columns = self.terminal_state.cols;
             if (columns == 0 or self.cells.size.rows == 0) return;
             const fg = self.terminal_state.colors.foreground;
             const bg = self.terminal_state.colors.background;
-            const caption_layout = renderer.CommandChrome.captionLayout(columns, self.size.cell.height, self.size.command_padding);
-            self.uniforms.command_gap = @floatFromInt(caption_layout.gap);
-            self.uniforms.command_caption_scale = caption_layout.scale;
+            const legacy_layout = renderer.CommandChrome.captionLayout(columns, self.size.cell.height, self.size.command_padding, 1);
+            const padded_layout = renderer.CommandChrome.captionLayout(columns, self.size.cell.height, self.size.command_padding, 2);
+            self.uniforms.command_gap = legacy_layout.caption_y;
+            self.uniforms.command_caption_scale = legacy_layout.scale;
+            self.uniforms.command_padded_y = padded_layout.caption_y;
+            self.uniforms.command_padded_separator_y = padded_layout.separator_y;
             // Convert absolute drawable coordinates into the grid-origin
             // coordinate system used by the existing projection matrix.
-            self.uniforms.command_pinned_y = @max(0, @as(f32, @floatFromInt(self.size.screen.height)) -
-                snapshot.pinned_offset_from_bottom) - @as(f32, @floatFromInt(self.size.padding.top));
+            const footer_top: f32 = if (self.native_viewport.footer_top) |v| @floatFromInt(v) else @max(0, @as(f32, @floatFromInt(self.size.screen.height)) - snapshot.pinned_offset_from_bottom);
+            self.uniforms.command_pinned_y = footer_top - @as(f32, @floatFromInt(self.size.padding.top));
+            if (self.native_viewport.clip_bottom) |bottom| {
+                // Always opaque, even if metadata has not arrived. The same
+                // boundary clips VT text, backgrounds, images and old captions.
+                try self.command_cells.append(self.alloc, .{
+                    .atlas = .solid,
+                    .bools = .{ .no_min_contrast = true, .is_command_chrome = true, .is_pinned_command = true },
+                    .grid_pos = .{ 0, 0 },
+                    .color = .{ bg.r, bg.g, bg.b, 255 },
+                    .glyph_size = .{ 0, self.size.screen.height -| bottom },
+                    .bearings = .{ 0, @intFromFloat(@as(f32, @floatFromInt(bottom)) - footer_top) },
+                });
+            }
             for (snapshot.headers) |header| {
+                if (header.pinned and self.native_viewport.footer_top == null) continue;
                 if (!header.pinned and header.row >= self.cells.size.rows) continue;
+                const caption_layout = if (header.rows == 2) padded_layout else legacy_layout;
                 const glyphs = try self.commandCaptionGlyphs(header, caption_layout.columns);
                 const flags: @FieldType(shaderpkg.CellText, "bools") = .{
                     .no_min_contrast = true,
@@ -2725,6 +2813,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .command_top_gap = header.rows == 2,
                     .command_above_viewport = header.above_viewport,
                 };
+                var separator_flags = flags;
+                separator_flags.is_command_separator = true;
                 try self.command_cells.append(self.alloc, .{
                     .atlas = .solid,
                     .bools = flags,
@@ -2734,11 +2824,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 });
                 try self.command_cells.append(self.alloc, .{
                     .atlas = .solid,
-                    .bools = flags,
+                    .bools = separator_flags,
                     .grid_pos = .{ 0, header.row },
                     .color = .{ fg.r, fg.g, fg.b, 41 },
                     .glyph_size = .{ 0, 1 },
-                    .bearings = .{ 0, @intCast(caption_layout.gap) },
                 });
                 for (glyphs) |original| {
                     var glyph = original;
@@ -2750,6 +2839,64 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
             self.command_chrome_revision = snapshot.revision;
             self.command_chrome_dirty = false;
+            self.command_base_cells = self.command_cells.items.len;
+        }
+
+        /// Reuse the text pipeline, current font atlas, and existing chrome
+        /// buffer. Only the active validated target adds cells; no text scan,
+        /// filesystem lookup, or new render pipeline is involved.
+        fn rebuildPathHover(self: *Self, snapshot: renderer.PathHover.Snapshot) !void {
+            self.command_cells.items.len = @min(self.command_base_cells, self.command_cells.items.len);
+            self.command_cells_rebuilt = true;
+            self.path_hover = snapshot;
+            const fg = self.terminal_state.colors.foreground;
+            const flags: @FieldType(shaderpkg.CellText, "bools") = .{
+                .no_min_contrast = true,
+                .is_path_overlay = true,
+                .is_pinned_command = snapshot.pinned,
+            };
+            for (snapshot.rects[0..snapshot.count]) |rect| {
+                const pos = pathPixelPosition(rect.x, rect.y) orelse continue;
+                try self.command_cells.append(self.alloc, .{
+                    .atlas = .solid,
+                    .bools = flags,
+                    .grid_pos = pos,
+                    .glyph_size = .{ @intFromFloat(@ceil(rect.width)), @intFromFloat(@ceil(rect.height)) },
+                    .color = .{ fg.r, fg.g, fg.b, 28 },
+                });
+                if (snapshot.open) {
+                    const underline = pathPixelPosition(rect.x, rect.y + @max(0, rect.height - 1)) orelse continue;
+                    try self.command_cells.append(self.alloc, .{
+                        .atlas = .solid,
+                        .bools = flags,
+                        .grid_pos = underline,
+                        .glyph_size = .{ @intFromFloat(@ceil(rect.width)), 1 },
+                        .color = .{ fg.r, fg.g, fg.b, 204 },
+                    });
+                }
+            }
+            if (snapshot.open) if (snapshot.arrow) |rect| {
+                const pos = pathPixelPosition(rect.x, @max(0, rect.y + rect.height - @as(f32, @floatFromInt(self.size.cell.height)))) orelse return;
+                const rendered = try self.font_grid.renderCodepoint(self.alloc, 0x2192, .regular, .text, .{
+                    .cell_width = 1,
+                    .grid_metrics = self.grid_metrics,
+                }) orelse return;
+                const glyph = rendered.glyph;
+                try self.command_cells.append(self.alloc, .{
+                    .atlas = .grayscale,
+                    .bools = flags,
+                    .grid_pos = pos,
+                    .glyph_pos = .{ glyph.atlas_x, glyph.atlas_y },
+                    .glyph_size = .{ glyph.width, glyph.height },
+                    .bearings = .{ @intCast(glyph.offset_x), @intCast(glyph.offset_y) },
+                    .color = .{ fg.r, fg.g, fg.b, 230 },
+                });
+            };
+        }
+
+        fn pathPixelPosition(x: f32, y: f32) ?[2]u16 {
+            if (x < 0 or y < 0 or x > 65535 or y > 65535) return null;
+            return .{ @intFromFloat(@floor(x)), @intFromFloat(@floor(y)) };
         }
 
         /// Build the overlay as configured. Returns null if there is no
@@ -3305,11 +3452,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     cell,
                     &state.colors.palette,
                 );
-                const fg_style = style.fg(.{
+                const fg_style_base = style.fg(.{
                     .default = state.colors.foreground,
                     .palette = &state.colors.palette,
                     .bold = self.config.bold_color,
                 });
+                // Covering glyphs also derive their background from this
+                // foreground. Resolve the tint here so those glyphs use one
+                // color, while selection/search keep their original sources.
+                const fg_style = self.native_input_accent.foreground(
+                    cell,
+                    style,
+                    selected != .false,
+                    self.config.bold_color,
+                    x,
+                    y,
+                ) orelse fg_style_base;
 
                 // The final background color for the cell.
                 const bg = switch (selected) {

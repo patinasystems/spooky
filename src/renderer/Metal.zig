@@ -63,8 +63,6 @@ pub fn init(
         else => @compileError("unsupported platform for Metal"),
     };
 
-    _ = alloc;
-
     // Create a MTLCommandQueue for our app-scoped MTLDevice.
     const mtl_device = device.device;
     const queue = mtl_device.msgSend(objc.Object, objc.sel("newCommandQueue"), .{});
@@ -91,8 +89,9 @@ pub fn init(
     // Create an IOSurfaceLayer which we can assign to the view to make
     // it in to a "layer-hosting view", so that we can manually control
     // the layer contents.
-    var layer = try IOSurfaceLayer.init();
+    var layer = try IOSurfaceLayer.init(alloc);
     errdefer layer.release();
+    layer.setPresentationCallback(&nativeInputPresented, opts.rt_surface);
 
     // Add our layer to the view.
     //
@@ -234,12 +233,23 @@ pub fn initTarget(self: *const Metal, width: usize, height: usize) !Target {
 }
 
 /// Present the provided target.
-pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
+pub inline fn present(self: *Metal, target: Target, sync: bool, snapshot: rendererpkg.NativePresentation.Snapshot) !void {
     if (sync) {
-        self.layer.setSurfaceSync(target.surface);
+        self.layer.setSurfaceSync(target.surface, snapshot);
     } else {
-        try self.layer.setSurface(target.surface);
+        try self.layer.setSurface(target.surface, snapshot);
     }
+}
+
+/// Called on main only after actual layer assignment, with no renderer lock.
+fn nativeInputPresented(context: ?*anyopaque, snapshot: rendererpkg.NativePresentation.Snapshot) void {
+    const surface: *apprt.Surface = @ptrCast(@alignCast(context orelse return));
+    _ = surface.app.performAction(.{ .surface = &surface.core_surface }, .native_input_presented, .{
+        .serial = snapshot.serial,
+        .block_id = @ptrCast(&snapshot.block_id),
+    }) catch |err| {
+        log.warn("native input presentation callback failed err={}", .{err});
+    };
 }
 
 /// Returns the options to use when constructing buffers.

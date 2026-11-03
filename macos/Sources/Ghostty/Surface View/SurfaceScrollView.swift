@@ -13,13 +13,14 @@ import Combine
 /// - `documentView`: A blank NSView whose height represents total scrollback (in pixels)
 /// - `surfaceView`: The actual Ghostty renderer, positioned to fill the visible rect
 class SurfaceScrollView: NSView {
-    private let scrollView: NSScrollView
+    private let scrollView: SurfaceNativeScrollView
     private let documentView: NSView
     private let surfaceView: Ghostty.SurfaceView
     private var observers: [NSObjectProtocol] = []
     private var cancellables: Set<AnyCancellable> = []
     private var scrollSynchronization = SurfaceScrollSynchronization()
     private var isSynchronizingScrollView = false
+    private var nativeFooterHeight: CGFloat = 0
 
     /// The last row position sent via scroll_to_row action. Used to avoid
     /// sending redundant actions when the user drags the scrollbar but stays
@@ -30,7 +31,7 @@ class SurfaceScrollView: NSView {
         self.surfaceView = surfaceView
         // The scroll view is our outermost view that controls all our scrollbar
         // rendering and behavior.
-        scrollView = NSScrollView()
+        scrollView = SurfaceNativeScrollView()
         scrollView.hasVerticalScroller = false
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = false
@@ -190,8 +191,10 @@ class SurfaceScrollView: NSView {
     /// Keep the history scroller above native footer controls without changing
     /// the clip view, Metal drawable, document range, or subprocess dimensions.
     func setNativeFooterHeight(_ height: CGFloat) {
+        nativeFooterHeight = height
         if SurfaceScrollerTrack.applyBottomInset(height, to: scrollView) {
             updateTrackingAreas()
+            synchronizeScrollView()
         }
     }
 
@@ -244,6 +247,9 @@ class SurfaceScrollView: NSView {
         }
         let coreRow = releaseRow ?? surfaceView.scrollbar?.offset ?? 0
         let originY = scrollSynchronization.synchronize(geometry: geometry, coreRow: coreRow)
+        // Set before geometry changes, which can make AppKit reflect the clip
+        // view synchronously as well as during subsequent live scrolling.
+        scrollView.nativeKnobProportion = nativeFooterHeight > 0 ? geometry?.knobProportion : nil
 
         // Update the document height to give our scroller the correct proportions
         documentView.frame.size.height = geometry?.documentHeight ?? scrollView.contentSize.height
@@ -389,6 +395,20 @@ class SurfaceScrollView: NSView {
     }
 }
 
+/// The full-size blank document preserves terminal scroll range, while the
+/// native footer reduces visible terminal rows. Keep that row-based thumb size
+/// through AppKit's own reflections, including those during a live drag.
+class SurfaceNativeScrollView: NSScrollView {
+    var nativeKnobProportion: CGFloat?
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        super.reflectScrolledClipView(clipView)
+        if let nativeKnobProportion {
+            verticalScroller?.knobProportion = nativeKnobProportion
+        }
+    }
+}
+
 enum SurfaceScrollerTrack {
     @MainActor
     @discardableResult
@@ -411,6 +431,7 @@ struct SurfaceScrollSynchronization {
         let cellHeight: CGFloat
         let viewportHeight: CGFloat
         let documentHeight: CGFloat
+        let knobProportion: CGFloat
 
         init?(total: UInt64, visibleRows: UInt64, cellHeight: CGFloat, viewportHeight: CGFloat) {
             guard cellHeight.isFinite, cellHeight > 0,
@@ -422,6 +443,7 @@ struct SurfaceScrollSynchronization {
             self.cellHeight = cellHeight
             self.viewportHeight = viewportHeight
             self.documentHeight = documentHeight
+            self.knobProportion = total == 0 ? 1 : min(1, CGFloat(visibleRows) / CGFloat(total))
         }
 
         func clampedRow(_ row: CGFloat) -> CGFloat {

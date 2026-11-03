@@ -11,6 +11,7 @@ layout(binding = 1, std430) readonly buffer bg_cells {
 };
 
 vec4 cell_bg() {
+    if (native_clip_bottom >= 0 && gl_FragCoord.y >= native_clip_bottom) discard;
     uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
     ivec2 grid_pos = ivec2(floor((gl_FragCoord.xy - grid_padding.wx) / cell_size));
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;

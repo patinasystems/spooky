@@ -27,6 +27,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     private var heightReportScheduled = false
     private var configuredBackgroundColor: NSColor?
 
+    /// Updated synchronously by TextKit; the notification stays deferred so a
+    /// host can use current font metrics before publishing terminal padding.
+    var contentHeight: CGFloat { latestHeight + Self.padding * 2 }
+
     override init(frame frameRect: NSRect) {
         let contentFrame = NSRect(origin: .zero, size: frameRect.size)
         textView = CommandTextView(frame: contentFrame, textContainer: nil)
@@ -55,7 +59,8 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.onRequestHistory = { [weak self] in self?.onRequestHistory($0) }
         textView.onCancelHistory = { [weak self] in self?.onCancelHistory() }
         textView.canRequestFocus = { [weak self] in self?.canRequestFocus() ?? false }
-        toolTip = "Right accepts a suggestion. Tab or Down opens options; Tab or Return accepts. "
+        toolTip = "Right or Tab accepts a suggestion. Up/Down selects options. "
+            + "Return accepts after menu navigation; otherwise it runs the typed command. "
             + "Up on the first visual line recalls history; Down on the last restores your draft. "
             + "Option Tab inserts a tab. Shift Return adds a line. Type @ for files."
     }
@@ -147,7 +152,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.heightReportScheduled = false
-            self.onContentHeightChanged(self.latestHeight + Self.padding * 2)
+            self.onContentHeightChanged(self.contentHeight)
         }
     }
 }

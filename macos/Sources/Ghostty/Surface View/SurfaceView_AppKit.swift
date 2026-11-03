@@ -85,6 +85,9 @@ extension Ghostty {
 
         // Whether the pointer should be visible or not
         @Published private(set) var pointerStyle: CursorStyle = .horizontalText
+        weak var commandPathInteraction: CommandPathInteractionController?
+        private var commandPathHovering = false
+        private var terminalCursorShape = GHOSTTY_MOUSE_SHAPE_TEXT
 
         // Whether the mouse is currently over this surface
         @Published private(set) var mouseOverSurface: Bool = false
@@ -421,6 +424,7 @@ extension Ghostty {
         }
 
         deinit {
+            if let surface { ghostty_surface_cancel_native_submission(surface) }
             // Resolve clipboard callback state while surfaceModel is still
             // alive. The request's weak SurfaceView reference is already nil
             // during deinit, so didSet passes this instance explicitly.
@@ -471,6 +475,10 @@ extension Ghostty {
 
             // Notify libghostty
             ghostty_surface_set_focus(surface, focused)
+            if !focused {
+                ghostty_surface_cancel_native_submission(surface)
+                commandInputSession?.cancelSubmittedEcho()
+            }
 
             // Update our secure input state if we are a password input
             if passwordInput {
@@ -522,6 +530,8 @@ extension Ghostty {
         }
 
         func setCursorShape(_ shape: ghostty_action_mouse_shape_e) {
+            terminalCursorShape = shape
+            guard !commandPathHovering else { return }
             switch shape {
             case GHOSTTY_MOUSE_SHAPE_DEFAULT:
                 pointerStyle = .default
@@ -585,6 +595,35 @@ extension Ghostty {
             // mouse-hide-while-typing is the only use case so this is the
             // preferred method.
             NSCursor.setHiddenUntilMouseMoves(!visible)
+        }
+
+        func setCommandPathHovering(_ hovering: Bool) {
+            commandPathHovering = hovering
+            if hovering {
+                pointerStyle = .link
+                NSCursor.setHiddenUntilMouseMoves(false)
+                NSCursor.pointingHand.set()
+            } else {
+                setCursorShape(terminalCursorShape)
+                if window?.isKeyWindow == true { pointerStyle.cursor.set() }
+            }
+        }
+
+        /// A path click becomes ordinary terminal selection once it is dragged.
+        /// Replay its original press before movement so no release is orphaned.
+        func forwardPathSelectionEvent(_ event: NSEvent) {
+            switch event.type {
+            case .leftMouseDown, .rightMouseDown:
+                suppressNextLeftMouseUp = false
+                window?.makeFirstResponder(self)
+                mouseMoved(with: event)
+                if event.type == .leftMouseDown { mouseDown(with: event) } else { rightMouseDown(with: event) }
+            case .leftMouseDragged: mouseDragged(with: event)
+            case .rightMouseDragged: rightMouseDragged(with: event)
+            case .leftMouseUp: mouseUp(with: event)
+            case .rightMouseUp: rightMouseUp(with: event)
+            default: break
+            }
         }
 
         // MARK: - Title
@@ -732,6 +771,9 @@ extension Ghostty {
             // get forwarded to the terminal as a mouse click.
             if NSApp.isActive && window.isKeyWindow {
                 window.makeFirstResponder(self)
+                // A path's first press intentionally retained editor focus.
+                // Its real second/third press must still select terminal text.
+                if commandPathInteraction?.selectionClickCount(for: event) != nil { return event }
                 suppressNextLeftMouseUp = true
                 return nil
             }
@@ -752,7 +794,9 @@ extension Ghostty {
 
             // Command keyUp events are never sent to the normal responder chain
             // so we send them here.
-            guard focused else { return event }
+            guard NativeCommandFocus.ownsTerminalKeyboard(
+                paneIsFocused: focused, firstResponder: window?.firstResponder, surface: self
+            ) else { return event }
             self.keyUp(with: event)
             return nil
         }
@@ -941,7 +985,12 @@ extension Ghostty {
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
-            ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+            if let count = commandPathInteraction?.selectionClickCount(for: event) {
+                ghostty_surface_mouse_button_with_click_count(surface, GHOSTTY_MOUSE_PRESS,
+                                                             GHOSTTY_MOUSE_LEFT, mods, count)
+            } else {
+                ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
+            }
         }
 
         override func mouseUp(with event: NSEvent) {
@@ -1036,6 +1085,7 @@ extension Ghostty {
         }
 
         override func mouseExited(with event: NSEvent) {
+            commandPathInteraction?.pointerExited()
             mouseOverSurface = false
             mouseLocationInSurface = nil
             guard let surfaceModel else { return }
@@ -1054,6 +1104,7 @@ extension Ghostty {
                 mods: .init(nsFlags: event.modifierFlags)
             )
             surfaceModel.sendMousePos(mouseEvent)
+
         }
 
         override func mouseMoved(with event: NSEvent) {
@@ -1069,6 +1120,8 @@ extension Ghostty {
                 mods: .init(nsFlags: event.modifierFlags)
             )
             surfaceModel.sendMousePos(mouseEvent)
+
+            commandPathInteraction?.pointerMoved(with: event)
 
             // Handle focus-follows-mouse
             if let window,
@@ -1094,6 +1147,7 @@ extension Ghostty {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            commandPathInteraction?.geometryWillChange()
             let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp, kind: .scroll)
             defer { CommandInputDiagnostics.endInput(input) }
             guard let surfaceModel else { return }
@@ -1350,13 +1404,12 @@ extension Ghostty {
             // to receive any other event type here.
             guard event.type == .keyDown else { return false }
 
-            // Only process events if we're focused. Some key events like C-/ macOS
-            // appears to send to the first view in the hierarchy rather than the
-            // the first responder (I don't know why). This prevents us from handling it.
-            // Besides C-/, its important we don't process key equivalents if unfocused
-            // because there are other event listeners for that (i.e. AppDelegate's
-            // local event handler).
-            if !focused {
+            // AppKit offers key equivalents throughout the view hierarchy.
+            // Pane focus stays true during native editing for renderer priority,
+            // but only the actual terminal responder may consume PTY bindings.
+            if !NativeCommandFocus.ownsTerminalKeyboard(
+                paneIsFocused: focused, firstResponder: window?.firstResponder, surface: self
+            ) {
                 return false
             }
 

@@ -545,6 +545,7 @@ pub fn resize(
             .{
                 .cols = grid_size.columns,
                 .rows = grid_size.rows,
+                .preserve_prompt = self.renderer_state.preservesNativePrompt(),
                 .cell_size_px = .{
                     .width = self.size.cell.width,
                     .height = self.size.cell.height,
@@ -705,9 +706,19 @@ pub fn focusGained(self: *Termio, td: *ThreadData, focused: bool) !void {
 pub fn processOutput(self: *Termio, buf: []const u8) void {
     // We are modifying terminal state from here on out and we need
     // the lock to grab our read data.
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
-    self.processOutputLocked(buf);
+    const native_boundary = boundary: {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        self.processOutputLocked(buf);
+        const pending = self.terminal_stream.handler.native_input_boundary_pending;
+        self.terminal_stream.handler.native_input_boundary_pending = false;
+        break :boundary pending;
+    };
+    if (native_boundary) {
+        // Publish after unlocking. The app reads the latest durable B/C IDs;
+        // several markers in one batch need only one wakeup and no payload.
+        _ = self.surface_mailbox.push(.native_input_boundary, .{ .forever = {} });
+    }
 }
 
 /// Process output from readdata but the lock is already held.

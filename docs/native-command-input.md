@@ -53,17 +53,51 @@ text input, selection, undo, IME, menus, and accessibility retain their platform
 behavior. These changes do not remove the upstream SwiftUI application shell.
 
 Native command panes add six logical points of left/right padding to terminal
-geometry and six-point bottom padding. New prompts and the dock reserve one
-compact header row, keeping the caption readable without an extra blank line
-before the input. The separator and caption use the compact six-point inset;
-older two-row scrollback retains its original geometry. Output text keeps its
+geometry and six-point bottom padding. New prompts and the dock reserve two
+terminal rows for the header, providing six logical points above and below the
+caption at normal font sizes. The separator occupies the preceding block's
+bottom margin; terminal-row rounding stays in that margin. Older one-row
+scrollback retains its actual geometry instead of overlapping command text.
+The separator and caption also use the six-point horizontal inset. Output text keeps its
 normal cell size and selection coordinates.
-The multiline editor has six-point padding on every side. Completion and
+The multiline editor has six-point padding on every side. Its blank top inset
+overlaps the header's blank bottom inset, so the visible path-to-input gap is
+six points, rather than the sum of two insets. Completion and
 terminal search share an AppKit overlay style, and Cmd+F routes from the editor
 to the existing terminal search engine. Clicking the printed directory copies
 its full absolute path; Command-click or Control-click opens it in Finder.
 The click region comes from the renderer's caption geometry; branch/status text
 is not a directory target. Directory clicks do not enumerate files or open a popover.
+
+Headers and existing local filenames/paths in command output share one hover
+interaction. Hover adds a highlight; holding Command or Control adds an underline
+and a right arrow where a free neighboring cell permits it. A completed click
+copies the absolute path and briefly shows “Copied to clipboard” above the
+target. A modifier-click opens directories or reveals files in Finder. Dragging
+still selects terminal text; Shift/Option clicks retain ordinary selection.
+An initial click does not require prior hover: its bounded hit is validated
+asynchronously, then activated on release. Failed validation or a 250 ms
+fail-open deadline replays the original press/release to terminal selection;
+dragging forwards immediately. Repeated clicks preserve word/line selection.
+
+The core maps a bounded visible logical line to UTF-8 bytes and terminal cells.
+The AppKit controller resolves literal candidates on a filesystem actor, with a
+small expiring positive/negative cache. Relative names use the originating
+command's directory, not the latest prompt. Quoted/escaped names, spaces,
+Unicode, diagnostic line/column suffixes, and local file OSC8 links are handled
+without evaluating strings as shell code. Unvalidated words keep their normal
+terminal behavior. Context is bounded to 4,096 UTF-8 bytes and eight visible
+wrapped rows; clipped or larger tokens are left alone. Alternate screens and
+applications with mouse reporting retain their own interactions.
+Historic directory ownership also has a 256-page-link lookup budget. If that
+cannot establish the originating command, absolute paths still work and relative
+names keep ordinary terminal behavior rather than guessing a directory.
+
+Highlight, underline, and arrow cells use the existing Metal text/chrome buffer
+and font atlas. No filesystem access occurs under the terminal lock or in the
+renderer. Only the current hit is revalidated against output/viewport changes;
+there is no per-frame history scan. The copy tooltip uses the same nonactivating
+AppKit material and overlay layer as completion, without taking editor focus.
 
 Selection highlighting and shell syntax coloring are separate capabilities.
 Native selection and a zsh-backed AppKit completion menu are implemented;
@@ -72,15 +106,35 @@ is the behavior reference, not a dependency on Warp's application stack.
 
 ## One terminal transcript, grouped into blocks
 
-Each primary prompt has a stable block ID. The shell reserves one blank terminal
-row for its GPU-rendered header, then marks the input position. A docked current
+Each primary prompt has a stable block ID. The shell reserves two blank terminal
+rows for its GPU-rendered header, then marks the input position. A docked current
 header replaces its in-grid caption instead of drawing a second copy.
 ZLE renders the accepted
 command through its normal display/acceptance path. The native editor does not
 print a second command copy.
 
+Shell acceptance and visual replacement are separate boundaries. A parsed C
+immediately gives keyboard ownership to the terminal. For a nonempty submitted
+draft up to 16 KiB, one reused, noninteractive native text view can retain its
+old appearance until a frame carrying the same C ID is assigned to the Metal
+layer. Immutable IDs and serials travel with the encoded frame; older queued
+frames cannot acknowledge a newer command. Clearing the retained text happens
+in the layer-assignment transaction, without waiting for the GPU on the UI
+thread. The existing geometry observer enforces a 100 ms fail-open ceiling;
+resize, focus/Space changes, alternate screens, and explicit terminal mode also
+cancel it. Larger drafts skip the copy to avoid a second large TextKit layout.
+The next prompt uses the real editor independently while this brief visual
+handoff finishes. The terminal transcript still contains only the shell echo.
+
 Command output stays in the same Ghostty terminal model and PTY. ANSI styles,
 hyperlinks, cursor movement, scrollback, and selection remain terminal behavior.
+Submitted command text uses the macOS accent color when its terminal foreground
+is otherwise the default. Explicit shell colors, inverse text, selection, and
+search highlighting retain precedence; output stays unchanged. AppKit resolves
+the accent on appearance/system-color changes, then the ordinary renderer text
+pass consumes cached RGB bytes. The current unsubmitted shell draft is excluded
+using viewport-bounded input-marker checks. No command-history scan, new glyph
+atlas, or additional GPU pass is introduced for tinting.
 There is no stdout pipe, second text renderer, screenshot reconstruction, or
 plaintext replay. Headers show metadata from the command's original context,
 rather than reusing the current directory for older commands.
@@ -193,7 +247,7 @@ continuation prompts retain it. The protocol emits:
 
 | Marker | Meaning |
 | --- | --- |
-| `OSC 133;A;aid=<id>` | Start of the reserved header row, followed by one newline. |
+| `OSC 133;A;aid=<id>` | Start of the reserved header band, followed by two newlines. |
 | `OSC 133;B;aid=<id>` | Input position, also emitted on ZLE redisplay. Repeated B markers do not create new blocks. |
 | `OSC 133;C;aid=<id>` | `preexec` has started command execution. |
 | `OSC 133;D;<status>;aid=<id>` | Completion, emitted before the next primary block or during normal shell exit. |
@@ -304,6 +358,7 @@ shadow for completion, file picking, and terminal search. Reduce Transparency
 uses an opaque fill. Navigation and layout changes do not animate. These small
 controls remain separate from Ghostty's existing Metal terminal render pass.
 
-Command headers retain a single-row layout. Their text is at least 87.5% of the
-terminal font size, independently of the 6pt block padding, and path hit bounds
-use the same renderer layout as the visible glyphs.
+The caption remains one line at 87.5% of the terminal font size inside the
+two-row header band. At unusually small terminal fonts, insets adapt to the
+available space rather than shrinking the caption to unreadable text. Path hit
+bounds and the pinned footer use the same layout as the visible glyphs.

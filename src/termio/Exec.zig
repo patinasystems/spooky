@@ -56,6 +56,13 @@ pub fn init(
     return .{ .subprocess = subprocess };
 }
 
+/// Exec has resolved the actual command and removed this marker for all
+/// non-zsh commands. Query before starting the subprocess, never the parent env.
+pub fn nativeInputEnabled(self: *const Exec) bool {
+    const env = self.subprocess.env orelse return false;
+    return env.get("PATINA_NATIVE_INPUT_DIR") != null;
+}
+
 pub fn deinit(self: *Exec) void {
     self.subprocess.deinit();
 }
@@ -2376,5 +2383,31 @@ test "init frees the env when it fails" {
             else => return err,
         };
         try testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "native input bootstrap follows the resolved command not inherited environment" {
+    const t = std.testing;
+    var config = try configpkg.Config.default(t.allocator);
+    defer config.deinit();
+    for ([_][]const [:0]const u8{ &.{ "/bin/zsh", "-i" }, &.{ "/bin/sh", "-i" }, &.{ "/bin/zsh", "-c", "true" } }, 0..) |args, index| {
+        const env = env: {
+            var value: EnvMap = .init(t.allocator);
+            errdefer value.deinit();
+            try value.put("HOME", "/tmp/spooky-bootstrap-test");
+            try value.put("SHELL", "/bin/zsh");
+            try value.put("PATINA_NATIVE_INPUT_DIR", "/tmp/spooky-bootstrap-test/bridge");
+            break :env value;
+        };
+        var exec = try init(t.allocator, .{
+            .command = .{ .direct = args },
+            .env = env,
+            .resources_dir = null,
+            .term = "xterm-ghostty",
+            .rt_pre_exec_info = .init(&config),
+            .rt_post_fork_info = .init(&config),
+        });
+        defer exec.deinit();
+        try t.expectEqual(index == 0, exec.nativeInputEnabled());
     }
 }

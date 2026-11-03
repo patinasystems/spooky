@@ -58,6 +58,34 @@ struct SurfaceScrollerTrackTests {
         #expect(scrollView.scrollerInsets.right == 1)
     }
 
+    @Test func nativeThumbSurvivesAppKitReflectionAndReturnsToDocumentGeometry() throws {
+        let scrollView = makeScrollView()
+        let scroller = try #require(scrollView.verticalScroller)
+        let document = try #require(scrollView.documentView)
+        let contentSize = scrollView.contentSize
+        let nativeProportion: CGFloat = 0.08
+        scrollView.nativeKnobProportion = nativeProportion
+        #expect(SurfaceScrollerTrack.applyBottomInset(80, to: scrollView))
+
+        // Document growth and a clip scroll trigger AppKit reflection during
+        // live operation, independently of a new terminal acknowledgment.
+        document.frame.size.height = 8_000
+        scrollView.contentView.scroll(to: NSPoint(x: 0, y: 2_000))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        #expect(abs(scroller.knobProportion - nativeProportion) < 0.000_001)
+        #expect(scrollView.contentSize == contentSize)
+        #expect(document.frame.height == 8_000)
+        #expect(scrollView.contentView.bounds.origin.y == 2_000)
+
+        scrollView.nativeKnobProportion = nil
+        #expect(SurfaceScrollerTrack.applyBottomInset(0, to: scrollView))
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        let rawProportion = contentSize.height / document.frame.height
+        #expect(abs(scroller.knobProportion - rawProportion) < 0.000_001)
+        #expect(scrollView.contentSize == contentSize)
+        #expect(scrollView.contentView.bounds.origin.y == 2_000)
+    }
+
     private func makeScrollView() -> CountingScrollView {
         let scrollView = CountingScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 600))
         scrollView.borderType = .noBorder
@@ -72,7 +100,7 @@ struct SurfaceScrollerTrackTests {
         return scrollView
     }
 
-    private final class CountingScrollView: NSScrollView {
+    private final class CountingScrollView: SurfaceNativeScrollView {
         var tileCalls = 0
         override func tile() {
             tileCalls += 1

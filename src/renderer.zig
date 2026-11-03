@@ -22,6 +22,11 @@ pub const Overlay = @import("renderer/Overlay.zig");
 pub const Thread = @import("renderer/Thread.zig");
 pub const State = @import("renderer/State.zig");
 pub const CommandChrome = @import("renderer/CommandChrome.zig");
+pub const CommandInputAccent = @import("renderer/CommandInputAccent.zig");
+pub const NativeViewport = @import("renderer/NativeViewport.zig");
+pub const PathHover = @import("renderer/PathHover.zig");
+pub const NativeSubmissionGate = @import("renderer/NativeSubmissionGate.zig");
+pub const NativePresentation = @import("renderer/NativePresentation.zig");
 pub const CursorStyle = cursor.Style;
 pub const Message = message.Message;
 pub const Size = size.Size;
@@ -68,4 +73,9 @@ test {
     _ = Thread;
     _ = State;
     _ = CommandChrome;
+    _ = CommandInputAccent;
+    _ = NativeViewport;
+    _ = PathHover;
+    _ = NativeSubmissionGate;
+    _ = NativePresentation;
 }

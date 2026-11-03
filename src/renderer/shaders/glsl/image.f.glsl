@@ -7,6 +7,7 @@ in vec2 tex_coord;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
+    if (native_clip_bottom >= 0 && screen_size.y - gl_FragCoord.y >= native_clip_bottom) discard;
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
 
     vec4 rgba = texture(image, tex_coord);

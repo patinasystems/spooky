@@ -352,9 +352,10 @@ class BaseTerminalController: NSWindowController,
         for surfaceView in surfaceTree {
             // Our focus state requires that this window is key and our currently
             // focused surface is the surface in this view.
-            let focused: Bool = (window?.isKeyWindow ?? false) &&
-                surfaceView == focusedSurface &&
-                surfaceView.isFirstResponder
+            let focused = NativeCommandFocus.isFocused(
+                windowIsKey: window?.isKeyWindow ?? false, paneIsSelected: surfaceView == focusedSurface,
+                firstResponder: window?.firstResponder, surface: surfaceView,
+                editor: NativeCommandSurfaceHost.focusedEditor(for: surfaceView))
             surfaceView.focusDidChange(focused)
             if focused { newlyFocused = surfaceView }
         }
@@ -1269,6 +1270,9 @@ class BaseTerminalController: NSWindowController,
         // Sync on the next runloop so split focus has settled first.
         DispatchQueue.main.async {
             self.syncFocusToSurfaceTree()
+            #if SPOOKY_WINDOW_CAPTURE
+            if let window = self.window { CommandWindowCapture.startIfRequested(for: window) }
+            #endif
         }
     }
 

@@ -51,6 +51,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     private var contentWidth = CommandOverlayStyle.minimumPopupWidth
     private var anchorLocation: Int?
     var onAccept: (Int) -> Void = { _ in }
+    var isVisible: Bool { panel.isVisible }
 
     override convenience init() {
         self.init(table: CommandCompletionTable())
@@ -77,7 +78,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("completion"))
         table.addTableColumn(column)
         table.headerView = nil
-        table.rowHeight = CommandOverlayStyle.rowHeight
+        table.rowHeight = Self.rowHeight(for: font)
         table.intercellSpacing = .zero
         table.autoresizingMask = [.width]
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -192,10 +193,10 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         return min(CommandOverlayStyle.maximumPopupWidth, max(headerMinimumWidth, max(contentWidth, headerWidth)))
     }
 
-    /// Grows with the editor font so large faces never clip; 6pt above and below.
+    /// Compact rows keep 3pt above/below the editor font and grow for large faces.
     static func rowHeight(for font: NSFont) -> CGFloat {
         let line = font.ascender - font.descender + font.leading
-        return max(CommandOverlayStyle.rowHeight, ceil(line + CommandOverlayStyle.inset * 2))
+        return max(24, ceil(line + 6))
     }
 
     /// Fits the panel on whichever side of the caret has room, trimming the

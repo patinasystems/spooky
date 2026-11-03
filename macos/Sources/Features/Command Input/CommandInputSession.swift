@@ -12,6 +12,9 @@ final class CommandInputSession {
     var onChange: (() -> Void)?
     var onCompletion: ((CommandCompletionResponse) -> Void)?
     var onHistory: ((CommandHistoryResponse) -> Void)?
+    var onRetainSubmittedEcho: (() -> Bool)?
+    var onReleaseSubmittedEcho: (() -> Void)?
+    private var submissionPresentation = CommandSubmissionPresentation()
     private var hasEditorFont = false
 
     let directory: URL
@@ -25,6 +28,7 @@ final class CommandInputSession {
     private var fileEvents: CommandInputFileEvents?
     private var deadlineTask: Task<Void, Never>?
     private var geometryTask: Task<Void, Never>?
+    private var boundaryRefreshTask: Task<Void, Never>?
     private var submissionTask: Task<Void, Never>?
     private var generation: String?
     private var acceptedGeneration: String?
@@ -52,6 +56,9 @@ final class CommandInputSession {
     private(set) var layout = CommandTerminalLayout()
     private(set) var blockMetadata: [String: CommandBlockMetadata] = [:]
     private(set) var currentBlockID: String?
+    /// The caption/draft identity that has passed the parsed primary-input gate.
+    /// Filesystem state may already name the following prompt during handoff.
+    private(set) var presentedBlockID: String?
     private(set) var editorFont = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
     var notice: String? {
@@ -69,6 +76,10 @@ final class CommandInputSession {
     var canReturnToEditor: Bool { promptIsPresentable && pending == nil && handoff == nil && !failed }
     var isRecoveringDraft: Bool { recoveryVisible }
     var isTransferringSubmission: Bool { !failed && (pending != nil || handoff != nil) }
+    var isAwaitingInitialNativePrompt: Bool {
+        !receivedFirstPrompt && !failed && Date().timeIntervalSince(launchedAt) <= 5
+            && surfaceView?.childExitedMessage == nil
+    }
     var hasNativeIntegration: Bool {
         receivedFirstPrompt && bridgeAvailable && !failed && surfaceView?.childExitedMessage == nil
     }
@@ -109,6 +120,7 @@ final class CommandInputSession {
         pollingTask?.cancel()
         deadlineTask?.cancel()
         geometryTask?.cancel()
+        boundaryRefreshTask?.cancel()
         submissionTask?.cancel()
         completionTask?.cancel()
         historyTask?.cancel()
@@ -146,15 +158,35 @@ final class CommandInputSession {
         geometryTask?.cancel()
         geometryTask = Task { [weak self] in
             while !Task.isCancelled {
+                self?.expireSubmittedEcho()
                 let active = self?.needsGeometryUpdates == true
                 if active { self?.refreshGeometry() }
                 do {
-                    let transferring = self?.isTransferringSubmission == true || self?.waitingForPromptLayout == true
-                    let milliseconds = transferring ? 8 : (active ? 33 : 250)
-                    try await Task.sleep(for: .milliseconds(milliseconds))
+                    // Parser notifications drive ownership transitions. This
+                    // cadence is only the ordinary geometry/recovery fallback.
+                    let maximum: Duration = .milliseconds(active ? 33 : 250)
+                    let delay = self?.submissionPresentation.nextCheckDelay(maximum: maximum, now: .now) ?? maximum
+                    try await Task.sleep(for: delay)
                 } catch {
                     break
                 }
+            }
+        }
+    }
+
+    func terminalBoundaryChanged() {
+        CommandInputDiagnostics.mark(.boundaryNotified, id: submissionInputID)
+        fileEvents?.requestRefresh(immediate: true)
+        guard surfaceView?.surface != nil, !refreshGeometry(), boundaryRefreshTask == nil else { return }
+        // The notification is sent after the parser unlocks, but the renderer
+        // can acquire the same mutex before this callback. Retry briefly without
+        // blocking MainActor; ordinary geometry polling remains a fallback.
+        boundaryRefreshTask = Task { [weak self] in
+            defer { self?.boundaryRefreshTask = nil }
+            for _ in 0..<8 {
+                do { try await Task.sleep(for: .milliseconds(1)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                if self.refreshGeometry() { return }
             }
         }
     }
@@ -290,8 +322,8 @@ final class CommandInputSession {
         // Retain the native draft, focus, and grid reservation until the core
         // parses this command's ownership boundary or the next ready prompt.
         changed()
-        // Wake a potentially dormant 250 ms background loop immediately.
-        // Only in-flight ownership transfers use the faster cadence.
+        // Wake a potentially dormant 250 ms geometry fallback immediately.
+        // Parsed boundary notifications drive the prompt handoff itself.
         startGeometryUpdates()
         submissionTask = Task { [weak self, bridge] in
             do {
@@ -321,14 +353,20 @@ final class CommandInputSession {
                 guard let self, self.pending?.id == request.id, !Task.isCancelled else { return }
                 // This action writes only the dedicated widget trigger, never the command.
                 // Its shell widget validates the private file's prompt generation again.
-                guard let model = self.surfaceView?.surfaceModel,
-                      model.perform(action: "text:\\x1b[99;1~") else {
+                guard let model = self.surfaceView?.surfaceModel else {
                     throw BridgeError.unavailable("The terminal rejected the submit trigger.")
                 }
+                guard CommandSubmissionGate.dispatch(text: text, begin: {
+                    guard let surface = self.surfaceView?.surface else { return false }
+                    return ghostty_surface_begin_native_empty_submission(surface)
+                }, cancel: { self.cancelSubmissionPresentation() }, trigger: {
+                    model.perform(action: "text:\\x1b[99;1~")
+                }) else { throw BridgeError.unavailable("The terminal rejected the submit trigger.") }
                 CommandInputDiagnostics.mark(.submissionTriggerQueued, id: inputID)
                 CommandInputDiagnostics.end(dispatchTiming)
             } catch {
                 guard let self, self.pending?.id == request.id else { return }
+                self.cancelSubmissionPresentation()
                 self.pending = nil
                 self.submissionTiming = nil
                 self.submissionInputID = nil
@@ -343,6 +381,7 @@ final class CommandInputSession {
     }
 
     func useTerminal() {
+        cancelSubmissionPresentation()
         completionTask?.cancel()
         historyTask?.cancel()
         terminalRequested = true
@@ -354,10 +393,29 @@ final class CommandInputSession {
         changed()
     }
 
+    private func cancelSubmissionPresentation() {
+        cancelSubmittedEcho()
+        if let surface = surfaceView?.surface { ghostty_surface_cancel_native_submission(surface) }
+    }
+
+    func nativeInputPresented(blockID: String?, serial: UInt64) {
+        if submissionPresentation.presented(blockID: blockID, serial: serial) { onReleaseSubmittedEcho?() }
+    }
+
+    func cancelSubmittedEcho() {
+        if submissionPresentation.cancel() { onReleaseSubmittedEcho?() }
+    }
+
+    private func expireSubmittedEcho() {
+        if submissionPresentation.expire(now: .now) { onReleaseSubmittedEcho?() }
+    }
+
     func useEditor() {
         guard canReturnToEditor, surfaceView?.readonly != true else { return }
         terminalRequested = false
         recoveryVisible = false
+        presentedGeneration = generation
+        presentedBlockID = currentBlockID
         editorVisible = true
         status = "Native input · zsh"
         _ = surfaceView?.surfaceModel?.perform(action: "scroll_to_bottom")
@@ -382,14 +440,15 @@ final class CommandInputSession {
         let previous = presentationKey
         let hadFirstPrompt = receivedFirstPrompt
         var metadata = snapshot.metadata
-        if isTransferringSubmission, let currentBlockID, metadata[currentBlockID] == nil {
-            metadata[currentBlockID] = blockMetadata[currentBlockID]
+        if isTransferringSubmission, let presentedBlockID, metadata[presentedBlockID] == nil {
+            metadata[presentedBlockID] = blockMetadata[presentedBlockID]
         }
         if blockMetadata != metadata {
             blockMetadata = metadata
             changed()
         }
         if surfaceView?.childExitedMessage != nil {
+            cancelSubmissionPresentation()
             handoff = nil
             ready = false
             editorVisible = recoveryVisible
@@ -407,10 +466,12 @@ final class CommandInputSession {
                 recoveryVisible = false
                 status = "Submitting…"
             } else {
+                cancelSubmissionPresentation()
                 failed = true
                 status = "Shell rejected submission (\(receipt.reason)). Draft preserved; use terminal input."
             }
         } else if let pending, Date().timeIntervalSince(pending.started) > 5 {
+            cancelSubmissionPresentation()
             // Unknown outcome: never replay. Keep the request identity so a late receipt
             // can still be recognized, but disable further native submissions.
             failed = true
@@ -479,6 +540,7 @@ final class CommandInputSession {
         let focusRequest: UInt64
         let draft: String
         let currentBlockID: String?
+        let presentedBlockID: String?
         let transferring: Bool
         let nativeIntegration: Bool
         let prefersNativeInput: Bool
@@ -488,6 +550,7 @@ final class CommandInputSession {
     private var presentationKey: Presentation {
         Presentation(status: status, editable: isEditable, visible: editorVisible,
                      focusRequest: focusRequest, draft: draft, currentBlockID: currentBlockID,
+                     presentedBlockID: presentedBlockID,
                      transferring: isTransferringSubmission,
                      nativeIntegration: hasNativeIntegration, prefersNativeInput: prefersNativeInput,
                      historyContext: historyContext)
@@ -515,6 +578,12 @@ final class CommandInputSession {
             CommandInputDiagnostics.mark(.submissionCoreBoundaryObserved, id: submissionInputID)
         }
         CommandInputDiagnostics.mark(.submissionHandoffReleased, id: submissionInputID)
+        if layout.primary, layout.lastStartedBlockID == handoff.blockID, !draft.isEmpty {
+            cancelSubmittedEcho()
+            if submissionPresentation.begin(blockID: handoff.blockID, now: .now), onRetainSubmittedEcho?() != true {
+                cancelSubmittedEcho()
+            }
+        }
         self.handoff = nil
         CommandInputDiagnostics.end(submissionTiming)
         submissionTiming = nil
@@ -529,6 +598,7 @@ final class CommandInputSession {
         }
         if editorVisible {
             presentedGeneration = generation
+            presentedBlockID = currentBlockID
             requestEditorFocus()
         } else { focusRequest = 0 }
     }
@@ -538,6 +608,7 @@ final class CommandInputSession {
         guard presentedGeneration != generation || !editorVisible else { return }
         let shouldFocus = presentedGeneration != generation
         presentedGeneration = generation
+        presentedBlockID = currentBlockID
         editorVisible = true
         status = "Native input · zsh"
         if shouldFocus, let view = surfaceView, view.window?.isKeyWindow == true,
@@ -575,15 +646,16 @@ final class CommandInputSession {
         receivedFirstPrompt && (transferring || windowVisible)
     }
 
-    private func refreshGeometry() {
-        guard let surface = surfaceView?.surface else { return }
+    @discardableResult
+    private func refreshGeometry() -> Bool {
+        guard let surface = surfaceView?.surface else { return false }
         let diagnostic = CommandInputDiagnostics.begin(.geometrySnapshot)
         defer { CommandInputDiagnostics.end(diagnostic) }
         guard let updated = CommandTerminalLayout.read(from: surface, records: &geometryRecords) else {
             CommandInputDiagnostics.record(.geometryBusy)
-            return
+            return false
         }
-        guard updated != layout || !hasEditorFont else { return }
+        guard updated != layout || !hasEditorFont else { return true }
         CommandInputDiagnostics.record(.geometryChanged)
         if updated.blocks.map(\.id) != layout.blocks.map(\.id) {
             fileEvents?.requestRefresh()
@@ -596,10 +668,12 @@ final class CommandInputSession {
             }
         }
         receiveLayout(updated)
+        return true
     }
 
     /// Apply the same owned geometry value used by the real core and fixtures.
     func receiveLayout(_ updated: CommandTerminalLayout) {
+        if !updated.primary { cancelSubmittedEcho() }
         layout = updated
         finishHandoffIfReady()
         presentReadyPrompt()
@@ -623,6 +697,11 @@ struct CommandInputHandoff {
         if let readyGeneration, readyGeneration != generation {
             return layout.hasParsedPrimaryInput(readyBlockID)
         }
+        // Submission requires this block's B, so a different durable B must
+        // belong to a later prompt. C and that B can arrive in one PTY batch
+        // before the ready file is read. Keep the editor reservation until
+        // readiness catches up instead of briefly handing off to raw input.
+        if let parsedPrompt = layout.lastPrimaryInputBlockID, parsedPrompt != blockID { return false }
         return layout.lastStartedBlockID == blockID
     }
 }

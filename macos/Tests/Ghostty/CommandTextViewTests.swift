@@ -133,6 +133,29 @@ struct CommandTextViewTests {
         #expect(editor.textView.measuredContentHeight == 24)
     }
 
+    @Test func initialTerminalMetricsAreAvailableBeforeTheDeferredHeightReport() async {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 30))
+        var reported: [CGFloat] = []
+        editor.onContentHeightChanged = { reported.append($0) }
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 18)
+        #expect(editor.contentHeight == 30)
+        // A real surface can replace the provisional 18pt line with 17pt.
+        // At this grid boundary, retaining 30pt until the callback would
+        // request 33 rows, then immediately grow back to the correct 34.
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 17)
+        let initialHeight = editor.contentHeight
+        let reserved = initialHeight - 17 + CommandInputView.padding
+        let rows = Int(floor((596 - reserved) / 17))
+        #expect(initialHeight == 29)
+        #expect(rows == 34)
+        #expect(reported.isEmpty)
+        await drainMainQueue()
+        #expect(reported == [initialHeight])
+        #expect(editor.contentHeight == initialHeight)
+    }
+
     @Test func trailingNewlineReservesTheEmptyInsertionLine() {
         let view = makeSizedEditor(width: 400)
         view.string = "echo hello"
@@ -515,7 +538,7 @@ struct CommandTextViewTests {
         #expect(view.string == "git chp")
         #expect(view.completionItems.map(\.displayText) == ["cherry-pick"])
         #expect(view.completionItems.first?.replacementRange == NSRange(location: 4, length: 3))
-        view.keyDown(with: try returnEvent())
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
         #expect(view.string == "git cherry-pick")
         #expect(submissions == 0)
     }
@@ -553,7 +576,7 @@ struct CommandTextViewTests {
         #expect(view.completionItems.count == 1)
         #expect(view.completionItems.first?.replacementRange == NSRange(location: prefix.utf16.count, length: 4))
         view.receiveCompletions(completionResponse(to: request)) // An old result cannot replace the live filter.
-        view.keyDown(with: try returnEvent())
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
         #expect(view.string == prefix + "café\\ folder/" + suffix)
         #expect(view.selectedRange().location == prefix.utf16.count + "café\\ folder/".utf16.count)
     }
@@ -714,7 +737,7 @@ struct CommandTextViewTests {
         view.receiveCompletions(completionResponse(to: automatic))
         #expect(view.string == "git ch")
         #expect(view.completions.inlineSuggestion == "eckout")
-        #expect(!view.completions.listVisible)
+        #expect(view.completions.listVisible)
         view.keyDown(with: try keyEvent(code: 124, characters: ""))
         #expect(view.string == "git checkout")
         #expect(view.completions.inlineSuggestion == nil)
@@ -817,22 +840,46 @@ struct CommandTextViewTests {
         #expect(editor.textView.string == "git chp")
     }
 
-    @Test func tabRevealsInlineOptionsAndSecondTabAcceptsTheSelectedOption() throws {
+    @Test func automaticMenuAndGhostAppearTogetherAndFirstTabAcceptsWithoutASecondQuery() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        var requests: [CommandCompletionRequest] = []
+        var submissions = 0
+        view.onRequestCompletion = { requests.append($0) }
+        view.onSubmit = { _ in submissions += 1; return true }
+        view.completions.requestAutomaticNow()
+        view.receiveCompletions(completionResponse(to: try #require(requests.first)))
+        #expect(view.completions.listVisible)
+        #expect(view.completions.inlineSuggestion == "eckout")
+        #expect(view.string == "git ch")
+        let manager = try #require(view.undoManager)
+        manager.beginUndoGrouping()
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
+        manager.endUndoGrouping()
+        #expect(view.string == "git checkout")
+        #expect(!view.completions.listVisible)
+        #expect(view.completions.inlineSuggestion == nil)
+        #expect(requests.count == 1)
+        #expect(submissions == 0)
+        manager.undo()
+        #expect(view.string == "git ch")
+    }
+
+    @Test func automaticMenuNavigationUpdatesGhostAndTabAcceptsSelectedOption() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         var request: CommandCompletionRequest?
         view.onRequestCompletion = { request = $0 }
         view.completions.requestAutomaticNow()
         view.receiveCompletions(completionResponse(to: try #require(request)))
-        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
-        #expect(view.completions.listVisible)
-        #expect(view.string == "git ch")
         view.keyDown(with: try keyEvent(code: 125, characters: ""))
+        #expect(view.selectedCompletionIndex == 1)
+        #expect(view.completions.inlineSuggestion == "erry-pick")
         view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
         #expect(view.string == "git cherry-pick")
     }
 
-    @Test func downRevealsBestInlineOptionWithoutSkippingItAndEscapeDismisses() throws {
+    @Test func automaticMenuDownSelectsNextOptionAndEscapeDismissesBothPresentations() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         var request: CommandCompletionRequest?
@@ -843,14 +890,17 @@ struct CommandTextViewTests {
         view.receiveCompletions(completionResponse(to: try #require(request)))
         view.keyDown(with: try keyEvent(code: 125, characters: ""))
         #expect(view.completions.listVisible)
-        #expect(view.selectedCompletionIndex == 0)
+        #expect(view.selectedCompletionIndex == 1)
+        #expect(view.completions.inlineSuggestion == "erry-pick")
         view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
         #expect(view.string == "git ch")
         #expect(!terminal)
         #expect(view.completionItems.isEmpty)
+        #expect(!view.completions.listVisible)
+        #expect(view.completions.inlineSuggestion == nil)
     }
 
-    @Test func returnWithOnlyInlinePredictionSubmitsOnlyTypedText() throws {
+    @Test func returnWithPassiveAutomaticMenuSubmitsOnlyTypedText() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         var request: CommandCompletionRequest?
@@ -859,9 +909,54 @@ struct CommandTextViewTests {
         view.onSubmit = { submitted = $0; return true }
         view.completions.requestAutomaticNow()
         view.receiveCompletions(completionResponse(to: try #require(request)))
+        #expect(view.completions.listVisible)
         view.keyDown(with: try returnEvent())
         #expect(submitted == "git ch")
         #expect(view.completionItems.isEmpty)
+    }
+
+    @Test func returnAfterAutomaticMenuNavigationAcceptsWithoutSubmitting() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        var request: CommandCompletionRequest?
+        var submissions = 0
+        view.onRequestCompletion = { request = $0 }
+        view.onSubmit = { _ in submissions += 1; return true }
+        view.completions.requestAutomaticNow()
+        view.receiveCompletions(completionResponse(to: try #require(request)))
+        view.keyDown(with: try keyEvent(code: 125, characters: ""))
+        view.keyDown(with: try returnEvent())
+        #expect(view.string == "git cherry-pick")
+        #expect(submissions == 0)
+    }
+
+    @Test func compactCompletionRowsKeepReadableLargeFonts() {
+        let normal = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let large = NSFont.monospacedSystemFont(ofSize: 30, weight: .regular)
+        #expect(CommandCompletionView.rowHeight(for: normal) == 24)
+        #expect(CommandCompletionView.rowHeight(for: large) >= ceil(large.ascender - large.descender + large.leading + 6))
+    }
+
+    @Test func editingAfterMenuNavigationKeepsCachedResultsAndRestoresPassiveReturn() throws {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+        editor.setDraft("git ch")
+        let window = makeFocusWindow(containing: editor)
+        defer { window.close() }
+        editor.layoutSubtreeIfNeeded()
+        #expect(window.makeFirstResponder(editor.textView))
+        var requests: [CommandCompletionRequest] = []
+        var submitted: String?
+        editor.onRequestCompletion = { requests.append($0) }
+        editor.onSubmit = { submitted = $0; return true }
+        editor.textView.completions.requestAutomaticNow()
+        editor.receiveCompletions(completionResponse(to: try #require(requests.first)))
+        editor.textView.keyDown(with: try keyEvent(code: 125, characters: ""))
+        editor.textView.insertText("p", replacementRange: editor.textView.selectedRange())
+        #expect(editor.textView.completions.listVisible)
+        #expect(editor.textView.completions.inlineSuggestion == " → cherry-pick")
+        #expect(requests.count == 1)
+        editor.textView.keyDown(with: try returnEvent())
+        #expect(submitted == "git chp")
     }
 
     @Test func realTextChangesDebounceAutomaticRequestsAndReuseCachedMatches() async throws {
@@ -958,7 +1053,12 @@ struct CommandTextViewTests {
             .init(displayText: "alpha", detail: "", replacementText: "cat alpha",
                   replacementRange: NSRange(location: 0, length: broad.text.utf16.count))
         ]))
-        try await Task.sleep(for: .milliseconds(120))
+        // Concurrent UI tests share MainActor; the debounce task may not start
+        // its clock until after this test yields. Wait for its observable request.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while requests.count < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(requests.count == 2)
         let exact = try #require(requests.last)
         #expect(exact.shellText == "cat zz")

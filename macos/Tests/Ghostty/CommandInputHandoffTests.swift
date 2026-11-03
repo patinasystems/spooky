@@ -28,6 +28,22 @@ struct CommandInputHandoffTests {
                                  readyBlockID: "pane-3", context: "start"))
     }
 
+    @Test func sameBatchOutputAndNextPromptWaitForTheReadyFile() {
+        var layout = parsedPrompt("pane-2")
+        layout.lastStartedBlockID = "pane-2"
+        // C alone must still give read/vared and foreground programs input.
+        #expect(handoff.canFinish(layout: layout, readyGeneration: nil, context: "start"))
+        layout.lastPrimaryInputBlockID = "pane-3"
+        #expect(!handoff.canFinish(layout: layout, readyGeneration: nil, context: "start"))
+        #expect(!handoff.canFinish(layout: layout, readyGeneration: "prompt-2",
+                                  readyBlockID: "pane-2", context: "start"))
+        #expect(handoff.canFinish(layout: layout, readyGeneration: "prompt-3",
+                                 readyBlockID: "pane-3", context: "start"))
+        #expect(handoff.canFinish(layout: layout, readyGeneration: nil, context: "cont"))
+        layout.primary = false
+        #expect(handoff.canFinish(layout: layout, readyGeneration: nil, context: "start"))
+    }
+
     @Test func parsedPrimaryPromptNeedsGridDimensionsButAllowsScrollback() {
         var layout = parsedPrompt("pane-3")
         #expect(layout.hasParsedPrimaryInput("pane-3"))
@@ -47,9 +63,11 @@ struct CommandInputHandoffTests {
                   receipt: nil, metadata: [:])
         }
         session.receive(ready("123-1"))
+        #expect(session.presentedBlockID == nil)
         #expect(!session.editorVisible)
         #expect(!session.isEditable)
         session.receiveLayout(parsedPrompt("123-1"))
+        #expect(session.presentedBlockID == "123-1")
         #expect(session.editorVisible)
         #expect(session.isEditable)
         var scrolled = parsedPrompt("123-1")
@@ -59,9 +77,32 @@ struct CommandInputHandoffTests {
         #expect(session.editorVisible)
         #expect(session.isEditable)
         session.receive(ready("123-2"))
+        #expect(session.currentBlockID == "123-2")
+        #expect(session.presentedBlockID == "123-1")
         #expect(!session.editorVisible)
         #expect(!session.isEditable)
         session.receiveLayout(parsedPrompt("123-2"))
+        #expect(session.presentedBlockID == "123-2")
+        #expect(session.editorVisible)
+        #expect(session.isEditable)
+    }
+
+    @MainActor
+    @Test func explicitEditorReturnPresentsTheLatestParsedPrompt() throws {
+        let session = try CommandInputSession()
+        func ready(_ id: String) -> CommandInputBridge.Snapshot {
+            .init(state: .init(kind: "ready", generation: id, context: "start", blockID: id),
+                  receipt: nil, metadata: [:])
+        }
+        session.receiveLayout(parsedPrompt("123-1"))
+        session.receive(ready("123-1"))
+        session.useTerminal()
+        session.receive(ready("123-2"))
+        session.receiveLayout(parsedPrompt("123-2"))
+        #expect(session.presentedBlockID == "123-1")
+        #expect(!session.editorVisible)
+        session.useEditor()
+        #expect(session.presentedBlockID == "123-2")
         #expect(session.editorVisible)
         #expect(session.isEditable)
     }

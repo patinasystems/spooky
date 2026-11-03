@@ -62,18 +62,22 @@ local executor when this separate checkout is only on this Mac.
 2. Drag a selection across lines, replace it, and use ordinary macOS clipboard,
    word/line selection, undo, and redo. Return submits the entire draft.
 3. The accepted command appears in the terminal transcript under its block
-   header. Its output retains Ghostty's colors, cursor behavior, and selection.
+   header, using the macOS accent color where no explicit shell color applies.
+   Its output retains Ghostty's colors, cursor behavior, and selection.
    Headers show the command's original directory, optional Git branch, and
    completion metadata.
 4. Scroll upward through previous commands. The current header and editor stay
    at the bottom while the transcript scrolls independently.
-5. Typing previews the best zsh-backed completion as faint text. Right accepts
-   it. Tab or Down opens the list; arrows navigate, and Tab or Return accepts
-   without executing. Typing filters the list with fuzzy matching. Escape
-   dismisses suggestions, and Option+Tab inserts a literal tab. Return with only
-   an inline preview executes exactly the typed draft.
-6. Click a block's directory to copy its full absolute path. Command-click or
-   Control-click opens that directory in Finder.
+5. Typing shows the best zsh-backed completion as faint text together with a
+   compact option list. Tab accepts the selected option immediately; Right
+   accepts its inline preview. Arrows navigate without animation, and typing
+   filters the list with fuzzy matching. Return executes exactly the typed draft
+   until you explicitly navigate/request the list, when it accepts the selection.
+   Escape dismisses suggestions; Option+Tab inserts a literal tab.
+6. Hover a block's directory or an existing file/path in output to highlight it.
+   Click to copy the absolute path with a brief confirmation. Command-click or
+   Control-click opens the directory or reveals the file in Finder; holding the
+   modifier adds an underline and arrow. Dragging still selects text.
 7. Up on the first visual line recalls shell history; Down on the last line
    moves forward and restores your unfinished draft. Within multiline commands,
    arrows move the caret; an open completion list keeps its arrow navigation.

@@ -5,9 +5,9 @@ import Foundation
 enum CommandInputDiagnostics {
     enum Operation: String, CaseIterable, Sendable {
         case geometrySnapshot, bridgeSnapshot, hostSynchronize, headerDraw, textMeasurement
-        case submissionDispatch, submissionToBoundary
+        case submissionDispatch, submissionToBoundary, submissionEchoConstruction, submissionEchoCopy
         case nativeKeyDown, completionDidEdit, completionResponse, completionFilter
-        case completionShow, completionMeasureWidth, completionPosition, completionSelection
+        case completionConstruction, completionShow, completionMeasureWidth, completionPosition, completionSelection
         case overlayLayout, inlineSuggestionLayout
     }
 
@@ -26,6 +26,7 @@ enum CommandInputDiagnostics {
         case submissionBegin, submissionResizeReady, submissionRequestPublished
         case submissionTriggerQueued, submissionReceiptObserved
         case submissionCoreBoundaryObserved, submissionHandoffReleased, hostLayoutApplied, hostLayout
+        case boundaryNotified
     }
 
     enum InputKind: String, Sendable { case keyboard, scroll }

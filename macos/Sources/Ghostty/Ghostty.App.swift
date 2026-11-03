@@ -773,6 +773,45 @@ extension Ghostty {
             case GHOSTTY_ACTION_COMMAND_FINISHED:
                 commandFinished(app, target: target, v: action.action.command_finished)
 
+            case GHOSTTY_ACTION_NATIVE_INPUT_BOUNDARY:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface) else { return false }
+                // Surface mailbox actions arrive through the main-queue app
+                // tick. Avoid another run-loop hop on this latency-sensitive
+                // path, retaining a safe fallback if that contract changes.
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { view.commandInputSession?.terminalBoundaryChanged() }
+                } else {
+                    DispatchQueue.main.async { [weak view] in
+                        view?.commandInputSession?.terminalBoundaryChanged()
+                    }
+                }
+
+            case GHOSTTY_ACTION_NATIVE_INPUT_PRESENTED:
+                guard target.tag == GHOSTTY_TARGET_SURFACE,
+                      let surface = target.target.surface,
+                      let view = surfaceView(from: surface) else { return false }
+                let presented = action.action.native_input_presented
+                // The bounded pointer belongs to this callback only. Copy it
+                // before even the off-main defensive fallback can enqueue work.
+                let blockID = presented.block_id.flatMap { pointer -> String? in
+                    let bytes = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self),
+                                                    count: 65).prefix { $0 != 0 }
+                    guard !bytes.isEmpty else { return nil }
+                    return String(bytes: bytes, encoding: .utf8)
+                }
+                let serial = presented.serial
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        view.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial)
+                    }
+                } else {
+                    DispatchQueue.main.async { [weak view] in
+                        view?.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial)
+                    }
+                }
+
             case GHOSTTY_ACTION_PRESENT_TERMINAL:
                 return presentTerminal(app, target: target)
 

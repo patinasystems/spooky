@@ -364,6 +364,13 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// Tagged primary input/output or secondary-input ownership changed.
+    /// No payload: the app reads the latest durable terminal snapshot.
+    native_input_boundary,
+
+    /// A Metal snapshot containing this C marker was assigned to the layer.
+    native_input_presented: NativeInputPresented,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +443,8 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        native_input_boundary,
+        native_input_presented,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -738,6 +747,12 @@ pub const InitialSize = extern struct {
 
         .none => void,
     };
+};
+
+pub const NativeInputPresented = extern struct {
+    serial: u64,
+    /// NUL-terminated ID, at most 64 bytes. Valid during the action callback.
+    block_id: [*:0]const u8,
 };
 
 pub const ResizeWindow = extern struct {

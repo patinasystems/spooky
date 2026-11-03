@@ -106,22 +106,32 @@ pub fn update(
 /// Snapshot only visible header rows while the real terminal is locked. The
 /// returned metadata values are copied into the frame arena; shaping is later.
 pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Terminal) Allocator.Error!Snapshot {
+    return self.snapshotWithFooter(alloc, term, true);
+}
+
+/// Footer ownership is resolved with the same parsed terminal state as cells.
+/// Completed headers must not wait for the GUI's next metadata publication.
+pub fn snapshotWithFooter(self: *const CommandChrome, alloc: Allocator, term: *terminal.Terminal, footer_active: bool) Allocator.Error!Snapshot {
     var result: Snapshot = .{ .revision = self.revision };
     if (!self.enabled or term.screens.active_key != .primary) return result;
     var headers: std.ArrayList(Header) = .empty;
     errdefer headers.deinit(alloc);
     const screen = term.screens.active;
     const viewport_top = screen.pages.getTopLeft(.viewport);
-    const pinned_metadata = if (self.pinned_offset_from_bottom >= 0 and self.pinned_id[0] != 0)
+    const pinned_metadata = if (footer_active and self.pinned_offset_from_bottom >= 0 and self.pinned_id[0] != 0)
         self.entries.get(self.pinned_id)
     else
         null;
     for (screen.command_blocks.blocks.items) |block| {
         // The current command has one caption while its editor is docked.
         // Its real A/B pins remain unchanged for submission and history.
-        if (pinned_metadata != null and std.mem.eql(u8, &block.id, &self.pinned_id)) continue;
+        if (pinned_metadata != null and !block.complete and
+            std.mem.eql(u8, &block.id, &term.native_prompt_id)) continue;
         const pin = block.header orelse continue;
-        if (pin.garbage) continue;
+        // A alone cannot declare whether this is a legacy one-row band or a
+        // padded two-row band. Wait for parsed B before painting either shape.
+        const input = block.input orelse continue;
+        if (pin.garbage or input.garbage) continue;
         const rows = headerRows(block);
         const second = if (rows == 2) pin.down(1) else null;
         // A two-row caption can remain partly visible after its first row
@@ -147,9 +157,9 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
         });
     }
     if (pinned_metadata) |metadata| {
-        // The dock reserves one caption row regardless of how many rows an
+        // The dock reserves two caption rows regardless of how many rows an
         // older in-grid prompt reserved. Historical VT anchors stay intact.
-        try headers.append(alloc, .{ .id = self.pinned_id, .row = 0, .rows = 1, .metadata = metadata, .current = true, .pinned = true });
+        try headers.append(alloc, .{ .id = self.pinned_id, .row = 0, .rows = 2, .metadata = metadata, .current = true, .pinned = true });
         result.pinned_offset_from_bottom = self.pinned_offset_from_bottom;
     }
     result.headers = try headers.toOwnedSlice(alloc);
@@ -161,7 +171,7 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
 /// viewport. Bound each lookup by visible rows instead of retained history.
 /// This must not replace command-region endpoint lookup: a region can extend
 /// below the viewport while its output still intersects the visible screen.
-fn viewportRow(top: terminal.Pin, rows: usize, pin: terminal.Pin) ?usize {
+pub fn viewportRow(top: terminal.Pin, rows: usize, pin: terminal.Pin) ?usize {
     var node = top.node;
     var first_row: usize = top.y;
     var offset: usize = 0;
@@ -299,15 +309,17 @@ fn headerRows(block: Blocks.Block) u2 {
     const header = block.header orelse return 1;
     const input = block.input orelse return 1;
     if (header.garbage or input.garbage) return 1;
-    var limit = header.down(2) orelse return 1;
-    limit.x = 0;
-    return if (!input.before(limit)) 2 else 1;
+    // B is recorded after A. The only one-row cases are the same row or the
+    // next row; comparing those exact pins avoids Pin.before's history walk.
+    if (header.node == input.node and header.y == input.y) return 1;
+    const next = header.down(1) orelse return 1;
+    return if (next.node == input.node and next.y == input.y) 1 else 2;
 }
 
 /// ZLE can pad a reserved prompt row with literal ASCII spaces. Those cells
 /// count as terminal text but have no visible ink. Preserve decorated spaces,
 /// background colors, and combining clusters just like printable output.
-fn headerHasVisibleOutput(pin: terminal.Pin) bool {
+pub fn headerHasVisibleOutput(pin: terminal.Pin) bool {
     if (pin.rowAndCell().row.blank) return false;
     const page = pin.node.page();
     for (pin.cells(.all)) |cell| {
@@ -388,20 +400,30 @@ const Text = struct {
     }
 };
 
-pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16 };
+pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16, caption_y: f32, separator_y: f32 };
 
-/// Keep captions at least 87.5% of the terminal font within their existing row.
-/// Block padding can be larger: only the caption's internal top gap is capped.
-/// Historical two-row headers retain a second gap; terminal row positions and
-/// selection coordinates never change. Rendering and path hit bounds share this.
-pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32) CaptionLayout {
-    const gap = @min(requested_gap, cell_height / 8);
-    const scale = if (cell_height == 0) 1 else @as(f32, @floatFromInt(cell_height - gap)) / @as(f32, @floatFromInt(cell_height));
+/// New two-row bands keep captions at 87.5% font size, with the requested inset
+/// above and below. The residual row space is the preceding block's margin;
+/// its final physical pixel holds the separator. At tiny fonts only the inset
+/// adapts, never the readable caption. Legacy one-row history keeps its original
+/// layout and cannot paint over the following input/output row.
+pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32, rows: u2) CaptionLayout {
+    const height: f32 = @floatFromInt(cell_height);
+    const gap = @min(requested_gap, if (rows == 2) cell_height / 8 * 3 + cell_height % 8 * 3 / 8 else cell_height / 8);
+    const scale: f32 = if (cell_height == 0) 1 else if (rows == 2) 0.875 else @as(f32, @floatFromInt(cell_height - gap)) / height;
+    const inset: f32 = @floatFromInt(gap);
+    const margin = height * 2 - height * scale - inset * 2;
     const virtual_columns: u16 = @intFromFloat(@min(
         @as(f32, @floatFromInt(std.math.maxInt(u16))),
         @max(1, @floor(@as(f32, @floatFromInt(columns)) / scale)),
     ));
-    return .{ .gap = gap, .scale = scale, .columns = virtual_columns };
+    return .{
+        .gap = gap,
+        .scale = scale,
+        .columns = virtual_columns,
+        .caption_y = if (rows == 2) margin + inset else inset,
+        .separator_y = if (rows == 2) @max(0, margin - 1) else inset,
+    };
 }
 
 pub const PathHit = struct {
@@ -436,7 +458,7 @@ fn pathColumns(metadata: *const Metadata, columns: u16) usize {
 /// Physical-pixel cell bounds of only the visible path. Keep this geometry
 /// paired with the command cell shader: scaled x, per-span y gap, and clipping.
 pub fn pathRect(header: Header, size: Size, columns: u16, rows: u16, pinned_offset: f32) ?PathHit {
-    const layout = captionLayout(columns, size.cell.height, size.command_padding);
+    const layout = captionLayout(columns, size.cell.height, size.command_padding, header.rows);
     const width = @as(f32, @floatFromInt(pathColumns(&header.metadata, layout.columns))) *
         @as(f32, @floatFromInt(size.cell.width)) * layout.scale;
     if (width <= 0) return null;
@@ -446,7 +468,7 @@ pub fn pathRect(header: Header, size: Size, columns: u16, rows: u16, pinned_offs
         @max(0, @as(f32, @floatFromInt(size.screen.height)) - pinned_offset)
     else
         top + (@as(f32, @floatFromInt(header.row)) - @as(f32, @floatFromInt(@intFromBool(header.above_viewport)))) * cell_height;
-    const y = origin + @as(f32, @floatFromInt(layout.gap)) * (if (header.rows == 2) @as(f32, 2) else 1);
+    const y = origin + layout.caption_y;
     const lower = if (header.pinned) 0 else top;
     const upper = if (header.pinned) @as(f32, @floatFromInt(size.screen.height)) else top + @as(f32, @floatFromInt(rows)) * cell_height;
     const visible_top = @max(y, lower);
@@ -464,15 +486,97 @@ pub fn pathRect(header: Header, size: Size, columns: u16, rows: u16, pinned_offs
 /// Click-only, under the terminal lock. Snapshot validates current anchors and
 /// erased/overwritten rows, so stale GUI layout never opens a different block.
 pub fn pathAt(self: *const CommandChrome, alloc: Allocator, term: *terminal.Terminal, size: Size, x: f32, y: f32) Allocator.Error!?PathHit {
-    const value = try self.snapshot(alloc, term);
-    defer alloc.free(value.headers);
-    var i = value.headers.len;
-    while (i > 0) {
-        i -= 1; // Pinned chrome is drawn last, and wins overlapping hits.
-        const rect = pathRect(value.headers[i], size, term.cols, term.rows, value.pinned_offset_from_bottom) orelse continue;
-        if (x >= rect.x and x < rect.x + rect.width and y >= rect.y and y < rect.y + rect.height) return rect;
+    return self.pathAtViewport(alloc, term, size, x, y, null);
+}
+
+pub fn pathAtViewport(self: *const CommandChrome, alloc: Allocator, term: *terminal.Terminal, size: Size, x: f32, y: f32, viewport: ?@import("NativeViewport.zig").Resolved) Allocator.Error!?PathHit {
+    _ = alloc;
+    return if (self.pathHeaderAt(term, size, x, y, viewport)) |hit| hit.rect else null;
+}
+
+pub const PathHeader = struct { rect: PathHit, metadata: Metadata, pinned: bool, block_index: ?usize = null };
+
+/// Hover and click share an allocation-free lookup. Walk only the bounded
+/// caption list and viewport pages; never rebuild a full header snapshot.
+pub fn pathHeaderAt(self: *const CommandChrome, term: *terminal.Terminal, size: Size, x: f32, y: f32, viewport: ?@import("NativeViewport.zig").Resolved) ?PathHeader {
+    if (!self.enabled or term.screens.active_key != .primary) return null;
+    const footer_active = if (viewport) |vp| vp.footer_top != null else true;
+    const pinned_offset: f32 = if (viewport) |vp| if (vp.footer_top) |top|
+        @floatFromInt(size.screen.height -| top)
+    else
+        self.pinned_offset_from_bottom else self.pinned_offset_from_bottom;
+    if (footer_active and self.pinned_offset_from_bottom >= 0) {
+        if (self.entries.get(self.pinned_id)) |metadata| {
+            const header: Header = .{ .id = self.pinned_id, .row = 0, .rows = 2, .metadata = metadata, .pinned = true };
+            if (pathRect(header, size, term.cols, term.rows, pinned_offset)) |rect| {
+                if (pathContains(rect, x, y)) return .{ .rect = rect, .metadata = metadata, .pinned = true };
+            }
+        }
+    }
+    var index = term.screens.active.command_blocks.blocks.items.len;
+    while (index > 0) {
+        index -= 1;
+        const hit = self.pathHeaderForIndex(term, size, viewport, index) orelse continue;
+        if (pathContains(hit.rect, x, y)) return hit;
     }
     return null;
+}
+
+/// Revalidate exactly the previously discovered header. The caller checks the
+/// command-block revision first, so the cached index cannot silently shift.
+/// Pinned metadata uses a direct map lookup; in-grid validation visits only
+/// viewport pages and this header's one or two rows.
+pub fn pathHeaderKnown(self: *const CommandChrome, term: *terminal.Terminal, size: Size, viewport: ?@import("NativeViewport.zig").Resolved, known: PathHeader) ?PathHeader {
+    if (!self.enabled or term.screens.active_key != .primary) return null;
+    if (!known.pinned) {
+        const hit = self.pathHeaderForIndex(term, size, viewport, known.block_index orelse return null) orelse return null;
+        return if (std.mem.eql(u8, &hit.rect.id, &known.rect.id)) hit else null;
+    }
+    if (!std.mem.eql(u8, &self.pinned_id, &known.rect.id) or self.pinned_offset_from_bottom < 0) return null;
+    const offset: f32 = if (viewport) |vp| if (vp.footer_top) |top|
+        @floatFromInt(size.screen.height -| top)
+    else
+        return null else self.pinned_offset_from_bottom;
+    const metadata = self.entries.get(known.rect.id) orelse return null;
+    const header: Header = .{ .id = known.rect.id, .row = 0, .rows = 2, .metadata = metadata, .pinned = true };
+    return .{ .rect = pathRect(header, size, term.cols, term.rows, offset) orelse return null, .metadata = metadata, .pinned = true };
+}
+
+fn pathHeaderForIndex(self: *const CommandChrome, term: *terminal.Terminal, size: Size, viewport: ?@import("NativeViewport.zig").Resolved, index: usize) ?PathHeader {
+    const screen = term.screens.active;
+    if (index >= screen.command_blocks.blocks.items.len) return null;
+    const block = screen.command_blocks.blocks.items[index];
+    const footer_active = if (viewport) |vp| vp.footer_top != null else true;
+    if (footer_active and self.pinned_offset_from_bottom >= 0 and !block.complete and
+        std.mem.eql(u8, &block.id, &term.native_prompt_id)) return null;
+    const pin = block.header orelse return null;
+    const input = block.input orelse return null;
+    if (pin.garbage or input.garbage) return null;
+    const top = screen.pages.getTopLeft(.viewport);
+    const rows = headerRows(block);
+    const second = if (rows == 2) pin.down(1) else null;
+    const visible_row = viewportRow(top, screen.pages.rows, pin.*);
+    const row = visible_row orelse row: {
+        const next = second orelse return null;
+        const next_row = viewportRow(top, screen.pages.rows, next) orelse return null;
+        if (next_row != 0) return null;
+        break :row 0;
+    };
+    // Inspect cells only after proving the header intersects the viewport.
+    if (headerHasVisibleOutput(pin.*)) return null;
+    if (second) |next| if (headerHasVisibleOutput(next)) return null;
+    const metadata = self.entries.get(block.id) orelse return null;
+    const header: Header = .{ .id = block.id, .row = @intCast(row), .rows = rows, .above_viewport = visible_row == null, .metadata = metadata };
+    var rect = pathRect(header, size, term.cols, term.rows, -1) orelse return null;
+    if (viewport) |vp| if (vp.clip_bottom) |bottom| {
+        rect.height = @max(0, @min(rect.height, @as(f32, @floatFromInt(bottom)) - rect.y));
+    };
+    if (rect.height <= 0) return null;
+    return .{ .rect = rect, .metadata = metadata, .pinned = false, .block_index = index };
+}
+
+fn pathContains(rect: PathHit, x: f32, y: f32) bool {
+    return x >= rect.x and x < rect.x + rect.width and y >= rect.y and y < rect.y + rect.height;
 }
 
 /// Fill a reusable scratch row solely for the existing font shaper. It has no
@@ -547,7 +651,7 @@ test "command chrome snapshots follow viewport and exclude erased and alternate 
         try t.expectEqual(@as(usize, 1), s.headers.len);
         try t.expectEqual(@as(u16, 0), s.headers[0].row);
         try t.expect(s.headers[0].pinned);
-        try t.expectEqual(@as(u2, 1), s.headers[0].rows);
+        try t.expectEqual(@as(u2, 2), s.headers[0].rows);
     }
     term.setCursorPos(1, 1);
     try term.print('x');
@@ -563,7 +667,7 @@ test "command chrome snapshots follow viewport and exclude erased and alternate 
         defer t.allocator.free(s.headers);
         try t.expectEqual(@as(usize, 1), s.headers.len);
         try t.expect(s.headers[0].pinned);
-        try t.expectEqual(@as(u2, 1), s.headers[0].rows);
+        try t.expectEqual(@as(u2, 2), s.headers[0].rows);
     }
     _ = try term.switchScreen(.alternate);
     const s = try chrome.snapshot(t.allocator, &term);
@@ -608,6 +712,7 @@ test "command chrome keeps space-padded headers but preserves visible output" {
         }
         try term.setAttribute(.unset);
         term.setCursorPos(2, 1);
+        try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=history" });
         try term.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=history" });
         const snapshot_value = try chrome.snapshot(t.allocator, &term);
         defer t.allocator.free(snapshot_value.headers);
@@ -622,8 +727,8 @@ test "command chrome keeps space-padded headers but preserves visible output" {
 
 test "command chrome padding scales captions within the existing header row" {
     const t = std.testing;
-    const normal = captionLayout(80, 16, 6);
-    const retina = captionLayout(80, 32, 12);
+    const normal = captionLayout(80, 16, 6, 1);
+    const retina = captionLayout(80, 32, 12, 1);
     try t.expectEqual(@as(u32, 2), normal.gap);
     try t.expectEqual(@as(u32, 4), retina.gap);
     try t.expectEqual(@as(f32, 0.875), normal.scale);
@@ -631,17 +736,17 @@ test "command chrome padding scales captions within the existing header row" {
     try t.expectEqual(normal.columns, retina.columns);
     try t.expectEqual(@as(f32, 16), @as(f32, @floatFromInt(normal.gap)) + 16 * normal.scale);
     try t.expect(@as(f32, @floatFromInt(normal.columns)) * normal.scale <= 80);
-    const tiny = captionLayout(80, 3, 4);
+    const tiny = captionLayout(80, 3, 4, 1);
     try t.expectEqual(@as(f32, 1), tiny.scale);
     try t.expectEqual(@as(u32, 0), tiny.gap);
-    try t.expectEqual(@as(u16, std.math.maxInt(u16)), captionLayout(std.math.maxInt(u16), 10, 9).columns);
+    try t.expectEqual(@as(u16, std.math.maxInt(u16)), captionLayout(std.math.maxInt(u16), 10, 9, 1).columns);
 }
 
 test "command chrome large block gaps preserve readable one-row caption bounds" {
     const t = std.testing;
     for ([_]u32{ 1, 3, 16, 17, 32, 34, 64 }) |height| {
         for ([_]u32{ 0, 1, 6, 12, 96 }) |padding| {
-            const layout = captionLayout(80, height, padding);
+            const layout = captionLayout(80, height, padding, 1);
             const row_height: f32 = @floatFromInt(height);
             try t.expect(layout.scale >= 0.875 and layout.scale <= 1);
             try t.expect(layout.gap <= padding);
@@ -649,7 +754,7 @@ test "command chrome large block gaps preserve readable one-row caption bounds" 
             try t.expectApproxEqAbs(row_height, @as(f32, @floatFromInt(layout.gap)) + row_height * layout.scale, 0.0001);
         }
     }
-    const zero = captionLayout(80, 0, 6);
+    const zero = captionLayout(80, 0, 6, 1);
     try t.expectEqual(@as(u32, 0), zero.gap);
     try t.expectEqual(@as(f32, 1), zero.scale);
 }
@@ -680,6 +785,36 @@ test "command chrome derives one or two reserved rows from input anchors" {
         defer t.allocator.free(resized.headers);
         try t.expectEqual(@as(usize, 1), resized.headers.len);
         try t.expectEqual(@as(u2, @intCast(rows)), resized.headers[0].rows);
+    }
+}
+
+test "command chrome two-row band has six point caption insets at normal and Retina sizes" {
+    const t = std.testing;
+    for ([_]u32{ 16, 17 }) |points| {
+        for ([_]u32{ 1, 2 }) |scale| {
+            const height: f32 = @floatFromInt(points * scale);
+            const inset: f32 = @floatFromInt(6 * scale);
+            const layout = captionLayout(80, points * scale, 6 * scale, 2);
+            try t.expectEqual(@as(f32, 0.875), layout.scale);
+            try t.expectEqual(6 * scale, layout.gap);
+            try t.expectEqual(inset, layout.caption_y - (layout.separator_y + 1));
+            try t.expectEqual(inset, height * 2 - layout.caption_y - height * layout.scale);
+            try t.expect(layout.separator_y + 1 >= inset);
+            try t.expect(layout.caption_y + height * layout.scale <= height * 2);
+        }
+    }
+}
+
+test "command chrome tiny two-row bands reduce only insets and legacy remains inside one row" {
+    const t = std.testing;
+    for ([_]u32{ 1, 3, 8, 16, 17, 32, 34 }) |height| {
+        const h: f32 = @floatFromInt(height);
+        const layout = captionLayout(80, height, 96, 2);
+        try t.expectEqual(@as(f32, 0.875), layout.scale);
+        try t.expect(layout.caption_y >= 0);
+        try t.expect(layout.caption_y + h * layout.scale <= h * 2);
+        const legacy = captionLayout(80, height, 96, 1);
+        try t.expectEqual(h, legacy.caption_y + h * legacy.scale);
     }
 }
 
@@ -737,20 +872,20 @@ test "command chrome path hits exclude branch status gaps and overwritten rows" 
     try term.linefeed();
     try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=a" });
     const size: Size = .{ .screen = .{ .width = 168, .height = 100 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{ .left = 4, .right = 4, .bottom = 4 }, .command_padding = 4 };
-    const hit = (try chrome.pathAt(t.allocator, &term, size, 5, 9)).?;
+    const hit = (try chrome.pathAt(t.allocator, &term, size, 5, 15)).?;
     try t.expectEqualStrings("a", std.mem.sliceTo(&hit.id, 0));
     try t.expectEqual(@as(f32, 4), hit.x);
-    try t.expectEqual(@as(f32, 4), hit.y);
+    try t.expectEqual(@as(f32, 14), hit.y);
     try t.expectEqual(@as(f32, 28), hit.width);
     try t.expectEqual(@as(f32, 14), hit.height);
     try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 2)); // Separator/top gap.
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 33, 9)); // After path, before branch.
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 150, 9)); // Status cells.
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 33, 15)); // After path, before branch.
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 150, 15)); // Status cells.
     term.setCursorPos(2, 1);
     try term.print('x');
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 9));
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 15));
     _ = try term.switchScreen(.alternate);
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 9));
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 15));
 }
 
 test "command chrome path bounds preserve unicode truncation scale and partial clipping" {
@@ -776,10 +911,10 @@ test "command chrome path bounds preserve unicode truncation scale and partial c
     header.above_viewport = true;
     const clipped = pathRect(header, size, 20, 6, -1).?;
     try t.expectEqual(@as(f32, 0), clipped.y);
-    try t.expectEqual(@as(f32, 4), clipped.height);
+    try t.expectEqual(@as(f32, 24), clipped.height);
     header.pinned = true;
     const pinned = pathRect(header, size, 20, 6, 80).?;
-    try t.expectEqual(@as(f32, 128), pinned.y);
+    try t.expectEqual(@as(f32, 148), pinned.y);
 }
 
 test "command chrome pinned current header replaces only its visible grid copy" {
@@ -810,12 +945,12 @@ test "command chrome pinned current header replaces only its visible grid copy" 
         try t.expectEqualStrings("current", std.mem.sliceTo(&s.headers[1].id, 0));
         try t.expect(s.headers[1].pinned);
         try t.expectEqual(@as(u2, 2), s.headers[0].rows);
-        try t.expectEqual(@as(u2, 1), s.headers[1].rows);
-        // Even an older two-row prompt fits the one-row dock. Its click
-        // target ends exactly where the native editor begins, not below it.
+        try t.expectEqual(@as(u2, 2), s.headers[1].rows);
+        // The pinned dock uses two rows, with its bottom inset before the
+        // native editor. Hit bounds cover the caption, never that inset.
         const size: Size = .{ .screen = .{ .width = 168, .height = 160 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{ .left = 4, .right = 4, .bottom = 4 }, .command_padding = 4 };
         const rect = pathRect(s.headers[1], size, 20, 8, s.pinned_offset_from_bottom).?;
-        try t.expectEqual(@as(f32, 116), rect.y + rect.height);
+        try t.expectEqual(@as(f32, 128), rect.y + rect.height);
     }
     _ = try chrome.update(t.allocator, true, -1, &.{.{ .id = "current", .label = "/now", .suffix = "", .current = true }});
     const s = try chrome.snapshot(t.allocator, &term);
@@ -827,4 +962,74 @@ test "command chrome pinned current header replaces only its visible grid copy" 
     const after = try term.plainString(t.allocator);
     defer t.allocator.free(after);
     try t.expectEqualStrings(before, after);
+}
+
+test "command chrome completed caption follows parsed prompt before GUI metadata catches up" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 20, .rows = 8 });
+    defer term.deinit(t.allocator);
+    var chrome: CommandChrome = .{};
+    defer chrome.deinit(t.allocator);
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=old" });
+    try term.linefeed();
+    try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=old" });
+    _ = try chrome.update(t.allocator, true, 46, &.{.{ .id = "old", .label = "/cwd", .suffix = "", .current = true, .pinned = true }});
+    try term.linefeed();
+    try term.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "0;aid=old" });
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=new" });
+    // The native metadata still points at old. Its completed grid caption
+    // appears now, while only the newly parsed header belongs to the footer.
+    const snapshot_value = try chrome.snapshotWithFooter(t.allocator, &term, true);
+    defer t.allocator.free(snapshot_value.headers);
+    try t.expectEqual(@as(usize, 2), snapshot_value.headers.len);
+    try t.expectEqualStrings("old", std.mem.sliceTo(&snapshot_value.headers[0].id, 0));
+    try t.expect(!snapshot_value.headers[0].pinned);
+    try t.expect(snapshot_value.headers[1].pinned);
+    // A raw ownership boundary removes the pinned copy immediately.
+    const raw = try chrome.snapshotWithFooter(t.allocator, &term, false);
+    defer t.allocator.free(raw.headers);
+    for (raw.headers) |header| try t.expect(!header.pinned);
+}
+
+test "command chrome incomplete A waits for B before render discovery and cached hit validation" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 20, .rows = 8 });
+    defer term.deinit(t.allocator);
+    var chrome: CommandChrome = .{};
+    defer chrome.deinit(t.allocator);
+    _ = try chrome.update(t.allocator, true, -1, &.{.{ .id = "new", .label = "/cwd", .path_len = 4, .suffix = "" }});
+    const size: Size = .{ .screen = .{ .width = 160, .height = 160 }, .cell = .{ .width = 8, .height = 17 }, .padding = .{}, .command_padding = 6 };
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=new" });
+    for (0..3) |stage| {
+        if (stage > 0) try term.linefeed();
+        const snapshot_value = try chrome.snapshot(t.allocator, &term);
+        defer t.allocator.free(snapshot_value.headers);
+        try t.expectEqual(@as(usize, 0), snapshot_value.headers.len);
+        try t.expectEqual(null, chrome.pathHeaderAt(&term, size, 1, 3, null));
+        try t.expectEqual(null, chrome.pathHeaderAt(&term, size, 1, 14, null));
+    }
+    try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=new" });
+    const ready = try chrome.snapshot(t.allocator, &term);
+    defer t.allocator.free(ready.headers);
+    try t.expectEqual(@as(usize, 1), ready.headers.len);
+    try t.expectEqual(@as(u2, 2), ready.headers[0].rows);
+    const known = chrome.pathHeaderAt(&term, size, 1, 14, null).?;
+    try t.expect(chrome.pathHeaderKnown(&term, size, null, known) != null);
+    // Cached direct lookup must also reject an input pin that was invalidated.
+    term.screens.active.command_blocks.blocks.items[0].input.?.garbage = true;
+    try t.expectEqual(null, chrome.pathHeaderKnown(&term, size, null, known));
+}
+
+test "command chrome path hit uses resolved footer position during resize" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 20, .rows = 8 });
+    defer term.deinit(t.allocator);
+    var chrome: CommandChrome = .{};
+    defer chrome.deinit(t.allocator);
+    _ = try chrome.update(t.allocator, true, 80, &.{.{ .id = "a", .label = "/cwd", .path_len = 4, .suffix = "", .pinned = true }});
+    const size: Size = .{ .screen = .{ .width = 160, .height = 160 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{} };
+    const viewport: @import("NativeViewport.zig").Resolved = .{ .rows = 6, .clip_bottom = 96, .footer_top = 112 };
+    const hit = (try chrome.pathAtViewport(t.allocator, &term, size, 1, 131, viewport)).?;
+    try t.expectEqual(@as(f32, 130), hit.y);
+    try t.expectEqual(null, try chrome.pathAtViewport(t.allocator, &term, size, 1, 81, viewport));
 }

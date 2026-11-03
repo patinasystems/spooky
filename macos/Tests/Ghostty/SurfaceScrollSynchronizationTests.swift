@@ -98,6 +98,16 @@ struct SurfaceScrollSynchronizationTests {
         #expect(geometry(viewportHeight: .nan) == nil)
     }
 
+    @Test func occludedPromptTailKeepsScrollRangeButUsesOnlyVisibleRowsForThumb() throws {
+        let raw = try #require(geometry(total: 234, visibleRows: 34, cellHeight: 17))
+        let visible = try #require(geometry(total: 232, visibleRows: 32, cellHeight: 17))
+        #expect(visible.maximumRow == raw.maximumRow)
+        #expect(visible.documentHeight == raw.documentHeight)
+        #expect(visible.origin(for: 197) == raw.origin(for: 197))
+        #expect(visible.knobProportion == CGFloat(32) / 232)
+        #expect(visible.knobProportion < raw.knobProportion)
+    }
+
     private func geometry(
         total: UInt64 = 1_000,
         visibleRows: UInt64 = 30,

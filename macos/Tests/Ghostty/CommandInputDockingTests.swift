@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Testing
 @testable import Ghostty
 
@@ -11,7 +11,7 @@ struct CommandInputDockingTests {
         let placement = place(&docking, layout: geometry())
         #expect(!docking.hasDocked)
         #expect(!placement.pinned)
-        #expect(placement.origin == CGPoint(x: 0, y: 90))
+        #expect(placement.origin == CGPoint(x: 0, y: 84))
         #expect(placement.reservedHeight == 12)
         #expect(placement.pinnedOffset == -1)
         #expect(placement.shown)
@@ -26,7 +26,7 @@ struct CommandInputDockingTests {
         layout.cursorY = 18
         let placement = place(&docking, layout: layout)
         #expect(!placement.pinned)
-        #expect(placement.origin.y == 18)
+        #expect(placement.origin.y == 12)
         // PageList can preserve two history rows while growing 3→10 because
         // its cursor is above the last row; new space appears below it.
         layout.rows = 10
@@ -40,18 +40,18 @@ struct CommandInputDockingTests {
         #expect(docking.hasDocked)
         #expect(placement.pinned)
         #expect(placement.origin == CGPoint(x: 0, y: 570))
-        #expect(placement.reservedHeight == 48)
-        #expect(placement.pinnedOffset == 48)
+        #expect(placement.reservedHeight == 12)
+        #expect(placement.pinnedOffset == 60)
         let headerTop = metrics.containerHeight - placement.pinnedOffset
-        #expect(placement.origin.y - headerTop == 18)
+        #expect(placement.origin.y - headerTop == 30)
     }
 
     @Test func ownFooterReservationDoesNotCreateAnInlineDockFeedbackLoop() {
         var docking = CommandInputDocking()
         let docked = place(&docking, layout: fullInlineGrid())
-        // A one-row header plus the extra input row removed by docking moves
-        // the same prompt two rows up and retains those rows as history.
-        let applied = dockedGrid(history: 2)
+        // A two-row header plus the input row moves the same prompt three
+        // rows up in a full-reservation fallback, retaining them as history.
+        let applied = dockedGrid(history: 3)
         for _ in 0..<5 { #expect(place(&docking, layout: applied) == docked) }
     }
 
@@ -62,7 +62,7 @@ struct CommandInputDockingTests {
         for atBottom in [false, true, false, true] {
             layout.atBottom = atBottom
             layout.cursorValid = atBottom
-            layout.cursorY = atBottom ? 522 : -40
+            layout.cursorY = atBottom ? 504 : -40
             #expect(place(&docking, layout: layout) == docked)
         }
     }
@@ -79,7 +79,7 @@ struct CommandInputDockingTests {
         layout.cursorValid = true
         let restored = place(&docking, layout: layout)
         #expect(!restored.pinned)
-        #expect(restored.origin.y == 90)
+        #expect(restored.origin.y == 84)
     }
 
     @Test func transientStartupAndResizeSnapshotsCannotLatchOrReleaseDock() {
@@ -107,14 +107,14 @@ struct CommandInputDockingTests {
                                                  inlineRows: 62, geometryIsSettled: true)
         let inline = place(&docking, layout: grown, metrics: bigger)
         #expect(!inline.pinned)
-        #expect(inline.origin.y == 594)
+        #expect(inline.origin.y == 588)
         #expect(inline.reservedHeight == 12)
     }
 
     @Test func projectedGrowthUsesExactHistoryCountInsteadOfAnyHistoryFlag() {
         var docking = CommandInputDocking()
         _ = place(&docking, layout: fullInlineGrid())
-        // Only one retained row can be pulled into two newly available rows.
+        // Only one retained row can be pulled into three newly available rows.
         // There is room below the prompt, so this must return inline.
         #expect(!place(&docking, layout: dockedGrid(history: 1)).pinned)
         #expect(place(&docking, layout: dockedGrid(history: .max)).pinned)
@@ -172,7 +172,7 @@ struct CommandInputDockingTests {
         #expect(!terminal.shown)
         #expect(terminal.reservedHeight == 0)
         #expect(terminal.pinnedOffset == -1)
-        #expect(place(&docking, layout: dockedGrid(history: 2)) == docked)
+        #expect(place(&docking, layout: dockedGrid(history: 3)) == docked)
     }
 
     @Test func transferPreservesPTYSpaceAndPinnedHeaderWithoutReevaluatingTheDock() {
@@ -183,7 +183,7 @@ struct CommandInputDockingTests {
         #expect(transfer.reservedHeight == before.reservedHeight)
         #expect(transfer.pinnedOffset == before.pinnedOffset)
         #expect(transfer.origin == before.origin)
-        #expect(place(&docking, layout: dockedGrid(history: 2)) == before)
+        #expect(place(&docking, layout: dockedGrid(history: 3)) == before)
     }
 
     @Test func inlineTransferDoesNotResizeThePTY() {
@@ -203,6 +203,94 @@ struct CommandInputDockingTests {
             #expect(!terminal.shown)
             #expect(terminal.reservedHeight == 0)
             #expect(terminal.pinnedOffset == -1)
+        }
+    }
+
+    @Test func compactDockKeepsInlineReservationAcrossHistoryAndLiveEnd() {
+        var docking = CommandInputDocking()
+        let inline = place(&docking, layout: geometry())
+        var layout = fullInlineGrid()
+        layout.scrollbackRows = 200
+        for bottom in [true, false, true, false] {
+            layout.atBottom = bottom
+            let dock = place(&docking, layout: layout)
+            #expect(dock.pinned)
+            #expect(dock.coveredRows == 3)
+            #expect(dock.reservedHeight == inline.reservedHeight)
+        }
+    }
+
+    @Test func overwrittenPromptTailRestoresFullReservationWithoutChangingDockPosition() {
+        var docking = CommandInputDocking()
+        var layout = fullInlineGrid()
+        let compact = place(&docking, layout: layout)
+        layout.compactPromptRows = 0
+        let fallback = place(&docking, layout: layout)
+        #expect(fallback.pinned && fallback.coveredRows == 0)
+        #expect(fallback.reservedHeight == compact.reservedHeight + 3 * layout.cellHeight - metrics.padding)
+        #expect(fallback.origin == compact.origin)
+        #expect(fallback.pinnedOffset == compact.pinnedOffset)
+        layout.compactPromptRows = 3
+        #expect(place(&docking, layout: layout) == compact)
+    }
+
+    @Test func legacyTwoRowTailCannotHideAnExtraOutputRowUnderTheTallerFooter() {
+        var docking = CommandInputDocking()
+        var layout = fullInlineGrid()
+        layout.compactPromptRows = 2
+        let legacy = place(&docking, layout: layout)
+        #expect(legacy.pinned)
+        #expect(legacy.coveredRows == 0)
+        #expect(legacy.reservedHeight == metrics.editorHeight + 2 * layout.cellHeight - metrics.padding)
+        #expect(legacy.pinnedOffset == legacy.reservedHeight)
+        layout.compactPromptRows = 3
+        let current = place(&docking, layout: layout)
+        #expect(current.coveredRows == 3)
+        #expect(current.reservedHeight == metrics.editorHeight - layout.cellHeight)
+        #expect(current.origin == legacy.origin)
+        #expect(current.pinnedOffset == legacy.pinnedOffset)
+    }
+
+    @MainActor
+    @Test func actualEditorInsetsShareOneCaptionGapInlineAndPinned() {
+        for line: CGFloat in [17, 18] {
+            for draft in ["", "first\n"] {
+                let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
+                editor.configureAppearance(font: .monospacedSystemFont(ofSize: 12, weight: .regular),
+                                           textColor: .white, backgroundColor: .black, minimumLineHeight: line)
+                editor.setDraft(draft)
+                let height = max(line + 12, editor.contentHeight)
+                editor.frame.size.height = height
+                editor.needsLayout = true
+                editor.layoutSubtreeIfNeeded()
+                let contentOrigin = editor.convert(editor.textView.bounds.origin, from: editor.textView).y
+                let contentTop = editor.isFlipped ? contentOrigin - editor.bounds.minY : editor.bounds.maxY - contentOrigin
+                #expect(contentTop == 6)
+                #expect(editor.bounds.maxY - editor.scrollView.frame.maxY == 6)
+
+                for pinned in [false, true] {
+                    var docking = CommandInputDocking()
+                    var layout = geometry()
+                    layout.cellHeight = line
+                    layout.activeCursorRow = pinned ? 31 : 2
+                    layout.cursorY = CGFloat(layout.activeCursorRow) * line
+                    layout.compactPromptRows = pinned ? 3 : 0
+                    let values = CommandInputDocking.Metrics(editorHeight: height, containerHeight: 600, padding: 6,
+                                                            inlineRows: 32, geometryIsSettled: true)
+                    let placement = place(&docking, layout: layout, metrics: values)
+                    let captionBottom = pinned
+                        ? values.containerHeight - placement.pinnedOffset + 2 * line - 6
+                        : layout.cursorY - 6
+                    let nativeTextTop = placement.origin.y + contentTop
+                    for scale: CGFloat in [1, 2] {
+                        #expect((nativeTextTop - captionBottom) * scale == 6 * scale)
+                    }
+                    #expect(placement.pinned == pinned)
+                    #expect(placement.reservedHeight == height - line)
+                    #expect(placement.coveredRows == (pinned ? 3 : 0))
+                    if !pinned { #expect(nativeTextTop == layout.cursorY) }
+                }
+            }
         }
     }
 
@@ -228,15 +316,17 @@ struct CommandInputDockingTests {
     private func fullInlineGrid() -> CommandTerminalLayout {
         var layout = geometry()
         layout.activeCursorRow = 31
+        layout.compactPromptRows = 3
         layout.cursorY = 558
         return layout
     }
 
     private func dockedGrid(history: UInt64) -> CommandTerminalLayout {
         var layout = geometry()
-        layout.rows = 30
-        layout.activeCursorRow = 29
-        layout.cursorY = 522
+        layout.rows = 29
+        layout.compactPromptRows = 3
+        layout.activeCursorRow = 28
+        layout.cursorY = 504
         layout.scrollbackRows = history
         layout.hasScrollback = history > 0
         return layout

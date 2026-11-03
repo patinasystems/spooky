@@ -33,6 +33,8 @@ const uint IS_COMMAND_CHROME = 4u;
 const uint IS_PINNED_COMMAND = 8u;
 const uint COMMAND_TOP_GAP = 16u;
 const uint COMMAND_ABOVE_VIEWPORT = 32u;
+const uint IS_PATH_OVERLAY = 64u;
+const uint IS_COMMAND_SEPARATOR = 128u;
 
 out CellTextVertexOut {
     flat uint atlas;
@@ -77,11 +79,16 @@ void main() {
 
     out_data.atlas = atlas;
     out_data.chrome_flags = glyph_bools;
+    if ((glyph_bools & IS_PATH_OVERLAY) != 0)
+        cell_pos = vec2(grid_pos) - vec2(grid_padding.w, grid_padding.x);
     if ((glyph_bools & COMMAND_ABOVE_VIEWPORT) != 0) cell_pos.y -= cell_size.y;
-    if ((glyph_bools & IS_PINNED_COMMAND) != 0) cell_pos.y = command_pinned_y;
+    if ((glyph_bools & IS_PINNED_COMMAND) != 0 && (glyph_bools & IS_PATH_OVERLAY) == 0) cell_pos.y = command_pinned_y;
     if (atlas == ATLAS_SOLID) {
+        if ((glyph_bools & IS_COMMAND_SEPARATOR) != 0)
+            cell_pos.y += (glyph_bools & COMMAND_TOP_GAP) != 0 ? command_padded_separator_y : command_gap;
         vec2 position = vec2(-grid_padding.w + screen_size.x * corner.x,
                              cell_pos.y + float(bearings.y) + float(glyph_size.y) * corner.y);
+        if ((glyph_bools & IS_PATH_OVERLAY) != 0) position = cell_pos + vec2(glyph_size) * corner;
         gl_Position = projection_matrix * vec4(position, 0.0, 1.0);
         out_data.color = load_color(color, use_linear_blending);
         out_data.bg_color = vec4(0.0);
@@ -119,11 +126,13 @@ void main() {
     vec2 offset = vec2(bearings);
 
     offset.y = cell_size.y - offset.y;
-    if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
-        cell_pos.x *= command_caption_scale;
-        cell_pos.y += command_gap * ((glyph_bools & COMMAND_TOP_GAP) != 0 ? 2.0 : 1.0);
-        size *= command_caption_scale;
-        offset *= command_caption_scale;
+    if ((glyph_bools & IS_COMMAND_CHROME) != 0 && (glyph_bools & IS_PATH_OVERLAY) == 0) {
+        bool padded = (glyph_bools & COMMAND_TOP_GAP) != 0;
+        float scale = padded ? 0.875 : command_caption_scale;
+        cell_pos.x *= scale;
+        cell_pos.y += padded ? command_padded_y : command_gap;
+        size *= scale;
+        offset *= scale;
     }
 
     // Calculate the final position of the cell which uses our glyph size
@@ -140,7 +149,7 @@ void main() {
     // make it easier to handle minimum contrast calculations.
     out_data.color = load_color(color, true);
     // Virtual caption columns must never index the real VT cell buffer.
-    if ((glyph_bools & IS_COMMAND_CHROME) != 0) {
+    if ((glyph_bools & (IS_COMMAND_CHROME | IS_PATH_OVERLAY)) != 0) {
         out_data.bg_color = load_color(uvec4(unpack4u8(bg_color_packed_4u8).rgb, 255u), true);
     } else {
         out_data.bg_color = load_color(unpack4u8(bg_colors[grid_pos.y * grid_size.x + grid_pos.x]), true);
@@ -157,7 +166,7 @@ void main() {
     }
 
     // Check if current position is under cursor (including wide cursor)
-    bool is_cursor_pos = ((grid_pos.x == cursor_pos.x) || (cursor_wide && (grid_pos.x == (cursor_pos.x + 1)))) && (grid_pos.y == cursor_pos.y);
+    bool is_cursor_pos = (glyph_bools & IS_PATH_OVERLAY) == 0 && ((grid_pos.x == cursor_pos.x) || (cursor_wide && (grid_pos.x == (cursor_pos.x + 1)))) && (grid_pos.y == cursor_pos.y);
 
     // If this cell is the cursor cell, but we're not processing
     // the cursor glyph itself, then we need to change the color.

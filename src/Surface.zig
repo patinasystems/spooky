@@ -144,6 +144,7 @@ size: rendererpkg.Size,
 /// Native input reserves grid space without shrinking the renderer drawable.
 /// Keep the requested inset separate from computed padding so resize, font,
 /// and config updates cannot accumulate it. Points preserve it across DPI.
+native_input_bootstrap: bool = false,
 native_input_inset_bottom: u32 = 0,
 native_input_inset_bottom_points: f64 = 0,
 native_input_inset_horizontal: u32 = 0,
@@ -708,6 +709,19 @@ pub fn init(
         });
         errdefer io_exec.deinit();
 
+        // Seed the native one-line layout before the PTY exists. Applying its
+        // horizontal margin after ZLE's full-width PROMPT_SP line would reflow
+        // that written blank row and move the first B down a row.
+        if (io_exec.nativeInputEnabled()) {
+            self.native_input_bootstrap = true;
+            self.native_input_inset_horizontal_points = 6;
+            self.native_input_inset_bottom_points = 18; // 2 editor insets + bottom margin
+            self.native_input_inset_horizontal = rendererpkg.Size.scaledInset(6, content_scale.x);
+            self.native_input_inset_bottom = rendererpkg.Size.scaledInset(18, content_scale.y);
+            try self.recomputePadding();
+            self.renderer.setScreenSize(self.size);
+        }
+
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
         errdefer io_mailbox.deinit(alloc);
@@ -717,7 +731,7 @@ pub fn init(
         errdefer io_config.deinit();
 
         try termio.Termio.init(&self.io, alloc, .{
-            .size = size,
+            .size = self.size,
             .full_config = config,
             .config = io_config,
             .backend = .{ .exec = io_exec },
@@ -1200,6 +1214,10 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             try self.selectionScrollTick();
         },
 
+        .native_input_boundary => {
+            _ = try self.rt_app.performAction(.{ .surface = self }, .native_input_boundary, {});
+        },
+
         .start_command => {
             self.command_timer = .now(global.io(), .awake);
         },
@@ -1264,13 +1282,12 @@ fn selectionScrollTick(self: *Surface) !void {
     }
 
     const pos = try self.rt_surface.getCursorPos();
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We need our locked state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
     const t: *terminal.Terminal = self.renderer_state.terminal;
 
+    const pos_vp = self.posToViewport(pos.x, pos.y);
     const selection = self.mouse.selection_gesture.autoscrollTick(t, .{
         .viewport = pos_vp,
         .xpos = pos.x,
@@ -1281,7 +1298,7 @@ fn selectionScrollTick(self: *Surface) !void {
             .columns = @intCast(self.size.grid().columns),
             .cell_width = self.size.cell.width,
             .padding_left = self.size.padding.left,
-            .screen_height = self.size.screen.height,
+            .screen_height = self.renderer_state.nativeViewport(self.size).clip_bottom orelse self.size.screen.height,
         },
     });
 
@@ -1814,6 +1831,7 @@ pub fn updateConfig(
     self: *Surface,
     original: *const configpkg.Config,
 ) !void {
+    self.cancelNativeSubmission();
     // Apply our conditional state. If we fail to apply the conditional state
     // then we log and attempt to move forward with the old config.
     var config_: ?configpkg.Config = original.changeConditionalState(
@@ -2458,6 +2476,7 @@ fn copySelectionToClipboards(
 ///
 /// This must be called with the renderer mutex held.
 fn setSelection(self: *Surface, sel_: ?terminal.Selection) !void {
+    self.renderer_state.native_submission.cancel();
     // Compute the transition before `select` below, which untracks (frees)
     // the previous selection's tracked pins; reading them after would be a
     // use-after-free.
@@ -2544,6 +2563,7 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
 ///
 /// This can only be called from the main thread.
 pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
+    self.cancelNativeSubmission();
     log.debug("set font size size={}", .{size.points});
 
     // Update our font size so future changes work
@@ -2593,6 +2613,14 @@ fn queueRender(self: *Surface) !void {
     try self.renderer_thread.wakeup.notify();
 }
 
+/// Request an immediate normal update on the first cancellation. The flag
+/// stays set while inactive, so ordinary key/mouse streams do not add repeated
+/// render wakes. begin() resets it for the next admitted empty submission.
+fn cancelNativeSubmission(self: *Surface) void {
+    if (!self.renderer_state.native_submission.cancel_requested.swap(true, .acq_rel))
+        self.queueRender() catch {};
+}
+
 /// Called by the apprt when the surface's display is realized.
 /// Notifies the renderer so it can begin rendering.
 /// Safe to call from the main thread.
@@ -2639,6 +2667,7 @@ pub fn setNativeInputInset(self: *Surface, bottom_px: u32) !void {
 }
 
 pub fn setNativeInputPadding(self: *Surface, horizontal_px: u32, bottom_px: u32) !void {
+    self.native_input_bootstrap = false;
     const content_scale = try self.rt_surface.getContentScale();
     const scale_y = if (content_scale.y > 0 and std.math.isFinite(content_scale.y))
         content_scale.y
@@ -2654,6 +2683,7 @@ pub fn setNativeInputPadding(self: *Surface, horizontal_px: u32, bottom_px: u32)
 }
 
 fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
+    self.cancelNativeSubmission();
     // Save our screen size
     self.size.screen = size;
     try self.recomputePadding();
@@ -2846,6 +2876,7 @@ pub fn keyCallback(
     self: *Surface,
     event_orig: input.KeyEvent,
 ) !InputEffect {
+    self.cancelNativeSubmission();
     // log.warn("text keyCallback event={}", .{event_orig});
 
     // Apply key remappings to transform modifiers before any processing.
@@ -3477,6 +3508,7 @@ fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
 /// if bracketed mode is on this will do a bracketed paste. Otherwise,
 /// this will filter newlines to '\r'.
 pub fn textCallback(self: *Surface, text: []const u8) !void {
+    self.cancelNativeSubmission();
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -3629,6 +3661,15 @@ const ScrollAmount = struct {
     }
 };
 
+/// Convert pixel deltas to whole cells without discarding fractional overshoot.
+/// The signed remainder also lets an opposite gesture undo pending motion.
+fn accumulateScroll(pending: *f64, offset: f64, cell_size: f64) isize {
+    const pixels = pending.* + offset;
+    const cells = @trunc(pixels / cell_size);
+    pending.* = pixels - cells * cell_size;
+    return @intFromFloat(cells);
+}
+
 /// Mouse scroll event. Negative is down, left. Positive is up, right.
 ///
 /// "Natural scrolling" is a macOS term for inverting the scroll direction.
@@ -3640,6 +3681,7 @@ pub fn scrollCallback(
     yoff: f64,
     scroll_mods: input.ScrollMods,
 ) !void {
+    self.cancelNativeSubmission();
     // log.info("SCROLL: xoff={} yoff={} mods={}", .{ xoff, yoff, scroll_mods });
 
     // Crash metadata in case we crash in here
@@ -3680,30 +3722,7 @@ pub fn scrollCallback(
             }
         };
 
-        // Add our previously saved pending amount to the offset to get the
-        // new offset value. The signs of the pending and yoff should match
-        // so that we move further away from zero, but we don't assert
-        // this because in theory a user could scroll in the opposite
-        // direction and undo a pending scroll.
-        const poff: f64 = self.mouse.pending_scroll_y + yoff_adjusted;
-
-        // If the new offset is less than a single unit of scroll, we save
-        // the new pending value and do not scroll yet.
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_y = poff;
-            break :y .{};
-        }
-
-        // We scroll by the number of rows in the offset and save the remainder
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_y = poff - (amount * cell_size);
-
-        // Round towards zero.
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-
-        break :y .{ .delta = delta };
+        break :y .{ .delta = accumulateScroll(&self.mouse.pending_scroll_y, yoff_adjusted, cell_size) };
     };
 
     // For detailed comments see the y calculation above.
@@ -3713,19 +3732,8 @@ pub fn scrollCallback(
             break :x .{ .delta = x_delta_isize };
         }
 
-        const poff: f64 = self.mouse.pending_scroll_x + xoff;
         const cell_size: f64 = @floatFromInt(self.size.cell.width);
-        if (@abs(poff) < cell_size) {
-            self.mouse.pending_scroll_x = poff;
-            break :x .{};
-        }
-
-        const amount = poff / cell_size;
-        assert(@abs(amount) >= 1);
-        self.mouse.pending_scroll_x = poff - (amount * cell_size);
-        const delta: isize = @intFromFloat(@trunc(amount));
-        assert(@abs(delta) >= 1);
-        break :x .{ .delta = delta };
+        break :x .{ .delta = accumulateScroll(&self.mouse.pending_scroll_x, xoff, cell_size) };
     };
 
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
@@ -3972,6 +3980,20 @@ pub fn mouseButtonCallback(
     button: input.MouseButton,
     mods: input.Mods,
 ) !bool {
+    return self.mouseButtonCallbackWithClickCount(action, button, mods, null);
+}
+
+/// The platform may supply a count after another UI owner consumed a press.
+/// Only ordinary left-press selection uses it; terminal mouse reporting and
+/// every other button/action retain their existing behavior.
+pub fn mouseButtonCallbackWithClickCount(
+    self: *Surface,
+    action: input.MouseButtonState,
+    button: input.MouseButton,
+    mods: input.Mods,
+    click_count: ?u2,
+) !bool {
+    self.cancelNativeSubmission();
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -4173,6 +4195,7 @@ pub fn mouseButtonCallback(
         };
 
         var press_selection = try self.mouse.selection_gesture.press(t, .{
+            .click_count = click_count,
             .time = std.Io.Timestamp.now(global.io(), .awake),
             .pin = pin,
             .xpos = pos.x,
@@ -4498,6 +4521,8 @@ fn linkAtPos(
     self: *Surface,
     pos: apprt.CursorPos,
 ) !?Link {
+    if (self.renderer_state.nativeViewport(self.size).clip_bottom) |bottom|
+        if (pos.y >= @as(f64, @floatFromInt(bottom))) return null;
     // Convert our cursor position to a screen point.
     const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
     const mouse_pin: terminal.Pin = mouse_pin: {
@@ -4774,9 +4799,6 @@ pub fn cursorPosCallback(
     // Update our modifiers if they changed
     if (mods) |v| self.modsChanged(v);
 
-    // The mouse position in the viewport
-    const pos_vp = self.posToViewport(pos.x, pos.y);
-
     // We always reset the over link status because it will be reprocessed
     // below. But we need the old value to know if we need to undo mouse
     // shape changes.
@@ -4786,6 +4808,8 @@ pub fn cursorPosCallback(
     // We are reading/writing state for the remainder
     self.renderer_state.mutex.lockUncancelable(global.io());
     defer self.renderer_state.mutex.unlock(global.io());
+
+    const pos_vp = self.posToViewport(pos.x, pos.y);
 
     // Update our mouse state. We set this to null initially because we only
     // want to set it when we're not selecting or doing any other mouse
@@ -4892,7 +4916,7 @@ pub fn cursorPosCallback(
                 .columns = @intCast(self.size.grid().columns),
                 .cell_width = self.size.cell.width,
                 .padding_left = self.size.padding.left,
-                .screen_height = self.size.screen.height,
+                .screen_height = self.renderer_state.nativeViewport(self.size).clip_bottom orelse self.size.screen.height,
             },
         });
 
@@ -4940,11 +4964,19 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
     self.queueIo(.{ .color_scheme_report = .{ .force = false } }, .unlocked);
 }
 
+/// Requires the renderer mutex. Occluded prompt rows are never selectable.
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Get our grid cell
     const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
     const grid = coord.convert(.grid, self.size).grid;
-    return .{ .x = grid.x, .y = grid.y };
+    const viewport = self.renderer_state.nativeViewport(self.size);
+    return .{ .x = grid.x, .y = @intCast(@min(grid.y, viewport.rows -| 1)) };
+}
+
+fn visibleRows(self: *Surface) usize {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    return self.renderer_state.nativeViewport(self.size).rows;
 }
 
 /// Scroll to the bottom of the viewport.
@@ -4990,6 +5022,10 @@ fn showMouse(self: *Surface) void {
 /// will ever return false. We can expand this in the future if it becomes
 /// useful. We did previous/next tab so we could implement #498.
 pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool {
+    // The sole exception is the dedicated native submit widget below. All
+    // other user actions (including search, scroll and selection) release a
+    // pending blank presentation before observing or changing terminal state.
+    if (action != .text) self.cancelNativeSubmission();
     // Forward app-scoped actions to the app. Some app-scoped actions are
     // special-cased here because they do some special things when performed
     // from the surface.
@@ -5062,6 +5098,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 );
                 return true;
             };
+            if (!std.mem.eql(u8, text, "\x1b[99;1~")) self.cancelNativeSubmission();
             self.queueIo(try termio.Message.writeReq(
                 self.alloc,
                 text,
@@ -5450,21 +5487,21 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
         },
 
         .scroll_page_up => {
-            const rows: isize = @intCast(self.size.grid().rows);
+            const rows: isize = @intCast(self.visibleRows());
             self.queueIo(.{
                 .scroll_viewport = .{ .delta = -1 * rows },
             }, .unlocked);
         },
 
         .scroll_page_down => {
-            const rows: isize = @intCast(self.size.grid().rows);
+            const rows: isize = @intCast(self.visibleRows());
             self.queueIo(.{
                 .scroll_viewport = .{ .delta = rows },
             }, .unlocked);
         },
 
         .scroll_page_fractional => |fraction| {
-            const rows: f32 = @floatFromInt(self.size.grid().rows);
+            const rows: f32 = @floatFromInt(self.visibleRows());
             const delta: isize = @intFromFloat(@trunc(fraction * rows));
             self.queueIo(.{
                 .scroll_viewport = .{ .delta = delta },
@@ -5827,7 +5864,8 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // terminal.
                 return false;
             };
-            sel.adjust(screen, switch (direction) {
+            const visible_rows = self.renderer_state.nativeViewport(self.size).rows;
+            sel.adjustByRows(screen, switch (direction) {
                 .left => .left,
                 .right => .right,
                 .up => .up,
@@ -5838,14 +5876,15 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 .end => .end,
                 .beginning_of_line => .beginning_of_line,
                 .end_of_line => .end_of_line,
-            });
+            }, visible_rows);
 
             // If the selection endpoint is outside of the current viewpoint,
             // scroll it in to view. Note we always specifically use sel.end
             // because that is what adjust modifies.
             scroll: {
                 const viewport_tl = screen.pages.getTopLeft(.viewport);
-                const viewport_br = screen.pages.getBottomRight(.viewport).?;
+                var viewport_br = viewport_tl.down(visible_rows -| 1).?;
+                viewport_br.x = screen.pages.cols - 1;
                 if (sel.end().isBetween(viewport_tl, viewport_br))
                     break :scroll;
 
@@ -5855,7 +5894,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 const target = if (sel.end().before(viewport_tl))
                     sel.end()
                 else
-                    sel.end().up(screen.pages.rows - 1) orelse sel.end();
+                    sel.end().up(visible_rows -| 1) orelse sel.end();
 
                 screen.scroll(.{ .pin = target });
             }
@@ -6793,5 +6832,56 @@ test "promptClickRelativeRow" {
             pages.pointFromPin(.viewport, prompt) == null,
         );
         try testing.expectEqual(case.expected, promptClickRelativeRow(&pages, prompt, click));
+    }
+}
+
+test "scroll accumulator preserves overshoot across cell boundaries" {
+    const t = std.testing;
+    var pending: f64 = 0;
+    try t.expectEqual(@as(isize, 1), accumulateScroll(&pending, 25, 20));
+    try t.expectEqual(@as(f64, 5), pending);
+    try t.expectEqual(@as(isize, 1), accumulateScroll(&pending, 15, 20));
+    try t.expectEqual(@as(f64, 0), pending);
+    try t.expectEqual(@as(isize, -2), accumulateScroll(&pending, -55, 20));
+    try t.expectEqual(@as(f64, -15), pending);
+    try t.expectEqual(@as(isize, -1), accumulateScroll(&pending, -5, 20));
+    try t.expectEqual(@as(f64, 0), pending);
+}
+
+test "scroll accumulator reversals conserve signed motion" {
+    const t = std.testing;
+    var pending: f64 = 0;
+    var emitted: isize = 0;
+    var total: f64 = 0;
+    for ([_]f64{ 25, -15, -30, 2, 37, -4, -100, 85, 0 }) |offset| {
+        total += offset;
+        emitted += accumulateScroll(&pending, offset, 20);
+        try t.expectEqual(total, @as(f64, @floatFromInt(emitted)) * 20 + pending);
+        try t.expect(@abs(pending) < 20);
+    }
+}
+
+test "scroll accumulator monotonic partitions preserve total cell motion" {
+    const t = std.testing;
+    // Exact quarter-pixel inputs test positive/negative precision gestures
+    // across vertical and horizontal cell sizes, including overshoot.
+    for ([_]f64{ 1, 7, 20, 31 }) |cell_size| {
+        for ([_]f64{ -1, 1 }) |sign| {
+            for (1..160) |partition| {
+                var pending: f64 = 0;
+                var emitted: isize = 0;
+                var consumed: usize = 0;
+                const total_quarters = 997;
+                while (consumed < total_quarters) {
+                    const step = @min(partition, total_quarters - consumed);
+                    consumed += step;
+                    emitted += accumulateScroll(&pending, sign * @as(f64, @floatFromInt(step)) / 4, cell_size);
+                    try t.expect(@abs(pending) < cell_size);
+                }
+                const total = sign * @as(f64, total_quarters) / 4;
+                try t.expectEqual(@as(isize, @intFromFloat(@trunc(total / cell_size))), emitted);
+                try t.expectEqual(total, @as(f64, @floatFromInt(emitted)) * cell_size + pending);
+            }
+        }
     }
 }

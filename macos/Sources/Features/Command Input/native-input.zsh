@@ -36,6 +36,7 @@ builtin unset PATINA_NATIVE_INPUT_DIR
 builtin typeset -gi _patina_native_counter=0
 builtin typeset -g _patina_native_generation="$$-0"
 builtin typeset -g _patina_native_last_state=''
+builtin typeset -g _patina_native_accepted_generation=''
 builtin typeset -gA _patina_native_seen
 builtin typeset -gA _patina_native_completion_seen
 builtin typeset -gA _patina_native_history_seen
@@ -251,11 +252,10 @@ _patina_native_prepare_prompt() {
     _patina_native_metadata branch "$REPLY"
     _patina_native_metadata status editing
 
-    # A reserves one compact chrome row before the native command input.
-    # A second row would leave a blank terminal line between caption and caret.
+    # A reserves two chrome rows: caption plus its top/bottom block insets.
     # B may repeat during ZLE redisplay. The block identity remains unchanged.
     builtin print -rnu $_patina_native_tty -- \
-        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n'
+        $'\e]133;A;aid='"$_patina_native_block_id"$'\a\n\n'
     _patina_native_apply_prompt
     return 0
 }
@@ -329,6 +329,10 @@ _patina_native_line_init() {
 
 _patina_native_redraw() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    # accept-line can redraw an emptied BUFFER before line-finish runs. That
+    # accepted prompt is still running, never ready for another submission.
+    # A continuation or fresh prompt gets a new generation in line-init.
+    [[ $_patina_native_accepted_generation == $_patina_native_generation ]] && return 0
     if [[ $CONTEXT != start ]]; then
         _patina_native_publish terminal "$CONTEXT"
     elif [[ -n $BUFFER ]]; then
@@ -419,6 +423,7 @@ _patina_native_submit() {
             CURSOR=0
             return 1
         fi
+        _patina_native_accepted_generation=$_patina_native_generation
         _patina_native_publish running start
         builtin zle .accept-line
     } always {

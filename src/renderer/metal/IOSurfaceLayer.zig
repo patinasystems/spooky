@@ -8,6 +8,7 @@ const objc = @import("objc");
 const macos = @import("macos");
 
 const IOSurface = macos.iosurface.IOSurface;
+const NativePresentation = @import("../NativePresentation.zig");
 
 const log = std.log.scoped(.IOSurfaceLayer);
 
@@ -17,8 +18,17 @@ var Subclass: ?objc.Class = null;
 
 /// The underlying CALayer
 layer: objc.Object,
+allocator: Allocator,
+presentation: *Presentation,
 
-pub fn init() !IOSurfaceLayer {
+pub const PresentationCallback = *const fn (?*anyopaque, NativePresentation.Snapshot) void;
+const Presentation = struct {
+    tracker: NativePresentation.Tracker = .{},
+    callback: ?PresentationCallback = null,
+    context: ?*anyopaque = null,
+};
+
+pub fn init(alloc: Allocator) !IOSurfaceLayer {
     // The layer returned by `[CALayer layer]` is autoreleased, which means
     // that at the end of the current autorelease pool it will be deallocated
     // if it isn't retained, so we retain it here manually an extra time.
@@ -35,8 +45,11 @@ pub fn init() !IOSurfaceLayer {
 
     layer.setInstanceVariable("display_cb", .{ .value = null });
     layer.setInstanceVariable("display_ctx", .{ .value = null });
+    const presentation = try alloc.create(Presentation);
+    presentation.* = .{};
+    layer.setInstanceVariable("presentation", objc.Object.fromId(@as(?*anyopaque, @ptrCast(presentation))));
 
-    return .{ .layer = layer };
+    return .{ .layer = layer, .allocator = alloc, .presentation = presentation };
 }
 
 pub fn release(self: *IOSurfaceLayer) void {
@@ -44,13 +57,22 @@ pub fn release(self: *IOSurfaceLayer) void {
     // Clear the callback first so that a later display pass can't access the
     // renderer that owned this wrapper after it has been freed.
     self.setDisplayCallback(null, null);
+    // Queued completion blocks retain the layer, not this allocation. They
+    // reread its nullable context on main and cannot call a destroyed surface.
+    self.layer.setInstanceVariable("presentation", .{ .value = null });
+    self.allocator.destroy(self.presentation);
     self.layer.release();
+}
+
+pub fn setPresentationCallback(self: *IOSurfaceLayer, callback: PresentationCallback, context: ?*anyopaque) void {
+    self.presentation.callback = callback;
+    self.presentation.context = context;
 }
 
 /// Sets the layer's `contents` to the provided IOSurface.
 ///
 /// Makes sure to do so on the main thread to avoid visual artifacts.
-pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface) !void {
+pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface, snapshot: NativePresentation.Snapshot) !void {
     // We retain the surface to make sure it's not GC'd
     // before we can set it as the contents of the layer.
     //
@@ -63,6 +85,7 @@ pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface) !void {
     var block = SetSurfaceBlock.init(.{
         .layer = self.layer.value,
         .surface = surface,
+        .snapshot = snapshot,
     }, &setSurfaceCallback);
 
     // We check if we're on the main thread and run the block directly if so.
@@ -84,13 +107,17 @@ pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface) !void {
 /// Sets the layer's `contents` to the provided IOSurface.
 ///
 /// Does not ensure this happens on the main thread.
-pub inline fn setSurfaceSync(self: *IOSurfaceLayer, surface: *IOSurface) void {
+pub inline fn setSurfaceSync(self: *IOSurfaceLayer, surface: *IOSurface, snapshot: NativePresentation.Snapshot) void {
+    // A synchronous resize draw holds the renderer's draw lock. It establishes
+    // frame ordering but must not reenter AppKit/native APIs under that lock.
+    if (!self.presentation.tracker.admit(snapshot, false).present) return;
     self.layer.setProperty("contents", surface);
 }
 
 const SetSurfaceBlock = objc.Block(struct {
     layer: objc.c.id,
     surface: *IOSurface,
+    snapshot: NativePresentation.Snapshot,
 }, .{}, void);
 
 fn setSurfaceCallback(
@@ -119,7 +146,14 @@ fn setSurfaceCallback(
         return;
     }
 
+    const presentation: *Presentation = @ptrCast(@alignCast(layer.getInstanceVariable("presentation").value orelse return));
+    const admission = presentation.tracker.admit(block.snapshot, true);
+    if (!admission.present) return;
     layer.setProperty("contents", surface);
+    // The native visual handoff changes in this same main-thread transaction,
+    // after the new pixels are attached; GPU completion alone is insufficient.
+    if (admission.notify) if (presentation.callback) |callback|
+        callback(presentation.context, block.snapshot);
 }
 
 pub const DisplayCallback = ?*align(8) const fn (?*anyopaque) void;
@@ -151,6 +185,7 @@ fn getSubclass() error{ObjCFailed}!objc.Class {
 
     if (!subclass.addIvar("display_cb")) return error.ObjCFailed;
     if (!subclass.addIvar("display_ctx")) return error.ObjCFailed;
+    if (!subclass.addIvar("presentation")) return error.ObjCFailed;
 
     subclass.replaceMethod("display", struct {
         fn display(target: objc.c.id, sel: objc.c.SEL) callconv(.c) void {

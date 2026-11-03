@@ -4888,6 +4888,9 @@ pub fn deccolm(self: *Terminal, alloc: Allocator, mode: DeccolmMode) !void {
 ///
 /// Cell pixel dimensions must already be scaled for the current display DPI.
 pub const Resize = struct {
+    /// A native editor owns the shell's empty input buffer. Preserve any
+    /// unlabelled background output instead of clearing it as shell input.
+    preserve_prompt: bool = false,
     cols: size.CellCountInt,
     rows: size.CellCountInt,
     cell_size_px: ?struct {
@@ -4994,7 +4997,7 @@ pub fn resize(
         .cols = opts.cols,
         .rows = opts.rows,
         .reflow = self.modes.get(.wraparound),
-        .prompt_redraw = self.flags.shell_redraws_prompt,
+        .prompt_redraw = if (opts.preserve_prompt) .false else self.flags.shell_redraws_prompt,
         .pull_scrollback = self.flags.resize_pull_scrollback,
     });
 
@@ -19854,4 +19857,38 @@ test "Terminal: eraseDisplay complete at input prompt copied from alt screen scr
     t.eraseDisplay(.complete, false);
 
     try testing.expect(t.screens.active.pages.total_rows > t.screens.active.pages.rows);
+}
+
+test "Terminal: native bootstrap padding avoids reflowing the PROMPT_SP header" {
+    // A normal zsh prompt-sp redraw fills the old line with spaces before
+    // returning to column zero. Those blank-but-written cells still reflow.
+    // Native horizontal padding must be present before the first prompt.
+    const spaces: [94]u8 = @splat(' ');
+    for ([_]bool{ false, true }) |late_padding| {
+        var t = try init(testing.io, testing.allocator, .{
+            .cols = if (late_padding) 94 else 92,
+            .rows = if (late_padding) 35 else 34,
+        });
+        defer t.deinit(testing.allocator);
+        var stream = t.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(spaces[0..t.cols]);
+        stream.nextSlice("\r \r\x1b]133;A;aid=bootstrap\x07\r\n" ++
+            "\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;B;aid=bootstrap\x07\x1b[K");
+        const before = t.screens.active.command_blocks.blocks.items[0];
+        try testing.expectEqual(@as(u32, 0), t.screens.active.pages.pointFromPin(.screen, before.header.?.*).?.screen.y);
+        try testing.expectEqual(@as(u32, 1), t.screens.active.pages.pointFromPin(.screen, before.input.?.*).?.screen.y);
+
+        try t.resize(testing.allocator, .{ .cols = 92, .rows = 34 });
+        // SIGWINCH redraw repeats B but adds no LF. Preserve the original B
+        // pin exactly as the adapter/core do during real ZLE redisplay.
+        stream.nextSlice("\r\x1b[0m\x1b[27m\x1b[24m\x1b[J\x1b]133;B;aid=bootstrap\x07\x1b[K");
+        const after = t.screens.active.command_blocks.blocks.items[0];
+        const header_row = t.screens.active.pages.pointFromPin(.screen, after.header.?.*).?.screen.y;
+        const input_row = t.screens.active.pages.pointFromPin(.screen, after.input.?.*).?.screen.y;
+        try testing.expectEqual(@as(u32, 0), header_row);
+        try testing.expectEqual(@as(u32, if (late_padding) 2 else 1), input_row);
+        try testing.expectEqual(input_row, t.screens.active.cursor.y);
+        try testing.expectEqualStrings("bootstrap", std.mem.sliceTo(&t.last_primary_input_id, 0));
+    }
 }

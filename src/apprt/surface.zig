@@ -148,6 +148,10 @@ pub const Message = union(enum) {
     /// of the command.
     stop_command: ?u8,
 
+    /// A tagged native-input boundary was parsed. Read the latest terminal
+    /// snapshot; this notification is sent after releasing its mutex.
+    native_input_boundary,
+
     /// The scrollbar state changed for the surface.
     scrollbar: terminal.Scrollbar,
 

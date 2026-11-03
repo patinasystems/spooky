@@ -254,6 +254,12 @@ pub const Press = struct {
 
     /// Selection behaviors for single-, double-, and triple-clicks.
     behaviors: *const [3]Behavior = &default_behaviors,
+
+    /// An authoritative platform click count when an earlier press was handled
+    /// by another UI owner. Null preserves the normal timing/distance logic.
+    /// A supplied count must be 1...3 and anchors this real press, without
+    /// replaying the presses that this gesture did not receive.
+    click_count: ?u2 = null,
 };
 
 /// Record a press event and return the standard selection for this click.
@@ -280,6 +286,15 @@ pub fn press(
     t: *Terminal,
     p: Press,
 ) Allocator.Error!?Selection {
+    if (p.click_count) |count| {
+        assert(count > 0);
+        self.reset(t);
+        try self.pressInitial(t, p);
+        self.left_click_count = count;
+        self.left_click_behavior = p.behaviors[count - 1];
+        return self.pressSelection(t.screens.active, p);
+    }
+
     if (self.left_click_count > 0) {
         if (self.pressRepeat(t, p)) {
             // Successful repeat.
@@ -1451,6 +1466,102 @@ test "SelectionGesture press returns standard click selections" {
         testPin(&t, 9, 0),
         false,
     ), (try gesture.press(&t, event)).?);
+}
+
+test "SelectionGesture platform click count selects one two and three" {
+    var t = try Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    try t.printString("alpha beta");
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+    // Native counts do not depend on an internal timestamp or repeat history.
+    var event = testPress(&t, 1, 0, null);
+    event.word_boundary_codepoints = &.{' '};
+    event.click_count = 1;
+    try testing.expectEqual(null, try gesture.press(&t, event));
+    try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
+    gesture.release(&t, .{ .pin = event.pin });
+
+    event.click_count = 2;
+    try testing.expectEqualDeep(Selection.init(
+        testPin(&t, 0, 0),
+        testPin(&t, 4, 0),
+        false,
+    ), (try gesture.press(&t, event)).?);
+    try testing.expectEqual(@as(u3, 2), gesture.left_click_count);
+    gesture.release(&t, .{ .pin = event.pin });
+
+    event.click_count = 3;
+    try testing.expectEqualDeep(Selection.init(
+        testPin(&t, 0, 0),
+        testPin(&t, 9, 0),
+        false,
+    ), (try gesture.press(&t, event)).?);
+    try testing.expectEqual(@as(u3, 3), gesture.left_click_count);
+}
+
+test "SelectionGesture platform count after intercepted first click preserves word and line drag" {
+    var t = try Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    try t.printString("alpha beta\none two\nthree four");
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+    // No first press is sent: another owner handled the native single click.
+    var event = testPress(&t, 1, 0, null);
+    event.word_boundary_codepoints = &.{' '};
+    event.click_count = 2;
+    _ = try gesture.press(&t, event);
+    try testing.expectEqual(.word, gesture.left_click_behavior);
+    var drag_event = testDrag(&t, 7, 0, 70, 50);
+    drag_event.word_boundary_codepoints = &.{' '};
+    try testing.expectEqualDeep(Selection.init(
+        testPin(&t, 0, 0),
+        testPin(&t, 9, 0),
+        false,
+    ), gesture.drag(&t, drag_event).?);
+    gesture.release(&t, .{ .pin = drag_event.pin });
+    try testing.expect(gesture.left_click_dragged);
+
+    event.click_count = 3;
+    _ = try gesture.press(&t, event);
+    try testing.expectEqual(.line, gesture.left_click_behavior);
+    try testing.expect(!gesture.left_click_dragged);
+    try testing.expectEqualDeep(Selection.init(
+        testPin(&t, 0, 0),
+        testPin(&t, 9, 2),
+        false,
+    ), gesture.drag(&t, testDrag(&t, 2, 2, 20, 50)).?);
+}
+
+test "SelectionGesture platform count replaces stale anchor and leaves ordinary repeats intact" {
+    var t = try Terminal.init(testing.io, testing.allocator, .{ .cols = 20, .rows = 5 });
+    defer t.deinit(testing.allocator);
+    try t.printString("alpha beta");
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+    const time = std.Io.Timestamp.now(testing.io, .awake);
+    var event = testPress(&t, 1, 0, time);
+    event.click_count = 3;
+    _ = try gesture.press(&t, event);
+
+    event = testPress(&t, 7, 0, time);
+    event.click_count = 1;
+    try testing.expectEqual(null, try gesture.press(&t, event));
+    try testing.expect(gesture.validatedLeftClickPin(&t.screens).?.eql(event.pin));
+    try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
+
+    // Returning to the unchanged ordinary API continues its own repeat logic.
+    event.click_count = null;
+    event.word_boundary_codepoints = &.{' '};
+    try testing.expectEqualDeep(Selection.init(
+        testPin(&t, 6, 0),
+        testPin(&t, 9, 0),
+        false,
+    ), (try gesture.press(&t, event)).?);
+    try testing.expectEqual(@as(u3, 2), gesture.left_click_count);
 }
 
 test "SelectionGesture press behaviors choose press and drag behavior" {

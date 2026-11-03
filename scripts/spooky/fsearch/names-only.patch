@@ -15,7 +15,7 @@ index 954039d..3969072 100644
      /// view of an engine that follows another process's index.
      pub fn open_shared(dir: PathBuf) -> Content {
 diff --git a/src/engine.rs b/src/engine.rs
-index 35c3922..a111b9c 100644
+index 35c3922..65a9720 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
 @@ -91,6 +91,8 @@ struct Shared {
@@ -132,7 +132,7 @@ index 35c3922..a111b9c 100644
 +        no_materialize();
 +        rayon::ThreadPoolBuilder::new().num_threads(2)
 +            .thread_name(|i| format!("fsearch-index-{i}"))
-+            .start_handler(|_| no_materialize())
++            .start_handler(|_| background_index_worker())
 +            .build_global().map_err(|e| e.to_string())
 +    }).clone()
 +}
@@ -144,13 +144,32 @@ index 35c3922..a111b9c 100644
  /// Never let indexing download iCloud placeholders: on the calling thread,
  /// opening or listing a dataless file fails fast instead of materializing it.
  pub fn no_materialize() {
-@@ -145,11 +250,25 @@ pub fn no_materialize() {
+@@ -145,11 +250,44 @@ pub fn no_materialize() {
      }
      // IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, IOPOL_SCOPE_THREAD, OFF
      unsafe { setiopolicy_np(3, 1, 1) };
 +    if FILENAME_HELPER_WORKERS.load(Ordering::Relaxed) {
 +        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
 +    }
++}
++
++/// Background QoS supplies both CPU and I/O scheduling for index work.
++/// A separate thread-scoped disk policy would strip the thread's QoS on macOS.
++/// Queries and event delivery keep their independently configured policies.
++pub(crate) fn background_index_worker() {
++    no_materialize();
++    if FILENAME_HELPER_WORKERS.load(Ordering::Relaxed) {
++        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0) };
++    }
++}
++
++/// Subtree scans serve both background updates and on-demand scoped searches.
++/// Propagate background scheduling only when the caller is an index worker.
++pub(crate) fn background_indexing() -> bool {
++    if !FILENAME_HELPER_WORKERS.load(Ordering::Relaxed) { return false; }
++    let mut qos = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
++    let result = unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut qos, std::ptr::null_mut()) };
++    result == 0 && qos as u32 == libc::qos_class_t::QOS_CLASS_BACKGROUND as u32
  }
  
  /// Searches run here, at user-interactive QoS: an app's background executor
@@ -170,7 +189,16 @@ index 35c3922..a111b9c 100644
  fn search_pool() -> &'static rayon::ThreadPool {
      LAST_SEARCH.store(now_ns(), Ordering::Relaxed);
      pool()
-@@ -227,7 +346,16 @@ impl Engine {
+@@ -217,7 +355,7 @@ fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
+     std::thread::Builder::new()
+         .name(name.into())
+         .spawn(move || {
+-            no_materialize();
++            background_index_worker();
+             f()
+         })
+         .expect("spawn");
+@@ -227,7 +365,16 @@ impl Engine {
      /// Start indexing in the background and return at once. Searches wait
      /// while a saved index loads, and answer `Err` while the very first run
      /// builds one.
@@ -188,7 +216,7 @@ index 35c3922..a111b9c 100644
          std::fs::create_dir_all(&opts.dir).map_err(|e| e.to_string())?;
          // Home as paths are compared to it: "/h/" put nothing in content scope.
          if opts.home.len() > 1 && opts.home.ends_with('/') {
-@@ -253,12 +381,20 @@ impl Engine {
+@@ -253,12 +400,20 @@ impl Engine {
          let loading = Index::load(&dir.join("index.bin"));
          let (tx, rx) = std::sync::mpsc::channel();
          let (ctx, crx) = std::sync::mpsc::channel();
@@ -210,7 +238,7 @@ index 35c3922..a111b9c 100644
              home: opts.home,
              dir,
              wake: tx,
-@@ -279,7 +415,7 @@ impl Engine {
+@@ -279,7 +434,7 @@ impl Engine {
              content_early: Mutex::new(Vec::new()),
              on_change: RwLock::new(Vec::new()),
          });
@@ -219,17 +247,17 @@ index 35c3922..a111b9c 100644
              start_content(&shared);
          }
          let s = shared.clone();
-@@ -288,6 +424,9 @@ impl Engine {
+@@ -288,6 +443,9 @@ impl Engine {
          // mapped, so a restart's first answer needn't wait (`fsearch <query>`
          // with no daemon running: 33 -> 27 ms on the M6).
          spawn("fsearch-apply", move || {
-+            if !s.content_index_enabled {
++            if !s.content_index_enabled && !FILENAME_HELPER_WORKERS.load(Ordering::Relaxed) {
 +                unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
 +            }
              let (live, replay) = match loading {
                  Some(b) => {
                      log(format!("loaded {} entries, replaying events since {}", b.n, b.event_id));
-@@ -316,7 +455,9 @@ impl Engine {
+@@ -316,7 +474,9 @@ impl Engine {
                      }
                  },
              };
@@ -239,7 +267,7 @@ index 35c3922..a111b9c 100644
              s.early.lock().unwrap().clear();
              *s.loading.0.lock().unwrap() = false;
              s.loading.1.notify_all();
-@@ -324,10 +465,12 @@ impl Engine {
+@@ -324,10 +484,12 @@ impl Engine {
                  // (A save from before event ids were stamped: from now.)
                  s.watch(if owner && from == 0 { fsevents::current_id() } else { from });
              }
@@ -252,7 +280,7 @@ index 35c3922..a111b9c 100644
                  rescan_unskipped(&s);
              }
              apply_loop(&s, rx);
-@@ -360,7 +503,7 @@ impl Engine {
+@@ -360,7 +522,7 @@ impl Engine {
          WARM_UNTIL.store(0, Ordering::Relaxed);
          let (found, early) = self.s.with_names(q.scope.as_deref(), |live| {
              let mut p = Vec::new();
@@ -261,7 +289,7 @@ index 35c3922..a111b9c 100644
                  .install(|| Searcher { live }.search(q))
                  .into_iter()
                  .map(|h| {
-@@ -388,6 +531,9 @@ impl Engine {
+@@ -388,6 +550,9 @@ impl Engine {
      /// The bool says whether the content index answered (false: files were
      /// picked from the name index and read, for folders it doesn't cover).
      pub fn grep(&self, q: &Query, g: &Grep) -> Result<(GrepResult, bool), String> {
@@ -271,7 +299,7 @@ index 35c3922..a111b9c 100644
          WARM_UNTIL.store(0, Ordering::Relaxed);
          let home = self.s.home.as_bytes();
          let indexed = q.scope.as_ref().is_none_or(|s| content::in_scope(s, home));
-@@ -425,6 +571,10 @@ impl Engine {
+@@ -425,6 +590,10 @@ impl Engine {
          Ok((content::verify(g, &paths, q.limit), false))
      }
  
@@ -282,7 +310,7 @@ index 35c3922..a111b9c 100644
      pub fn status(&self) -> Status {
          let l = self.s.live.read().unwrap();
          let c = self.s.content.read().unwrap();
-@@ -513,7 +663,7 @@ impl Shared {
+@@ -513,7 +682,7 @@ impl Shared {
          }
          let t = Instant::now();
          let hold = walk::Hold::new();
@@ -291,7 +319,7 @@ index 35c3922..a111b9c 100644
          drop(hold);
          let live = Live::new(Index::build(ls, 0, 0, self.home.as_bytes()));
          log(format!("listed {} first: {} entries in {:.2?}", String::from_utf8_lossy(dir), live.base.n, t.elapsed()));
-@@ -528,6 +678,7 @@ impl Shared {
+@@ -528,6 +697,7 @@ impl Shared {
      /// build reads the same files as the answer's direct scan.
      fn index_first(&self, early: Option<Arc<Early>>) {
          if let Some(e) = early
@@ -299,7 +327,7 @@ index 35c3922..a111b9c 100644
              && self.owner()
              && content::in_scope(&e.dir, self.home.as_bytes())
              && !e.indexing.swap(true, Ordering::Relaxed)
-@@ -567,6 +718,7 @@ impl Shared {
+@@ -567,6 +737,7 @@ impl Shared {
              self.watch(base.event_id);
              *self.live.write().unwrap() = Some(Live::new(base));
          }
@@ -307,7 +335,7 @@ index 35c3922..a111b9c 100644
          let cdir = self.dir.join("content");
          let changed = std::fs::metadata(&cdir).and_then(|m| m.modified()).ok();
          let mut seen = self.content_seen.lock().unwrap();
-@@ -593,9 +745,11 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
+@@ -593,9 +764,11 @@ fn try_upgrade(s: &Arc<Shared>) -> bool {
      }
      s.owner.store(true, Ordering::Relaxed);
      log("took over the index from a previous owner");
@@ -321,7 +349,7 @@ index 35c3922..a111b9c 100644
      true
  }
  
-@@ -664,7 +818,7 @@ const EARLY_THREADS: usize = 16;
+@@ -664,7 +837,7 @@ const EARLY_THREADS: usize = 16;
  /// whole subtree. Where the whole-disk crawl would not descend (a mount
  /// point, a file, a missing or skipped folder) the chain stops, and the
  /// index has nothing under `dir` either.
@@ -330,7 +358,7 @@ index 35c3922..a111b9c 100644
      let comps: Vec<&[u8]> = dir.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
      let (mut out, mut path) = (Vec::new(), b"/".to_vec());
      for (i, &c) in comps.iter().enumerate() {
-@@ -679,7 +833,7 @@ fn folder_listings(dir: &[u8]) -> Vec<Listing> {
+@@ -679,7 +852,7 @@ fn folder_listings(dir: &[u8]) -> Vec<Listing> {
          }
      }
      let k = comps.len() as u32;
@@ -339,7 +367,7 @@ index 35c3922..a111b9c 100644
          l.id += k;
          for e in l.ents.iter_mut().filter(|e| e.child != NONE) {
              e.child += k;
-@@ -890,8 +1044,11 @@ fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs
+@@ -890,8 +1063,11 @@ fn build_batches(shared: &Shared, pool: &rayon::ThreadPool, todo: &content::Docs
  fn full_build(shared: &Shared, event_id: u64) -> Index {
      let t = Instant::now();
      let started = crate::query::now_secs();
@@ -352,7 +380,7 @@ index 35c3922..a111b9c 100644
      let path = shared.dir.join("index.bin");
      let saved = idx.save(&path);
      if let Err(e) = &saved {
-@@ -916,6 +1073,8 @@ fn release_memory() {
+@@ -916,6 +1092,8 @@ fn release_memory() {
  }
  
  fn compact(shared: &Shared) {
@@ -361,7 +389,7 @@ index 35c3922..a111b9c 100644
      let t = Instant::now();
      let (ls, eid, synced) = {
          let g = shared.live.read().unwrap();
-@@ -932,7 +1091,9 @@ fn compact(shared: &Shared) {
+@@ -932,7 +1110,9 @@ fn compact(shared: &Shared) {
      // (After a failed save the file is older: keep the one just built.)
      let idx = if saved.is_ok() { Index::load(&path).unwrap_or(idx) } else { idx };
      let n = idx.n;
@@ -371,7 +399,7 @@ index 35c3922..a111b9c 100644
      release_memory();
      log(format!("compacted to {n} entries in {:.2?}", t.elapsed()));
  }
-@@ -942,6 +1103,7 @@ fn compact(shared: &Shared) {
+@@ -942,6 +1122,7 @@ fn compact(shared: &Shared) {
  /// folders of indexed text files edited since (an edit in place doesn't
  /// touch its folder). Seconds, instead of recrawling the whole disk.
  fn relist_changed(shared: &Shared, why: &str, flags: u32) {
@@ -379,7 +407,7 @@ index 35c3922..a111b9c 100644
      let t = Instant::now();
      let started = crate::query::now_secs();
      // synced_at 0 (unknown) relists everything: a full crawl, done in place.
-@@ -968,7 +1130,9 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
+@@ -968,7 +1149,9 @@ fn relist_changed(shared: &Shared, why: &str, flags: u32) {
          std::mem::take(&mut live.trees)
      };
      let n = dirs.len();
@@ -390,7 +418,7 @@ index 35c3922..a111b9c 100644
      shared.on_change.read().unwrap().iter().for_each(|f| f(&[(&b"/"[..], true)]));
      log(format!(
          "FSEvents lost track of / ({why}, flags {flags:#x}): relisted {n} folders changed since {from} in {:.2?} ({stat_time:.2?} checking)",
-@@ -1053,6 +1217,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
+@@ -1053,6 +1236,7 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
      let mut replays = 0;
      let mut pace = Pace::default();
      loop {
@@ -398,7 +426,7 @@ index 35c3922..a111b9c 100644
          let wait = if gap.is_some() { Duration::from_millis(250) } else { Duration::from_secs(60) };
          let wait = pace.wait(Instant::now()).map_or(wait, |w| w.min(wait));
          let mut events = match rx.recv_timeout(wait) {
-@@ -1063,6 +1228,13 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
+@@ -1063,6 +1247,13 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
          events.extend(rx.try_iter().flatten());
          // The owner wrote the index files: a follower picks that up now
          // rather than at its next periodic check.
@@ -412,7 +440,7 @@ index 35c3922..a111b9c 100644
          let owner_wrote = events.iter().any(|e| under(&e.path, ours));
          let (mut rebuild, mut root_flags, had_events) = (false, 0, !events.is_empty());
          let (mut dirs, mut max_id): (HashMap<Vec<u8>, (bool, u64)>, u64) = (HashMap::new(), 0);
-@@ -1104,6 +1276,8 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
+@@ -1104,6 +1295,8 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
          let now = Instant::now();
          pace.sort(&mut dirs, now);
          if !dirs.is_empty() {
@@ -421,7 +449,7 @@ index 35c3922..a111b9c 100644
              // The folders listed now (a held one is told when it is due).
              let hooks = shared.on_change.read().unwrap();
              if !hooks.is_empty() {
-@@ -1144,7 +1318,9 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
+@@ -1144,7 +1337,9 @@ fn apply_loop(shared: &Arc<Shared>, rx: Receiver<Vec<fsevents::Event>>) {
              }
              let (rec, flat): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|(_, (r, _))| *r);
              trees.extend(rec.into_iter().map(|(p, _)| p));
@@ -432,7 +460,7 @@ index 35c3922..a111b9c 100644
          }
          let replay = gap.filter(|(_, at)| at.elapsed() >= REPLAY_QUIET).map(|(from, _)| from);
          if rebuild || (replay.is_some() && replays >= 3) {
-@@ -1233,3 +1409,62 @@ mod tests {
+@@ -1233,3 +1428,79 @@ mod tests {
          assert!(walk::blocked(b"/nonexistent-fsearch-skip/x") && !walk::blocked(b"/usr"));
      }
  }
@@ -472,7 +500,7 @@ index 35c3922..a111b9c 100644
 +        assert_eq!(probe.snapshot(false).phase, "waiting");
 +    }
 +    #[test]
-+    fn filename_helper_worker_policy_bounds_background_pools_and_preserves_search_qos() {
++    fn filename_helper_background_workers_preserve_on_demand_search_policy() {
 +        fn current_qos() -> u32 {
 +            let mut qos = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
 +            assert_eq!(unsafe { libc::pthread_get_qos_class_np(libc::pthread_self(), &mut qos, std::ptr::null_mut()) }, 0);
@@ -481,17 +509,34 @@ index 35c3922..a111b9c 100644
 +        configure_filename_helper_workers().unwrap();
 +        configure_filename_helper_workers().unwrap();
 +        assert_eq!(current_qos(), libc::qos_class_t::QOS_CLASS_UTILITY as u32);
++        assert!(!background_indexing());
 +        assert_eq!(index_worker_count(12), 2);
 +        assert_eq!(index_worker_count(1), 1);
-+        let global = rayon::broadcast(|_| current_qos());
++        let index_policy = (libc::qos_class_t::QOS_CLASS_BACKGROUND as u32, true);
++        let global = rayon::broadcast(|_| (current_qos(), background_indexing()));
 +        assert_eq!(global.len(), 2);
-+        assert!(global.iter().all(|&q| q == libc::qos_class_t::QOS_CLASS_UTILITY as u32));
-+        let stat = crate::live::stat_pool().broadcast(|_| current_qos());
++        assert!(global.iter().all(|&policy| policy == index_policy));
++        let stat = crate::live::stat_pool().broadcast(|_| (current_qos(), background_indexing()));
 +        assert_eq!(stat.len(), 2);
-+        assert!(stat.iter().all(|&q| q == libc::qos_class_t::QOS_CLASS_UTILITY as u32));
-+        let search = names_pool().broadcast(|_| current_qos());
++        assert!(stat.iter().all(|&policy| policy == index_policy));
++        let (tx, rx) = std::sync::mpsc::channel();
++        spawn("fsearch-policy-test", move || {
++            let subtree = walk::scan_pool(8).broadcast(|_| (current_qos(), background_indexing()));
++            tx.send(((current_qos(), background_indexing()), subtree)).unwrap();
++        });
++        let (apply, subtree) = rx.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert_eq!(apply, index_policy);
++        assert_eq!(subtree.len(), 2);
++        assert!(subtree.iter().all(|&policy| policy == index_policy));
++        // The same subtree scan also serves an early scoped query. Its caller
++        // is a request worker, so it must retain the original utility policy.
++        let scoped = walk::scan_pool(8).broadcast(|_| (current_qos(), background_indexing()));
++        assert_eq!(scoped.len(), 2);
++        assert!(scoped.iter().all(|&policy| policy == (libc::qos_class_t::QOS_CLASS_UTILITY as u32, false)));
++        let search = names_pool().broadcast(|_| (current_qos(), background_indexing()));
 +        assert_eq!(search.len(), 2);
-+        assert!(search.iter().all(|&q| q == libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32));
++        assert!(search.iter().all(|&policy|
++            policy == (libc::qos_class_t::QOS_CLASS_USER_INITIATED as u32, false)));
 +    }
 +
 +}
@@ -507,7 +552,7 @@ index 2d4da61..0a73963 100644
 +pub use engine::{Engine, Found, Options, Status, configure_filename_helper_workers, default_dir, gated, has_full_disk_access, no_materialize};
  pub use query::{GrepMode, Query};
 diff --git a/src/live.rs b/src/live.rs
-index 9bf1559..0319821 100644
+index 9bf1559..7ad995b 100644
 --- a/src/live.rs
 +++ b/src/live.rs
 @@ -468,7 +468,7 @@ impl Live {
@@ -515,7 +560,7 @@ index 9bf1559..0319821 100644
  /// Threads for bulk lstat: path lookups scale further than opens do.
  pub fn stat_pool() -> rayon::ThreadPool {
 -    rayon::ThreadPoolBuilder::new().num_threads(12).start_handler(|_| crate::no_materialize()).build().unwrap()
-+    rayon::ThreadPoolBuilder::new().num_threads(crate::engine::index_worker_count(12)).start_handler(|_| crate::no_materialize()).build().unwrap()
++    rayon::ThreadPoolBuilder::new().num_threads(crate::engine::index_worker_count(12)).start_handler(|_| crate::engine::background_index_worker()).build().unwrap()
  }
  
  /// Visit every entry of a scan with its full path.
@@ -552,7 +597,7 @@ index d0d1a6c..2e00192 100644
      /// `'x` exact, `^x` prefix, `x$` suffix, `!x` negate; globs (`*.rs`,
      /// `src/**/*.{c,h}`) and folders (`test/`), each negated by `!`;
 diff --git a/src/walk.rs b/src/walk.rs
-index e029cc3..14bf002 100644
+index e029cc3..12b747f 100644
 --- a/src/walk.rs
 +++ b/src/walk.rs
 @@ -121,6 +121,7 @@ pub fn scan_disk(threads: usize) -> Vec<Listing> {
@@ -563,3 +608,28 @@ index e029cc3..14bf002 100644
      raise_fd_limit();
      let fd = if blocked(root) { -1 } else { CString::new(root).map_or(-1, |c| unsafe { libc::open(c.as_ptr(), OPEN_DIR) }) };
      // Paths are only tracked when there is something to skip.
+@@ -146,7 +147,7 @@ fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {
+         }
+         return vec![l];
+     }
+-    let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).start_handler(|_| crate::no_materialize()).build().unwrap();
++    let pool = scan_pool(threads);
+     let ctx = Ctx { next_id: AtomicU32::new(1), out: (0..threads + 1).map(|_| Mutex::new(Vec::new())).collect(), disk };
+     pool.scope(|s| descend(s, fd, path, l, &ctx));
+     let parts: Vec<Vec<Listing>> = ctx.out.into_iter().map(|m| m.into_inner().unwrap()).collect();
+@@ -157,6 +158,15 @@ fn scan_with(root: &[u8], threads: usize, disk: bool) -> Vec<Listing> {
+     out
+ }
+ 
++/// A subtree scan inherits the background role of its caller; on-demand
++/// scoped queries use the same scanner without being demoted to index work.
++pub(crate) fn scan_pool(threads: usize) -> rayon::ThreadPool {
++    let background = crate::engine::background_indexing();
++    rayon::ThreadPoolBuilder::new().num_threads(crate::engine::index_worker_count(threads)).start_handler(move |_| {
++        if background { crate::engine::background_index_worker(); } else { crate::no_materialize(); }
++    }).build().unwrap()
++}
++
+ fn raise_fd_limit() {
+     let mut r: libc::rlimit = unsafe { std::mem::zeroed() };
+     unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) };

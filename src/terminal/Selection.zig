@@ -416,6 +416,11 @@ pub fn adjust(
     s: *const Screen,
     adjustment: Adjustment,
 ) void {
+    self.adjustByRows(s, adjustment, s.pages.rows);
+}
+
+/// App-owned overlays may expose fewer rows than the subprocess grid.
+pub fn adjustByRows(self: *Selection, s: *const Screen, adjustment: Adjustment, page_rows: usize) void {
     // Note that we always adjust "end" because end always represents
     // the last point of the selection by mouse, not necessarily the
     // top/bottom visually. So this results in the correct behavior
@@ -470,13 +475,13 @@ pub fn adjust(
             }
         },
 
-        .page_up => if (end_pin.up(s.pages.rows)) |new_end| {
+        .page_up => if (end_pin.up(page_rows)) |new_end| {
             end_pin.* = new_end;
         } else {
             self.adjust(s, .home);
         },
 
-        .page_down => if (end_pin.down(s.pages.rows)) |new_end| {
+        .page_down => if (end_pin.down(page_rows)) |new_end| {
             end_pin.* = new_end;
         } else {
             self.adjust(s, .end);
@@ -1673,4 +1678,17 @@ test "Selection: containedRow clamps mixed-width pages" {
     _ = rectangle_row.end().rowAndCell();
     try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.start()));
     try testing.expect((Pin{ .node = middle, .x = 1 }).eql(rectangle_row.end()));
+}
+
+test "Selection: visible viewport page distance preserves raw grid dimensions" {
+    const t = std.testing;
+    var screen = try Screen.init(t.io, t.allocator, .{ .cols = 10, .rows = 10, .max_scrollback_bytes = 0 });
+    defer screen.deinit();
+    const top = screen.pages.getTopLeft(.screen);
+    var selection = Selection.init(top, top, false);
+    selection.adjustByRows(&screen, .page_down, 8);
+    try t.expectEqual(@as(usize, 8), screen.pages.pointFromPin(.screen, selection.end()).?.screen.y);
+    try t.expectEqual(@as(usize, 10), screen.pages.rows);
+    selection.adjustByRows(&screen, .page_up, 8);
+    try t.expect(selection.end().eql(top));
 }

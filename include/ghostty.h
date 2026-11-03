@@ -555,6 +555,7 @@ typedef struct {
   uint32_t rows;
   uint64_t scrollback_rows; // Retained rows, including rows introduced by resize.
   uint32_t active_cursor_row; // Independent of the viewport while scrolling.
+  uint32_t compact_prompt_rows; // Validated empty A/B tail, independent of viewport.
   double unreserved_grid_height; // Logical grid height without native bottom inset.
   double cell_width;
   double cell_height;
@@ -590,6 +591,37 @@ typedef struct {
   double width;
   double height;
 } ghostty_command_path_hit_s;
+
+// A bounded, copied hover probe. The application validates literal local paths
+// asynchronously; no filesystem operations occur in libghostty. Byte ranges
+// are UTF-8 offsets into text, never into a shell-expanded string.
+typedef enum {
+  GHOSTTY_PATH_PROBE_NONE = 0,
+  GHOSTTY_PATH_PROBE_HIT = 1,
+  GHOSTTY_PATH_PROBE_BUSY = 2,
+} ghostty_path_probe_status_e;
+typedef enum {
+  GHOSTTY_PATH_KIND_HEADER = 0,
+  GHOSTTY_PATH_KIND_OUTPUT = 1,
+  GHOSTTY_PATH_KIND_LOCAL_OSC8 = 2,
+} ghostty_path_kind_e;
+typedef struct {
+  uint64_t hit_id;
+  ghostty_path_kind_e kind;
+  char block_id[65];
+  uint32_t text_len;
+  uint32_t hover_byte;
+  uint32_t uri_len;
+  uint8_t text[4096];
+  uint8_t uri[4096];
+} ghostty_path_probe_s;
+typedef struct {
+  double x, y, width, height;
+} ghostty_path_rect_s;
+typedef struct {
+  uint32_t count;
+  ghostty_path_rect_s rects[8];
+} ghostty_path_rects_s;
 
 // Config types
 
@@ -867,6 +899,12 @@ typedef struct {
   uint32_t height;
 } ghostty_action_resize_window_s;
 
+typedef struct {
+  uint64_t serial;
+  // NUL-terminated, at most 64 bytes; valid only during the action callback.
+  const char* block_id;
+} ghostty_action_native_input_presented_s;
+
 // apprt.action.CellSize
 typedef struct {
   uint32_t width;
@@ -1078,6 +1116,8 @@ typedef enum {
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_NATIVE_INPUT_BOUNDARY,
+  GHOSTTY_ACTION_NATIVE_INPUT_PRESENTED,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1091,6 +1131,7 @@ typedef union {
   ghostty_action_size_limit_s size_limit;
   ghostty_action_initial_size_s initial_size;
   ghostty_action_resize_window_s resize_window;
+  ghostty_action_native_input_presented_s native_input_presented;
   ghostty_action_cell_size_s cell_size;
   ghostty_action_scrollbar_s scrollbar;
   ghostty_action_inspector_e inspector;
@@ -1265,8 +1306,25 @@ GHOSTTY_API void ghostty_surface_set_command_chrome(ghostty_surface_t, bool enab
 // Nonblocking; false also means the parser owns the lock or geometry is changing.
 GHOSTTY_API bool ghostty_surface_command_path_at(ghostty_surface_t, double x, double y,
     ghostty_command_path_hit_s*);
+GHOSTTY_API ghostty_path_probe_status_e ghostty_surface_path_probe(
+    ghostty_surface_t, double x, double y, ghostty_path_probe_s*);
+// Returns false for an obsolete probe, invalid range, or a busy terminal.
+// Calling this again before mouse-up revalidates the same click identity.
+GHOSTTY_API bool ghostty_surface_path_publish(ghostty_surface_t, uint64_t hit_id,
+    uint32_t start, uint32_t length, bool open, ghostty_path_rects_s*);
+GHOSTTY_API void ghostty_surface_path_clear(ghostty_surface_t);
+// Best-effort presentation transaction for an exactly empty native submission.
+// Parsing/PTY I/O continue; visible output and interaction fail open immediately.
+GHOSTTY_API bool ghostty_surface_begin_native_empty_submission(ghostty_surface_t);
+GHOSTTY_API void ghostty_surface_cancel_native_submission(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_native_input_inset(ghostty_surface_t, double bottom);
+// Resolved AppKit accent for default-foreground committed semantic input only.
+GHOSTTY_API void ghostty_surface_set_native_input_accent(ghostty_surface_t, bool enabled,
+    uint8_t red, uint8_t green, uint8_t blue);
+GHOSTTY_API bool ghostty_surface_native_input_bootstrap(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_native_input_padding(ghostty_surface_t, double horizontal, double bottom);
+GHOSTTY_API void ghostty_surface_set_native_input_viewport(ghostty_surface_t, double footer_height,
+    uint32_t covered_rows, bool transferring);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_color_scheme(ghostty_surface_t,
@@ -1285,6 +1343,14 @@ GHOSTTY_API bool ghostty_surface_mouse_button(ghostty_surface_t,
                                                  ghostty_input_mouse_state_e,
                                                  ghostty_input_mouse_button_e,
                                                  ghostty_input_mods_e);
+// For a real platform press whose preceding click was consumed by another UI
+// owner. Zero uses ordinary repeat detection; positive counts clamp to 1...3.
+// The count is used only for left-press text selection, not mouse reporting.
+GHOSTTY_API bool ghostty_surface_mouse_button_with_click_count(ghostty_surface_t,
+                                                 ghostty_input_mouse_state_e,
+                                                 ghostty_input_mouse_button_e,
+                                                 ghostty_input_mods_e,
+                                                 uint32_t);
 GHOSTTY_API void ghostty_surface_mouse_pos(ghostty_surface_t,
                                               double,
                                               double,

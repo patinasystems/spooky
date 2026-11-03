@@ -52,7 +52,10 @@ when there is no reusable result set. A faint inline annotation previews the
 best match without changing the NSTextView document, selection, undo history,
 measured height, or command bytes. Prefix matches show their remaining suffix;
 a fuzzy replacement shows `→ option` so it cannot look like an appended command.
-Inline text never paints over an existing argument on the same line.
+Inline text never paints over an existing argument on the same line. The compact
+option list appears with the preview as soon as candidates are ready. Its
+selected row and inline preview describe the same candidate. Rows have a
+24-point minimum height and grow for larger fonts; selection changes do not animate.
 
 The completion controller owns request lifetime and presentation separately from
 TextKit. The matching index decodes and normalizes each candidate once. Edits
@@ -74,12 +77,12 @@ protocol limit. Custom shell completers can still be slow on a cold query.
 | Key | Behavior |
 | --- | --- |
 | Right with an inline preview | Accept the suggestion |
-| Tab or Down with an inline preview | Reveal the full option list, selecting the best match |
+| Tab with recommendations | Accept the selected recommendation immediately |
 | Tab without a prediction | Request and open the option list |
 | Up / Down in the list | Navigate options without animation |
-| Tab or Return in the list | Accept the selected option without running it |
+| Return after explicitly navigating/requesting the list | Accept the selected option without running it |
 | Escape | Dismiss suggestions/list; preserve typed text |
-| Return with only an inline preview | Run exactly the typed draft |
+| Return with an automatically shown, untouched list | Run exactly the typed draft |
 | Option-Tab / Shift-Return | Insert a literal tab / newline |
 
 Even a unique suggestion requires acceptance. Without a list, Up on the first
