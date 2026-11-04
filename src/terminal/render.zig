@@ -1453,7 +1453,7 @@ pub const RenderState = struct {
                 const end = @min(run.end, styles.len);
                 const start = @min(run.start, end);
 
-                fillStyles(styles[start..end], run.style);
+                fillStyles(styles[start..end], @bitCast(run.style));
             }
 
             // Record what we applied so the next rebuild of this row
@@ -1527,11 +1527,12 @@ pub const RenderState = struct {
     ///
     /// We use byte offsets because iterating over a `[]@Vector(2, u64)` is
     /// slower for long fills in V8 with SIMD128.
-    fn fillStyles(dst: []Style, value: Style) void {
-        const V = @Vector(2, u64);
-        comptime assert(@sizeOf(Style) == @sizeOf(V));
-
-        const v: V = @bitCast(value);
+    ///
+    /// Passing the style as a vector produces one vector store on x86-64.
+    /// Bitcasting it here instead makes LLVM use two 64-bit stores.
+    fn fillStyles(dst: []Style, v: @Vector(2, u64)) void {
+        comptime assert(@sizeOf(Style) == @sizeOf(@TypeOf(v)));
+        const V = @TypeOf(v);
 
         const dst_bytes = std.mem.sliceAsBytes(dst);
         var off: usize = 0;
@@ -2753,6 +2754,10 @@ const RowBuilder = struct {
         const cells_grapheme = cells_slice.items(.grapheme);
         const n = page_cells.len;
         const runs_start = b.pending_styles.items.len;
+
+        // Each cell starts at most one style run, so reserve a row's worth
+        // up front to keep the appends below allocation-free.
+        try b.pending_styles.ensureUnusedCapacity(b.alloc, n);
         var x: usize = 0;
         scan: while (x < n) {
             // Skip runs of plain cells a group at a time. Cells that
@@ -2817,7 +2822,7 @@ const RowBuilder = struct {
                         )) break;
                     }
 
-                    try b.pending_styles.append(b.alloc, .{
+                    b.pending_styles.appendAssumeCapacity(.{
                         .y = @intCast(vy),
                         .start = @intCast(start),
                         .end = @intCast(x),
@@ -2845,7 +2850,7 @@ const RowBuilder = struct {
                             p.memory,
                             page_cell.style_id,
                         ).*;
-                        try b.pending_styles.append(b.alloc, .{
+                        b.pending_styles.appendAssumeCapacity(.{
                             .y = @intCast(vy),
                             .start = @intCast(x),
                             .end = @intCast(x + 1),
@@ -2905,7 +2910,7 @@ const RowBuilder = struct {
                             break;
                     }
 
-                    try b.pending_styles.append(b.alloc, .{
+                    b.pending_styles.appendAssumeCapacity(.{
                         .y = @intCast(vy),
                         .start = @intCast(start),
                         .end = @intCast(x),

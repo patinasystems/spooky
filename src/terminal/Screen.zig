@@ -1110,8 +1110,11 @@ pub fn cursorDownScroll(self: *Screen) !void {
             self.cursor.page_cell = page_rac.cell;
         }
 
-        // Our new row is always dirty
-        self.cursorMarkDirty();
+        // Our new row is always dirty. It is also always in the zero
+        // state: from unused page capacity, a fresh page, or a recycled
+        // page that grow() zeroed. Marking it blank too, in the same
+        // write, lets printing into it skip checking its old cells.
+        self.cursor.page_row.markCleared();
 
         // Clear the new row so it gets our bg color. We only do this
         // if we have a bg color at all.
@@ -1367,8 +1370,9 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
     const page: *Page = pin.node.pageAssumeResident();
     const rows = page.rows.ptr(page.memory.ptr)[pin.y - limit ..][0 .. limit + 1];
 
-    // Clear the erased (top) row.
-    {
+    // Clear the erased (top) row and build its reset header, which the
+    // rotation below writes into the row's new slot.
+    const reset_row: Row = reset: {
         const row: *Row = &rows[0];
 
         // Whether our blank cell is a plain zero cell. This is true
@@ -1391,15 +1395,22 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
 
         // The row becomes the new blank cursor row after the rotation
         // below and must not retain metadata (wrap state, semantic
-        // prompt) from the discarded content.
-        row.reset();
-    }
+        // prompt) from the discarded content. This is Row.reset.
+        assert(!row.managedMemory());
+        break :reset .{ .cells = row.cells, .dirty = true };
+    };
 
     // Rotate the region rows so the now-blank top row moves to the
     // bottom (the cursor row) and everything else shifts up by one.
     // Rotating the region changes which logical row its coordinates identify.
+    //
+    // The reset header goes straight to its new slot rather than through
+    // row.reset() and rotateOnce: x86-64 codegen narrows that reset to a
+    // 4-byte store, and the rotation's 8-byte load of the same header
+    // right after it can't be store-forwarded, which stalls every
+    // scrolled line (about 6% on vtebench's region scrolling).
     self.pages.invalidateNodeLayout(pin.node);
-    fastmem.rotateOnce(Row, rows);
+    _ = fastmem.rotateIn(Row, rows, reset_row);
 
     // Mark the whole page as dirty.
     //
