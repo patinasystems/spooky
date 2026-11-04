@@ -4,6 +4,113 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Fresh stock control, indexing, scrolling and submission, 2026-11-04
+
+The 150 ms cold-typing tail did not reproduce in these admitted pixel samples.
+This does not identify its historical cause or establish stock-level smoothness.
+The measured candidate is the source content committed as `671b36a89`, built
+before commit (`0e427-dirty`). The installed `c690f89d9` release adds recovery
+when a window becomes visible/on-Space; it was functionally checked, but that
+final binary was not re-recorded. Stock is pristine upstream
+`0b1729e945978fca4bcd6165d8ac408bf675a7f2` plus passive Swift diagnostics and
+separate branding, with no Zig/renderer/parser/shell changes.
+
+All runs used ReleaseFast core/ReleaseLocal macOS builds, 2× backing scale,
+800×632-point content windows, and native-scale own-window capture. They ran
+sequentially on the user's live Mac; our builds/profilers/analysis were paused.
+Bounds use original NSEvents and confirmed native WindowServer pixels, not
+callback receipt, app-side completion or physical display scanout. Each bound
+uses the frame's actual timestamp; capture cadence varies.
+
+| Typing workload | Glyphs | Median bounds | p95 bounds | Max upper |
+| --- | ---: | ---: | ---: | ---: |
+| Stock A, plain | 107 | 13.23–21.55 ms | 15.34–23.96 ms | 24.13 ms |
+| Spooky cold A, plain | 128 | 6.09–14.65 ms | 13.74–21.45 ms | 29.21 ms |
+| Spooky load B, plain | 64 | 6.10–14.50 ms | 11.27–19.19 ms | 21.61 ms |
+| Load B, `Applications` with completions | 24 | 14.28–23.05 ms | 22.91–31.96 ms | 48.58 ms |
+| Load B, `@spooky` | 14 | 6.63–15.10 ms | 22.76–31.42 ms | 32.67 ms |
+
+Targets are inserted foreground glyphs, not faded suggestions or caret changes.
+Stock A excludes 16 clipped characters and five repeated `#` responses that
+cannot be distinguished from the preceding draft. Load B also has six `cd /`
+seed glyphs (median 20.23–31.76 ms); two spaces have no glyph endpoint.
+All 108 nonspace load-B targets qualify. Child-menu pixels are outside capture:
+these are editor latencies under completion/picker activity, not result or
+placeholder presentation latency. Cold A's later 19 completion/picker targets
+are unmeasured after its raw budget expired; narrow-ROI load B repeats them.
+
+Telemetry confirms initial crawl/not-ready throughout both native runs. Cold A's
+enclosing 7.52 s scanned 219,117→571,449 entries at 0.987 helper CPU-seconds per
+wall second; load B's 30.20 s scanned 226,159→1,271,691 at 0.680. Indexing was
+active; unequal loads and sequential runs prevent a causal or ranking claim.
+Cold A's handler-return→AppKit-draw median/max was 0.208/0.441 ms. Its worst key
+reached the handler at 9.977 ms, finished at 15.688 ms, drew at 15.923–15.963 ms,
+and appeared at 21.715–29.209 ms. Load B's worst key reached the handler at
+15.591 ms, spent 1.627 ms handling, and finished drawing 3.296 ms after entry;
+its 31.87–48.58 ms pixels still leave 14.65–31.36 ms after handler return.
+
+| Scroll run | Movements | Median bounds | Max upper |
+| --- | ---: | ---: | ---: |
+| Stock B | 21 | 22.00–30.62 ms | 40.19 ms |
+| Stock C, repeated control | 21 | 13.94–22.35 ms | 23.35 ms |
+| Spooky D | 20 | 5.73–17.44 ms | 28.61 ms |
+
+The fixture uses 300 numbered rows, +600 points, 12 alternating ±36-point wheel
+events, then 16 +9-point events. Logs confirm precise deltas, phase/momentum 0:
+this is computer-use wheel input, not physical trackpad momentum. Every sampled
+output strip matches a visually identified row state. Observed steps are whole
+34-pixel rows; no subrow presentation was observed. Spooky's footer reservation,
+core row count and editor position remain constant during this sequence.
+
+The differing row counts follow `Surface.accumulateScroll`: upstream discards
+overshoot; Spooky preserves signed remainder. At 17-point rows, +600 leaves 5;
++36 emits 2/leaves 7; −36 emits −1/leaves −12. Subsequent reversals move one row.
+The next three +9 events retain −3,6,15 before the fourth moves one row. Pixels
+match this exactly. Stock reversals move two rows and each second +9 moves one.
+Zero-movement fractional inputs stay recorded and are not called latency stalls.
+
+| Six distinct `printf` outputs | Median Return→output | Max upper |
+| --- | ---: | ---: |
+| Stock B | 23.72–32.00 ms | 39.58 ms |
+| Stock C | 27.26–35.49 ms | 39.87 ms |
+| Spooky D | 22.24–30.98 ms | 39.05 ms |
+
+Each Return runs `printf '%d\n' $((41000+N))`, N=1…6. Unique output 41001…41006
+is matched at every vertical ROI position and visually checked. The narrow
+crop cannot identify all committed command text; these are output endpoints,
+not separate block-commit timings. Six samples and the variation between stock
+runs do not establish throughput, a 10× improvement, or a general speed ranking.
+
+Spooky D and stock C cover 16 blank Returns. Across Spooky's 100 observed frames,
+49 host-layout records keep editor y=571/height=29, reservation=12 and core rows=34.
+The caret band has zero or two tall bright columns, never a terminal-width block;
+visible extents differ only by the antialias edge. Contact sheets show the native
+caret toggling during rapid submit while the footer stays fixed. That remaining
+visibility behavior is not claimed perfectly smooth. Identical blank headers
+prevent 16 individual key latencies. Stock B's blank burst is outside capture.
+
+Idle sampling drops from 28.62 to 3.86 geometry calls/s (**86.5% fewer**) across
+selected quiet intervals; bridge reads remain about 4/s and host sync is zero.
+Geometry spans were 585.46→45.19 µs/s, but compilation overlapped these traces:
+these elapsed spans are not CPU time or a latency/energy improvement claim.
+
+Final aggregates were rerun with full source→endpoint missing-frame checks,
+first-present-after-handler causality, visibility and a prospective ±500 ms
+transition guard. Bounds and exclusions remain retained; all logs have zero
+dropped diagnostic events. Ten analyzer regressions pass. A transition guard
+cannot prove compositor recovery. Invalid candidate scroll C (actions after
+capture, raw budget exhausted) remains excluded; narrow D has complete pixels.
+
+Build commands, configuration and fixtures are in [pixel-benchmark.md](pixel-benchmark.md).
+Ignored `macos/build-spooky/evidence/2026-11-04-benchmark/` retains raw strips,
+logs, per-run `*-provenance.json` hashes/Info.plists, `reference-final-archive/`,
+and `*-analysis/` confirmed specs, native endpoints, contact sheets and reports.
+Run `uv run --script test/native-input/benchmark_window_pixels.py <confirmed-spec.json> --output <report-dir>`
+to reproduce glyph reports. Retained `scroll-state-{inventory,analyze}.py`,
+`submit-{inventory,analyze}.py` and `blank-submit-analyze.py` reproduce row/output/
+footer reports. Recordings and private indexes are not committed; disposable
+comparison builds/worktrees/indexes can be removed after archive verification.
+
 ## Post-handler trace and upstream control, 2026-11-03
 
 The roughly 150 ms cold post-handler tail did **not reproduce** in a new
