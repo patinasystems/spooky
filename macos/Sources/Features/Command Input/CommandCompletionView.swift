@@ -425,7 +425,13 @@ private final class CommandCompletionCell: NSTableCellView {
         super.layout()
         let pad = CommandOverlayStyle.inset
         let gap = detail.stringValue.isEmpty ? 0 : pad * 3
-        let titleWidth = min(title.intrinsicContentSize.width, bounds.width * 0.55)
+        // A truncating NSTextField's intrinsic width can reflect its previous
+        // constrained frame. Measure the token independently and allow its
+        // native text-cell margins before assigning space to the description.
+        let tokenWidth = ceil((title.stringValue as NSString).size(withAttributes: [
+            .font: title.font ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        ]).width) + 4
+        let titleWidth = min(tokenWidth, bounds.width * 0.55)
         let detailWidth = detail.stringValue.isEmpty ? 0 : min(detail.intrinsicContentSize.width,
             max(0, bounds.width - titleWidth - gap - pad * 2))
         let titleHeight = ceil(title.intrinsicContentSize.height)
