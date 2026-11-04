@@ -19,6 +19,24 @@ It does not change branches, working files, tags, or the index. Omit `--fetch`
 for an explicitly labeled cached report; use `--json` for machine-readable data.
 Shallow clones are rejected rather than reporting misleading counts.
 
+On 2026-11-04, Spooky integrated all 37 incoming commits through Ghostty
+`9fc62a98cc765f2c341d317f2ee684ebb9584237`, using merge `9699c552f` and the Swift
+compatibility follow-up `754e239ca`. There were no textual conflicts. Upstream's
+new default C pointer nullability required explicit nullable annotations for
+Spooky's empty block/caption buffers and a non-optional Swift presentation
+callback pointer. Existing fork release guards and updater restrictions remain.
+
+Validation at `754e239ca`: 428 selected core tests passed (two skipped), including
+native rendering/viewport/submission, path hover, scroll accumulation, and
+upstream ASCII/parser regressions; 563 macOS unit tests passed (one benchmark
+skipped); all 80 shell tests and 35 release-tool tests passed. The normal arm64
+ReleaseLocal app and GhosttyKit built successfully, and the bundle's code
+signature verified. An isolated diagnostic app confirmed submission, Tab
+completion, and Cmd+F search over 160 output lines. Computer use intermittently
+lost access to its window during wheel-scroll attempts, so live scroll smoothness
+and key-to-pixel latency were not requalified by this merge. The installed app
+and public download were not replaced by this validation.
+
 The **Spooky Upstream Status** Actions workflow runs weekly or manually on one
 Ubuntu runner, with a five-minute limit and read-only repository permission.
 It checks out only the maintenance scripts plus root files, retaining commit
