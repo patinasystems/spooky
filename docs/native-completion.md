@@ -50,8 +50,9 @@ but then the shell, rather than NSTextView, owns editing.
 **Data and immediacy.** The bridge returns exact replacement buffers and cursor
 positions, capped at 200 candidates, plus bounded evaluated `_arguments` specs.
 The menu shows option descriptions and expected-value hints where those specs
-provide them. Unsupported forms and providers without `_arguments` keep plain
-candidates; no types or descriptions are invented. This is not a full CLI schema. Zsh completion functions can use
+provide them. Missing Git hints can be filled from the plain installed manual beside the
+resolved Git executable. Other unsupported forms/providers keep plain candidates;
+no types or descriptions are invented. This is not a full CLI schema. Zsh completion functions can use
 `_arguments` specifications, but they are executable functions whose results
 may depend on cwd, previous arguments, plugins and external programs. A command
 name alone does not identify a universal inspectable CLI grammar.
@@ -110,6 +111,17 @@ buffer/cursor data. Flag rows show `⟨expected value⟩` before their descripti
 value rows can show the preceding option's expected type. Tooltips and native
 accessibility help retain the full bounded text. End-of-options (`--`) suppresses
 option metadata, avoiding flag hints on filename completions.
+
+Git's Homebrew Bash-backed provider supplies flag names without `_arguments`
+descriptions. For simple Git subcommand contexts the worker can publish an
+optional `git-manual` path from the resolved Git installation. The bridge reads
+at most 1 MiB of that plain `.1` file, only when hints are missing. It decodes
+matching option headings and their first paragraphs as text, without executing
+roff macros, launching a second provider or changing the insertion. No persistent
+manual cache is added. Only missing hints for existing candidates are filled;
+compressed/missing manuals and unsupported formatting leave ordinary candidates.
+Global Git dispatch specs are excluded when the Bash wrapper delegates to a
+subcommand, so global `git -C` does not describe a different `git log -C` flag.
 
 For the canonical zsh `_git-log` helper, an option-name query stops positional
 state fallback once `_arguments` has actually added matches. This avoids

@@ -71,6 +71,67 @@ struct CommandCompletionMetadata {
         return ""
     }
 
+    /// Git's Bash-backed provider supplies names without descriptions. Its
+    /// installed, version-matched manual can fill those hints without running
+    /// another completer or changing candidates. Never execute roff macros.
+    func needsGitManual(for labels: [String]) -> Bool {
+        labels.contains { $0.hasPrefix("-") && detail(for: $0).isEmpty }
+            || (valueOption?.hasPrefix("-") == true && options[valueOption ?? ""] == nil)
+    }
+
+    mutating func addGitManual(_ text: String, matching labels: [String]? = nil) {
+        var remaining = labels.map { Set($0.filter { $0.hasPrefix("-") }
+            .map { String($0.prefix(while: { $0 != "=" })) }) }
+        if let valueOption, valueOption.hasPrefix("-") { remaining?.insert(valueOption) }
+        if remaining?.isEmpty == true { return }
+        guard let font = try? NSRegularExpression(pattern: #"\\f(?:\[[^\]]*\]|\(..|.)"#),
+              let flag = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9-])(--?[A-Za-z0-9][A-Za-z0-9-]*)(?:\[?=?\s*(<[^>]+>))?"#) else { return }
+        func plain(_ line: String) -> String {
+            var value = font.stringByReplacingMatches(in: line, range: NSRange(location: 0, length: line.utf16.count),
+                                                       withTemplate: "")
+            for (escaped, literal) in [(#"\-"#, "-"), (#"\&"#, ""), (#"\:"#, ""),
+                                        (#"\(aq"#, "'"), (#"\(cq"#, "’"), (#"\(dq"#, "\""),
+                                        (#"\(em"#, "—"), (#"\~"#, " ")] {
+                value = value.replacingOccurrences(of: escaped, with: literal)
+            }
+            return value
+        }
+        let lines = text.components(separatedBy: .newlines)
+        var index = 0
+        while index < lines.count, options.count < 2048 {
+            guard lines[index] == ".PP" else { index += 1; continue }
+            index += 1
+            var heading = ""
+            while index < lines.count, !lines[index].hasPrefix(".RS"), !lines[index].hasPrefix(".") {
+                heading += plain(lines[index]) + " "
+                index += 1
+                if heading.utf16.count > 2048 { break }
+            }
+            guard heading.first == "-", index < lines.count, lines[index].hasPrefix(".RS") else { continue }
+            let value = heading as NSString
+            let matches = flag.matches(in: heading, range: NSRange(location: 0, length: value.length)).filter {
+                remaining == nil || remaining?.contains(value.substring(with: $0.range(at: 1))) == true
+            }
+            guard !matches.isEmpty else { continue }
+            index += 1
+            var description = ""
+            while index < lines.count, !lines[index].hasPrefix(".") {
+                description += plain(lines[index]) + " "
+                index += 1
+                if description.utf16.count > 512 { break }
+            }
+            for match in matches {
+                let name = value.substring(with: match.range(at: 1))
+                remaining?.remove(name)
+                let argument = match.range(at: 2).location == NSNotFound ? "" :
+                    value.substring(with: match.range(at: 2)).trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+                guard options[name] == nil else { continue }
+                options[name] = Option(description: Self.clean(description), argument: Self.clean(argument))
+            }
+            if remaining?.isEmpty == true { return }
+        }
+    }
+
     private static func delimiter(in text: Substring, characters: String) -> String.Index? {
         var escaped = false
         for index in text.indices {

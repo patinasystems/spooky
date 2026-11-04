@@ -344,6 +344,25 @@ class NativeInputBridgeTests(unittest.TestCase):
         response = self.shell.complete("ls -- ")
         self.assertFalse((self.shell.bridge / "completions" / response["identifier"] / "specs-v1").exists())
 
+    def test_bash_backed_git_can_publish_manual_without_global_flag_metadata(self):
+        shell = Shell(startup_files={
+            "bin/git": "#!/bin/sh\nexit 1\n",
+            "share/man/man1/git-log.1": ".PP\n--author=<pattern>\n.RS 4\nFilter authors.\n.RE\n",
+        }, user_rc='chmod +x "$HOME/bin/git"\nhash git="$HOME/bin/git"\n'
+            'autoload -Uz compinit; compinit -i -D\n'
+            '__git_zsh_main() { local state; _arguments -C "-C[global directory]:directory:_directories" '
+            '\'(-): :->command\' \'(-)*:: :->arg\'; '
+            '[[ $state == arg ]] && compadd -- --author= --author-date-order; }\n'
+            '_git() { __git_zsh_main; }; compdef _git git\n')
+        try:
+            response = shell.complete("git log --auth")
+            self.assertTrue(response["items"])
+            root = shell.bridge / "completions" / response["identifier"]
+            self.assertEqual((root / "git-manual").read_text(), str((shell.root / "share/man/man1/git-log.1").resolve()))
+            self.assertFalse((root / "specs-v1").exists())
+        finally:
+            shell.close()
+
     def test_git_flag_matches_do_not_invoke_revision_provider_but_values_do(self):
         shell = self.shell
         _, generation = shell.submit(

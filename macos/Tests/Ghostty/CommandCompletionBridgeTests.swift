@@ -47,6 +47,28 @@ struct CommandCompletionBridgeTests {
         #expect(response?.items.first?.detail == "")
     }
 
+    @Test func gitManualHintsUseItsOptionHeadingAndFirstParagraph() {
+        var metadata = CommandCompletionMetadata(specs: [], request:
+            .init(id: UUID(), revision: 1, text: "git log --auth", cursorUTF16: 14))
+        metadata.addGitManual(#"""
+        .PP
+        \fB\-\-author=\fR\fI<pattern>\fR, \fB\-\-committer=\fR\fI<pattern>\fR
+        .RS 4
+        Limit commits to author lines matching the
+        \fI<pattern>\fR
+        regular expression\&.
+        .RE
+        .PP
+        \fB\-\-author\-date\-order\fR
+        .RS 4
+        Show commits in author timestamp order\&.
+        .RE
+        """#)
+        #expect(metadata.detail(for: "--author=") == "⟨pattern⟩  Limit commits to author lines matching the <pattern> regular expression.")
+        #expect(metadata.detail(for: "--author-date-order") == "Show commits in author timestamp order.")
+        #expect(metadata.detail(for: "--committer=").hasPrefix("⟨pattern⟩"))
+    }
+
     @Test func caretOffsetsRespectUnicodeEncodingBoundaries() {
         let text = "echo 👩🏽‍💻 café"
         let prefix = "echo 👩🏽‍💻 "

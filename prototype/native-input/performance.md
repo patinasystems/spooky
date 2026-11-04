@@ -4,6 +4,27 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Installed Git provider and manual hints, 2026-11-04
+
+The live Mac uses Homebrew's Bash-backed Git provider, not the macOS stock zsh
+provider used for the earlier 100 ms samples. It supplies option names without
+flag descriptions. Git hints now come from its own installed plain manual when
+completion specs lack them; its candidate/replacement provider is preserved.
+
+A private zsh configured with that installed provider (not the user's entire rc)
+returned two `git log --auth` candidates in 44.14 ms on first use and warm median
+36.70 ms / maximum 38.57 ms over 12 samples. These are request→publication
+intervals at 1 ms polling; manual decoding and popup rendering are excluded.
+
+A separate optimized Swift benchmark of the actual metadata decoder read the
+136,469-byte installed git-log manual and requested the two author flag hints.
+Across 20 parses, the median was 1.56 ms and maximum 2.64 ms. It isolates the
+manual parser, with request/token stubs; it does not measure end-to-end UI latency.
+A whole-manual decode was ~9.7 ms before restricting work to requested headings.
+The implementation keeps no persistent manual cache. Benchmark sources and raw
+summaries are retained under ignored local-current (`benchmark-brew-git.py`,
+`brew-git-query-results.json`, `MetadataBench.swift`, `metadata-manual-timing.txt`).
+
 ## Completion metadata and Git option fallback, 2026-11-04
 
 Function-level instrumentation localized `git log --auth` latency to generation:

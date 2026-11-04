@@ -555,10 +555,16 @@ _patina_native_completion_worker() {
     if builtin autoload +X _arguments; then
         functions[_arguments]='
             builtin local -i _patina_before=$compstate[nmatches]
-            _patina_native_completion_specs "$@"
+            builtin local -a _patina_input_specs
+            _patina_input_specs=("$@")
             {
 '"$functions[_arguments]"'
             } always {
+                # The Bash-backed Git wrapper uses this call only to dispatch
+                # subcommands. Its global -C, -c, etc. are not log/diff flags.
+                if [[ $funcstack[2] != __git_zsh_main || $state != arg ]]; then
+                    _patina_native_completion_specs "${_patina_input_specs[@]}"
+                fi
                 if (( _patina_git_flags && compstate[nmatches] > _patina_before )) && [[ $funcstack[2] == _git-log ]]; then
                     state=()
                     compstate[restore]=""
@@ -724,6 +730,10 @@ _patina_native_completion_generate() {
     # vared otherwise completes a variable's value rather than a command line.
     compstate[vared]=''
     builtin local -i _patina_git_flags=0
+    builtin local _patina_git_subcommand=''
+    if [[ ${words[1]:t} == git || ${aliases[$words[1]]-} == git ]]; then
+        [[ $words[2] == [a-z]* && $words[2] != *[^a-z0-9-]* ]] && _patina_git_subcommand=$words[2]
+    fi
     if (( CURRENT > 1 )); then
         builtin local _patina_word
         for _patina_word in "${(@)words[2,CURRENT-1]}"; do
@@ -736,6 +746,11 @@ _patina_native_completion_generate() {
     # their normal completion path.
     [[ ${_comps[git]-} == _git && $PREFIX == -* && $PREFIX != *=* ]] && _patina_git_flags=1
     _main_complete
+    if [[ -n $_patina_git_subcommand && -n ${commands[git]-} ]]; then
+        builtin local _patina_git_binary=${commands[git]:A}
+        builtin local _patina_manual="${_patina_git_binary:h:h}/share/man/man1/git-${_patina_git_subcommand}.1"
+        [[ -f $_patina_manual ]] && _patina_git_manual=$_patina_manual
+    fi
     _patina_completion_matches=$compstate[nmatches]
     compstate[insert]='menu:1'
     compstate[list]=''
@@ -784,6 +799,7 @@ _patina_native_completion_worker_widget() {
     builtin local -A _patina_spec_seen
     builtin local -i _patina_spec_bytes=0
     builtin local -i _patina_metadata_allowed=1
+    builtin local _patina_git_manual=''
     {
         builtin exec {packed_descriptor}> "$staging/items-v1" || return 1
         BUFFER=$payload
@@ -830,6 +846,9 @@ _patina_native_completion_worker_widget() {
         # Optional, bounded NUL records; buffers/cursors retain their v1 format.
         if (( _patina_metadata_allowed && ${#_patina_specs} )); then
             builtin print -rN -- "${_patina_specs[@]}" > "$staging/specs-v1"
+        fi
+        if (( _patina_metadata_allowed )) && [[ -n $_patina_git_manual ]]; then
+            builtin print -rn -- "$_patina_git_manual" > "$staging/git-manual"
         fi
         builtin print -rn -- "$generation" > "$staging/generation"
         builtin print -rn -- "$identifier" > "$staging/identifier"

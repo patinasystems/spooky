@@ -72,19 +72,24 @@ actor CommandCompletionBridge {
         var items: [CommandCompletionCandidate] = []
         // Hints are advisory; malformed/oversized metadata must not discard a
         // valid shell-owned insertion. The read still has a strict byte cap.
-        let metadata = CommandCompletionMetadata(specs: (try? specifications(root)) ?? [], request: request)
+        var metadata = CommandCompletionMetadata(specs: (try? specifications(root)) ?? [], request: request)
         var seen: Set<String> = []
         var bytes = 0
-        for (buffer, caret) in try buffers(root, count: count) {
+        let records = try buffers(root, count: count)
+        let labels = records.map { CommandCompletionToken.label(
+            result: $0.0, cursorUTF16: Self.utf16Offset(in: $0.0, byteOffset: $0.1) ?? 0, request: request) }
+        if metadata.needsGitManual(for: labels),
+           let path = try? field(root, "git-manual"), path.hasPrefix("/"), path.hasSuffix(".1"),
+           let manual = try? read(URL(fileURLWithPath: path), maximum: 1_048_576) {
+            metadata.addGitManual(manual, matching: labels)
+        }
+        for ((buffer, caret), label) in zip(records, labels) {
             bytes += buffer.utf8.count
             guard buffer.utf8.count <= Self.maximumDraftBytes, bytes <= Self.maximumResponseBytes,
                   let cursorUTF16 = Self.utf16Offset(in: buffer, byteOffset: caret) else {
                 throw CompletionError.invalidResponse
             }
             guard seen.insert(buffer).inserted else { continue }
-            let label = CommandCompletionToken.label(
-                result: buffer, cursorUTF16: cursorUTF16, request: request
-            )
             items.append(.init(displayText: label, detail: metadata.detail(for: label),
                                replacementText: buffer,
                                replacementRange: NSRange(location: 0, length: request.text.utf16.count),
