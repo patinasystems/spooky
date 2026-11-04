@@ -4,6 +4,26 @@ import Testing
 
 @MainActor
 struct CommandTextViewTests {
+    @Test func emptySubmissionKeepsTextKitActiveWithoutAcceptingEditsOrDuplicateReturn() throws {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 50))
+        var submissions = 0
+        editor.onSubmit = { _ in submissions += 1; return true }
+        for _ in 0..<20 {
+            editor.setEditable(false, preserveCaret: true)
+            #expect(editor.textView.isEditable)
+            #expect(!editor.textView.shouldChangeText(in: NSRange(location: 0, length: 0), replacementString: "x"))
+            editor.textView.keyDown(with: try returnEvent())
+            #expect(submissions == 0)
+            editor.setEditable(true)
+            #expect(editor.textView.isEditable)
+            #expect(editor.textView.acceptsCommandEdits)
+        }
+        editor.textView.keyDown(with: try returnEvent())
+        #expect(submissions == 1)
+        editor.setEditable(false)
+        #expect(!editor.textView.isEditable)
+    }
+
     @Test func nativeSelectionReplacesTextAcrossLines() {
         let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100), textContainer: nil)
         view.string = "echo 👋\nprintf café\npwd"

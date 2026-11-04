@@ -4,6 +4,8 @@ import AppKit
 /// AppKit owns selections, marked text, cursor movement, and the undo stack.
 @MainActor
 final class CommandTextView: NSTextView {
+    /// Submission ownership is independent of TextKit's caret lifecycle.
+    var acceptsCommandEdits = true
     var onSubmit: (String) -> Bool = { _ in false }
     var onUseTerminal: () -> Void = {}
     var onFocusChanged: (Bool) -> Void = { _ in }
@@ -116,6 +118,7 @@ final class CommandTextView: NSTextView {
             CommandInputDiagnostics.end(diagnostic)
             CommandInputDiagnostics.endInput(input)
         }
+        guard acceptsCommandEdits else { return }
         // Let the input method consume Return/Escape while composing. A Return
         // that commits an IME candidate must never also execute the command.
         guard !hasMarkedText() else {
@@ -299,11 +302,11 @@ final class CommandTextView: NSTextView {
         case "c" where modifiers == .command:
             copy(nil)
         case "x" where modifiers == .command:
-            if isEditable { cut(nil) }
+            if isEditable && acceptsCommandEdits { cut(nil) }
         case "v" where modifiers == .command:
-            if isEditable { pasteAsPlainText(nil) }
+            if isEditable && acceptsCommandEdits { pasteAsPlainText(nil) }
         case "z":
-            if isEditable {
+            if isEditable && acceptsCommandEdits {
                 if modifiers.contains(.shift) {
                     commandUndoManager.redo()
                 } else {
@@ -394,6 +397,7 @@ final class CommandTextView: NSTextView {
     }
 
     override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        guard acceptsCommandEdits else { return false }
         let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
         if allowed {
             history.willEdit()

@@ -89,9 +89,14 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.reportContentHeight()
     }
 
-    func setEditable(_ editable: Bool) {
+    func setEditable(_ editable: Bool, preserveCaret: Bool = false) {
         if !editable { textView.history.reset(); textView.dismissCompletions() }
-        if textView.isEditable != editable { textView.isEditable = editable }
+        textView.acceptsCommandEdits = editable
+        // Disabling NSTextView removes its insertion point, even when focus
+        // and geometry stay unchanged. Empty submissions keep the native text
+        // system active while the separate ownership gate rejects edits.
+        let textKitEditable = editable || preserveCaret
+        if textView.isEditable != textKitEditable { textView.isEditable = textKitEditable }
         if !textView.isSelectable { textView.isSelectable = true }
         textView.applyFocusRequest()
     }

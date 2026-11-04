@@ -369,8 +369,10 @@ final class NativeCommandSurfaceHost: NSView {
         if editor.textView.fileSearchDirectory != fileSearchDirectory {
             editor.textView.fileSearchDirectory = fileSearchDirectory
         }
-        editor.setEditable(session.isEditable && shown && !recovering && !surfaceView.readonly)
-        editor.textView.completions.setPopupPreparationEnabled(editor.textView.isEditable)
+        let editable = session.isEditable && shown && !recovering && !surfaceView.readonly
+        editor.setEditable(editable, preserveCaret: transferring && session.draft.isEmpty
+                           && shown && !recovering && !surfaceView.readonly)
+        editor.textView.completions.setPopupPreparationEnabled(editable)
         prepareSubmittedEcho()
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
