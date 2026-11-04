@@ -180,6 +180,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         command_cells_rebuilt: bool = false,
         command_chrome_dirty: bool = true,
         command_chrome_revision: u64 = 0,
+        command_chrome_anchors_revision: u64 = 0,
         command_base_cells: usize = 0,
         path_hover: renderer.PathHover.Snapshot = .{},
         /// Absolute one-shot fail-open deadline; repeated draws never extend it.
@@ -1671,6 +1672,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .path_hover = state.path_hover.snapshot(state.terminal, &state.command_chrome, self.size, native_viewport),
                     .command_chrome = if (!std.meta.eql(self.native_viewport, native_viewport) or self.command_chrome_dirty or
                         state.command_chrome.revision != self.command_chrome_revision or
+                        state.terminal.screens.active.command_blocks.revision != self.command_chrome_anchors_revision or
                         self.terminal_state.dirty != .false)
                         try state.command_chrome.snapshotWithFooter(arena_alloc, state.terminal, native_viewport.footer_top != null)
                     else
@@ -1873,7 +1875,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.native_presentation.block_id = critical.native_presented_id;
                     self.native_presentation.acknowledge = critical.native_presentation_valid;
                     self.native_presentation.prompt_id = critical.native_prompt_id;
-                    self.native_presentation.generation = critical.native_generation;
+                    self.native_presentation.generation = if (!self.command_chrome_dirty)
+                        critical.native_generation
+                    else
+                        @splat(0);
                     // Finish a D -> ready/B handoff within one frame budget.
                     // Clear may additionally expose an entirely empty running
                     // snapshot before D arrives. Streaming output never waits.
@@ -2887,6 +2892,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
             self.command_chrome_revision = snapshot.revision;
+            self.command_chrome_anchors_revision = snapshot.anchors_revision;
             self.command_chrome_dirty = false;
             self.command_base_cells = self.command_cells.items.len;
         }

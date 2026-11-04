@@ -39,6 +39,7 @@ pub const Snapshot = struct {
     headers: []const Header = &.{},
     pinned_offset_from_bottom: f32 = -1,
     revision: u64 = 0,
+    anchors_revision: u64 = 0,
 };
 
 enabled: bool = false,
@@ -112,7 +113,10 @@ pub fn snapshot(self: *const CommandChrome, alloc: Allocator, term: *terminal.Te
 /// Footer ownership is resolved with the same parsed terminal state as cells.
 /// Completed headers must not wait for the GUI's next metadata publication.
 pub fn snapshotWithFooter(self: *const CommandChrome, alloc: Allocator, term: *terminal.Terminal, footer_active: bool) Allocator.Error!Snapshot {
-    var result: Snapshot = .{ .revision = self.revision };
+    var result: Snapshot = .{
+        .revision = self.revision,
+        .anchors_revision = term.screens.active.command_blocks.revision,
+    };
     if (!self.enabled or term.screens.active_key != .primary) return result;
     var headers: std.ArrayList(Header) = .empty;
     errdefer headers.deinit(alloc);
@@ -1008,9 +1012,15 @@ test "command chrome incomplete A waits for B before render discovery and cached
         try t.expectEqual(null, chrome.pathHeaderAt(&term, size, 1, 3, null));
         try t.expectEqual(null, chrome.pathHeaderAt(&term, size, 1, 14, null));
     }
+    const metadata_revision = chrome.revision;
+    const anchors_revision = term.screens.active.command_blocks.revision;
     try term.semanticPrompt(.{ .action = .end_prompt_start_input, .options_unvalidated = "aid=new" });
     const ready = try chrome.snapshot(t.allocator, &term);
     defer t.allocator.free(ready.headers);
+    // B changes only semantic anchors, without another GUI metadata update.
+    // Renderer reuse must therefore compare both independent revisions.
+    try t.expectEqual(metadata_revision, ready.revision);
+    try t.expect(ready.anchors_revision > anchors_revision);
     try t.expectEqual(@as(usize, 1), ready.headers.len);
     try t.expectEqual(@as(u2, 2), ready.headers[0].rows);
     const known = chrome.pathHeaderAt(&term, size, 1, 14, null).?;
