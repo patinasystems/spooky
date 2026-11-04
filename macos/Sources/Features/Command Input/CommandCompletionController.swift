@@ -199,7 +199,7 @@ final class CommandCompletionController {
             // Let the edit/delegate finish publishing its draft before asking
             // the live shell. Context boundaries need no typing debounce.
             if contextBoundary { await Task.yield() } else {
-                do { try await Task.sleep(for: .milliseconds(24)) } catch { return }
+                do { try await Task.sleep(for: .milliseconds(8)) } catch { return }
             }
             guard !Task.isCancelled, let self, self.revision == expected else { return }
             self.automaticTask = nil

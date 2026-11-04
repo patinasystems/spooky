@@ -36,7 +36,7 @@ struct CommandUIThemeTests {
         let bar = SurfaceSearchBar()
         bar.applyTheme(theme)
         #expect(bar.field.textColor == theme.foreground)
-        let editor = CommandTextView()
+        let editor = CommandTextView(frame: .zero, textContainer: nil)
         editor.applyTheme(theme)
         #expect(editor.insertionPointColor == theme.cursor)
         #expect(editor.selectedTextAttributes[.backgroundColor] as? NSColor == theme.selectionBackground)

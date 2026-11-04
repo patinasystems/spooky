@@ -325,7 +325,7 @@ final class CommandFilePicker {
     /// Called after an async result or failure changes visible state.
     var onChange: () -> Void = {}
 
-    init(provider: CommandFileSearchProvider = .live, debounce: Duration = .milliseconds(30),
+    init(provider: CommandFileSearchProvider = .live, debounce: Duration = .milliseconds(8),
          retryInitial: Duration = .milliseconds(300), retryMaximum: Duration = .seconds(1),
          indexPollInterval: Duration = .milliseconds(500)) {
         self.provider = provider

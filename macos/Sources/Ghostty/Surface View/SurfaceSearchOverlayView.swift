@@ -297,7 +297,7 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
 
     private func updateColors() {
         field.textColor = theme.foreground
-        field.attributedPlaceholderString = NSAttributedString(string: "Find in terminal", attributes: [
+        field.placeholderAttributedString = NSAttributedString(string: "Find in terminal", attributes: [
             .foregroundColor: theme.secondary
         ])
         count.textColor = theme.secondary
