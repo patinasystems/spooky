@@ -1,6 +1,7 @@
 import Testing
 @testable import Ghostty
 import SwiftUI
+import GhosttyKit
 
 @Suite
 struct ConfigTests {
@@ -170,6 +171,22 @@ struct ConfigTests {
     }
 
     // MARK: - Config Loading
+
+    @Test(arguments: [
+        ("", UInt32(0x161616)),
+        ("theme = Catppuccin Frappe", UInt32(0x303446)),
+        ("background = #123456", UInt32(0x123456)),
+        ("theme =", UInt32(0x282C34))
+    ])
+    func spookyThemeDefaultsRespectUserOverrides(text: String, expected: UInt32) throws {
+        let config = try TemporaryConfig(text)
+        let core = try #require(config.config)
+        var background = ghostty_config_color_s()
+        #expect(ghostty_config_get(core, &background, "background", 10))
+        let actual = UInt32(background.r) << 16 | UInt32(background.g) << 8 | UInt32(background.b)
+        #expect(actual == expected)
+        #expect(config.errors.isEmpty)
+    }
 
     @Test func loadedIsTrueForValidConfig() throws {
         let config = try TemporaryConfig("")

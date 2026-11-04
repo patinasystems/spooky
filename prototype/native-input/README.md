@@ -54,6 +54,14 @@ restoration. The fork disables upstream updates so they cannot replace Spooky.
 When working from Kitchen, follow its `pat run` compute-routing rules; use the
 local executor when this separate checkout is only on this Mac.
 
+Spooky defaults to the bundled **Carbonfox** theme, with a neutral `#161616`
+background, and the black CRT app icon. App theme defaults load before user
+configuration. Press Command-comma to open the usual Ghostty configuration,
+set `theme = <name>`, and press Command-Shift-comma to reload. List bundled
+themes with `ghostty +list-themes` (or the executable inside Spooky.app).
+An explicit theme, color override, or empty `theme =` in user configuration
+takes precedence; personal configuration files are not rewritten.
+
 ## Try it
 
 1. Type or paste into the one-line native input. Add lines with Shift+Return and

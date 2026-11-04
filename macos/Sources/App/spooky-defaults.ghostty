@@ -1,0 +1,2 @@
+# Spooky's app default. User configuration and CLI arguments override this.
+theme = Carbonfox
