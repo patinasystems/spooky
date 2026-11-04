@@ -8,6 +8,11 @@ final class CommandPathTooltip {
     private let label = NSTextField(labelWithString: "Copied to clipboard")
     private var dismissal: Task<Void, Never>?
 
+    func applyTheme(_ theme: CommandUITheme) {
+        surface.applyTheme(theme)
+        label.textColor = theme.foreground
+    }
+
     init() {
         panel.isReleasedWhenClosed = false
         panel.hasShadow = true
@@ -19,7 +24,7 @@ final class CommandPathTooltip {
         panel.isOpaque = false
         panel.animationBehavior = .none
         label.font = .systemFont(ofSize: 12)
-        label.textColor = CommandOverlayStyle.primaryText
+        label.textColor = CommandUITheme.fallback.foreground
         surface.contentView.addSubview(label)
         panel.contentView = surface
     }

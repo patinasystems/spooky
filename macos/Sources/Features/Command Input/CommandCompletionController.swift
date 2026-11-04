@@ -49,6 +49,10 @@ final class CommandCompletionController {
 
     deinit { automaticTask?.cancel(); popupPreparationTask?.cancel() }
 
+    func applyTheme(_ theme: CommandUITheme) {
+        popup?.applyTheme(theme)
+    }
+
     /// Construct the one retained native panel after a quiet ready-prompt turn.
     /// This does not order a window, assign focus, or request any candidates.
     func setPopupPreparationEnabled(_ enabled: Bool, after delay: Duration = .milliseconds(150)) {
@@ -144,17 +148,36 @@ final class CommandCompletionController {
     func selectionChanged() {
         guard !editing, !accepting else { return }
         if filePicker.isActive {
-            guard let textView, textView.selectedRange().length == 0,
-                  filePicker.activeRange(in: textView.string, cursor: textView.selectedRange().location) != nil else {
+            guard let textView, canSuggest,
+                  filePicker.refresh(text: textView.string, cursor: textView.selectedRange().location) else {
                 dismiss()
+                scheduleAutomatic()
                 return
             }
+            presentFilePicker()
             return
         }
-        if let request, !isCurrent(request) { dismiss() }
-        // A selection/caret move also cancels a debounced request whose result
-        // has not arrived yet. It does not start unsolicited shell work.
-        if let automaticSelection, automaticSelection != textView?.selectedRange() { cancelAutomatic() }
+        guard let textView, canSuggest else { dismiss(); return }
+        if let request, isCurrent(request) { return }
+        if automaticSelection == textView.selectedRange() { return }
+        // TextKit may deliver its final caret notification after didEdit. A
+        // backspace used to cancel the newly scheduled query here permanently.
+        // Caret-only moves also need the same token/context validation as edits.
+        revision &+= 1
+        cancelAutomatic()
+        if let filter, let request,
+           let matches = filteredItems(filter, in: textView.string, cursorUTF16: textView.selectedRange().location) {
+            self.request = .init(id: request.id, revision: revision, text: textView.string,
+                                 cursorUTF16: textView.selectedRange().location, automatic: true)
+            items = matches
+            selectedIndex = 0
+            message = matches.isEmpty ? "No matching completions" : nil
+            present()
+            if matches.isEmpty { scheduleAutomatic() }
+            return
+        }
+        dismiss()
+        scheduleAutomatic()
     }
 
     private var canSuggest: Bool {

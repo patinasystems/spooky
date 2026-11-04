@@ -13,6 +13,7 @@ final class CommandOverlaySurface: NSView {
     private let material = NSVisualEffectView()
     private let tint = NSView()
     private let castsShadow: Bool
+    private var theme = CommandUITheme.fallback
     private var shadowSize: CGSize = .zero
     private var reduceTransparency = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
 
@@ -49,6 +50,12 @@ final class CommandOverlaySurface: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func applyTheme(_ theme: CommandUITheme) {
+        guard self.theme != theme else { return }
+        self.theme = theme
+        updateChrome()
+    }
 
     deinit { NSWorkspace.shared.notificationCenter.removeObserver(self) }
 
@@ -101,9 +108,9 @@ final class CommandOverlaySurface: NSView {
         CommandOverlayStyle.withoutAnimation {
             material.isHidden = opaque
             effectiveAppearance.performAsCurrentDrawingAppearance {
-                tintLayer.backgroundColor = CommandOverlayStyle.popupBackground
+                tintLayer.backgroundColor = theme.popupBackground
                     .withAlphaComponent(opaque ? 1 : CommandOverlayStyle.materialTintAlpha).cgColor
-                clipLayer.borderColor = CommandOverlayStyle.border.cgColor
+                clipLayer.borderColor = theme.border.cgColor
             }
             clipLayer.cornerRadius = CommandOverlayStyle.cornerRadius
             clipLayer.masksToBounds = true

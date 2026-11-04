@@ -38,12 +38,19 @@ final class SurfaceSearchOverlayView: NSView {
         center.addObserver(self, selector: #selector(focusSearch(_:)), name: .ghosttySearchFocus, object: surfaceView)
         center.addObserver(self, selector: #selector(applicationActivated),
                            name: NSApplication.didBecomeActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(themeChanged),
+                           name: .spookyCommandThemeDidChange, object: surfaceView)
+        themeChanged()
         update(searchState: searchState, onClose: onClose)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func themeChanged() {
+        bar.applyTheme(surfaceView?.derivedConfig.commandUITheme ?? .fallback)
+    }
 
     override func layout() {
         super.layout()
@@ -138,6 +145,14 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
     private let previous = NSButton()
     private let closeButton = NSButton()
     private var needle = Ghostty.OSSurfaceView.SearchState.Needle.empty
+    private var theme = CommandUITheme.fallback
+
+    func applyTheme(_ theme: CommandUITheme) {
+        guard self.theme != theme else { return }
+        self.theme = theme
+        surface.applyTheme(theme)
+        updateColors()
+    }
 
     override var isFlipped: Bool { true }
 
@@ -246,6 +261,7 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
         // Explicit ownership prevents a stale terminal focus flag consuming
         // Paste before this field's native editing handler sees it.
         onFocus()
+        updateColors()
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -280,10 +296,18 @@ final class SurfaceSearchBar: NSView, NSTextFieldDelegate {
     }
 
     private func updateColors() {
-        field.textColor = CommandOverlayStyle.primaryText
-        count.textColor = CommandOverlayStyle.secondaryText
-        icon.contentTintColor = CommandOverlayStyle.secondaryText
-        [next, previous, closeButton].forEach { $0.contentTintColor = CommandOverlayStyle.secondaryText }
+        field.textColor = theme.foreground
+        field.attributedPlaceholderString = NSAttributedString(string: "Find in terminal", attributes: [
+            .foregroundColor: theme.secondary
+        ])
+        count.textColor = theme.secondary
+        icon.contentTintColor = theme.secondary
+        [next, previous, closeButton].forEach { $0.contentTintColor = theme.accent }
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.insertionPointColor = theme.cursor
+            editor.selectedTextAttributes = [.backgroundColor: theme.selectionBackground,
+                                             .foregroundColor: theme.selectionForeground]
+        }
     }
 
     @objc private func nextMatch() { onNext() }

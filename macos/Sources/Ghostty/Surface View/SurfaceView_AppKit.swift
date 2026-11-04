@@ -851,6 +851,7 @@ extension Ghostty {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.derivedConfig = DerivedConfig(config)
+                NotificationCenter.default.post(name: .spookyCommandThemeDidChange, object: self)
 
                 // If the cached OSC 11 background color disagrees with the new
                 // config-derived background, drop it so window chrome follows
@@ -1203,6 +1204,17 @@ extension Ghostty {
             let input = CommandInputDiagnostics.currentInputID == nil
                 ? CommandInputDiagnostics.beginInput(timestamp: event.timestamp) : nil
             defer { CommandInputDiagnostics.endInput(input) }
+            if let session = commandInputSession,
+               CommandInputShortcut.routesToEditor(
+                event, promptIsEditable: session.editorVisible && session.isEditable && !readonly,
+                windowIsKey: window?.isKeyWindow == true,
+                terminalOwnsKeyboard: window?.firstResponder === self, hasMarkedText: hasMarkedText()),
+               let editor = NativeCommandSurfaceHost.focusedEditor(for: self) as? CommandTextView,
+               editor.isEditable, !editor.isHiddenOrHasHiddenAncestor,
+               window?.makeFirstResponder(editor) == true {
+                editor.keyDown(with: event)
+                return
+            }
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
                 return
@@ -1953,6 +1965,7 @@ extension Ghostty {
         }
 
         struct DerivedConfig {
+            let commandUITheme: CommandUITheme
             let backgroundColor: Color
             let backgroundOpacity: Double
             let backgroundBlur: Ghostty.Config.BackgroundBlur
@@ -1962,6 +1975,7 @@ extension Ghostty {
             let scrollbar: Ghostty.Config.Scrollbar
 
             init() {
+                self.commandUITheme = .fallback
                 self.backgroundColor = Color(NSColor.windowBackgroundColor)
                 self.backgroundOpacity = 1
                 self.backgroundBlur = .disabled
@@ -1971,7 +1985,8 @@ extension Ghostty {
                 self.scrollbar = .system
             }
 
-            init(_ config: Ghostty.Config) {
+            @MainActor init(_ config: Ghostty.Config) {
+                self.commandUITheme = CommandUITheme.resolve(config)
                 self.backgroundColor = config.backgroundColor
                 self.backgroundOpacity = config.backgroundOpacity
                 self.backgroundBlur = config.backgroundBlur

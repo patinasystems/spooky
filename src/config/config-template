@@ -1,12 +1,13 @@
-# This is the configuration file for Ghostty.
+# This is the configuration file for Spooky (based on Ghostty).
+theme = Carbonfox
 #
 # This template file has been automatically created at the following
 # path since Ghostty couldn't find any existing config files on your system:
 #
 #   {[path]s}
 #
-# The template does not set any default options, since Ghostty ships
-# with sensible defaults for all options.
+# Carbonfox is Spooky's default theme. Change the theme above to choose another.
+# Other options use Ghostty's defaults.
 # Note that you should not paste the output of `ghostty +show-config
 # --default` into your config: some default options actually conflict with each other
 # when explicitly set in a configuration file. Instead, only set the

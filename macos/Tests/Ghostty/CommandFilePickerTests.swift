@@ -547,6 +547,58 @@ struct CommandFilePickerTests {
 
     // MARK: Helpers
 
+    @Test func slashAndBackspaceKeepTheIndexedDirectoryIdentity() async throws {
+        let root = "/projects/kitchen"
+        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
+            search: { query, _, _, _ in
+                query == "kitchen" ? [entry(root, dir: true)] : [entry(root + "/apps", dir: true)]
+            }, children: { directory, _ in
+                directory.path == root ? [entry(root + "/apps", dir: true), entry(root + "/README.md")]
+                    : [entry(root + "/apps/app.swift")]
+            }), debounce: .zero)
+        defer { picker.end() }
+        picker.begin(anchor: 0, cwd: "/w")
+        picker.refresh(text: "@kitchen", cursor: 8)
+        await settle(picker)
+        picker.refresh(text: "@kitchen/", cursor: 9)
+        await settle(picker)
+        #expect(picker.entries.contains(where: { $0.path == root + "/README.md" }))
+        picker.refresh(text: "@kitchen/a", cursor: 10)
+        await settle(picker)
+        picker.refresh(text: "@kitchen/a/", cursor: 11)
+        await settle(picker)
+        #expect(picker.entries.first?.path == root + "/apps/app.swift")
+        picker.refresh(text: "@kitchen/", cursor: 9)
+        #expect(picker.resultsAreCurrent) // The known parent is restored synchronously.
+        #expect(picker.entries.contains(where: { $0.path == root + "/README.md" }))
+    }
+
+    @Test func slashBeforeTheFirstSearchReplyResolvesTheIndexedFolder() async throws {
+        let root = "/projects/kitchen"
+        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
+            search: { query, _, _, _ in query == "kitchen" ? [entry(root, dir: true)] : [] },
+            children: { directory, _ in
+                guard directory.path == root else { throw CocoaError(.fileReadNoSuchFile) }
+                return [entry(root + "/README.md")]
+            }), debounce: .zero)
+        defer { picker.end() }
+        picker.begin(anchor: 0, cwd: "/w")
+        picker.refresh(text: "@kitchen/", cursor: 9)
+        await settle(picker)
+        #expect(picker.entries.first?.path == root + "/README.md")
+        #expect(picker.message == nil)
+    }
+
+    @Test func fileQueryUsesTheCaretInsteadOfTextAfterIt() async {
+        let picker = CommandFilePicker(provider: provider(search: { query in [entry("/w/" + query + ".txt")] }),
+                                       debounce: .zero)
+        defer { picker.end() }
+        picker.begin(anchor: 0, cwd: "/w")
+        picker.refresh(text: "@kitchen tail", cursor: 4)
+        await settle(picker)
+        #expect(picker.entries.first?.name == "kit.txt")
+    }
+
     private func provider(
         children: [String: [CommandFileSearchEntry]] = [:],
         search: @escaping @Sendable (String) -> [CommandFileSearchEntry] = { _ in [] }

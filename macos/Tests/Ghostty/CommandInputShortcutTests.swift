@@ -4,6 +4,23 @@ import Testing
 
 @MainActor
 struct CommandInputShortcutTests {
+    @Test func typingAfterTranscriptSelectionReturnsToTheNativePrompt() throws {
+        let typed = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: 1, windowNumber: 0, context: nil, characters: "a", charactersIgnoringModifiers: "a",
+            isARepeat: true, keyCode: 0))
+        #expect(CommandInputShortcut.routesToEditor(typed, promptIsEditable: true, windowIsKey: true,
+            terminalOwnsKeyboard: true, hasMarkedText: false))
+        #expect(!CommandInputShortcut.routesToEditor(typed, promptIsEditable: false, windowIsKey: true,
+            terminalOwnsKeyboard: true, hasMarkedText: false))
+        #expect(!CommandInputShortcut.routesToEditor(typed, promptIsEditable: true, windowIsKey: true,
+            terminalOwnsKeyboard: false, hasMarkedText: false))
+        let modifiers: [NSEvent.ModifierFlags] = [.command, .control]
+        for modifier in modifiers {
+            #expect(!CommandInputShortcut.routesToEditor(try event(code: 0, modifiers: modifier),
+                promptIsEditable: true, windowIsKey: true, terminalOwnsKeyboard: true, hasMarkedText: false))
+        }
+    }
+
     @Test func deliberateReturnDoesNotOverrideOrdinaryTerminalEditingOrGhosttyDefaults() throws {
         for code: UInt16 in [36, 76] {
             #expect(try accepts(event(code: code, modifiers: [.command, .option])))

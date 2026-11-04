@@ -176,7 +176,7 @@ struct ConfigTests {
         ("", UInt32(0x161616)),
         ("theme = Catppuccin Frappe", UInt32(0x303446)),
         ("background = #123456", UInt32(0x123456)),
-        ("theme =", UInt32(0x282C34))
+        ("theme =", UInt32(0x161616))
     ])
     func spookyThemeDefaultsRespectUserOverrides(text: String, expected: UInt32) throws {
         let config = try TemporaryConfig(text)

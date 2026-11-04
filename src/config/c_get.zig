@@ -16,6 +16,17 @@ const Value = key.Value;
 pub fn get(config: *const Config, k: Key, ptr_raw: *anyopaque) bool {
     @setEvalBranchQuota(10_000);
     switch (k) {
+        inline .@"cursor-color", .@"selection-background", .@"selection-foreground" => |tag| {
+            const value = fieldByKey(config, tag) orelse return false;
+            const color = switch (value) {
+                .color => |v| v,
+                .@"cell-foreground" => config.foreground,
+                .@"cell-background" => config.background,
+            };
+            const ptr: *Color.C = @ptrCast(@alignCast(ptr_raw));
+            ptr.* = .{ .r = color.r, .g = color.g, .b = color.b };
+            return true;
+        },
         inline else => |tag| {
             const value = fieldByKey(config, tag);
             return getValue(ptr_raw, value);
@@ -237,4 +248,24 @@ test "c_get: split-preserve-zoom" {
     c.@"split-preserve-zoom".navigation = true;
     try testing.expect(get(&c, .@"split-preserve-zoom", @ptrCast(&bits)));
     try testing.expectEqual(@as(c_uint, 1), bits);
+}
+
+test "c_get: native chrome resolves terminal color references" {
+    const testing = std.testing;
+    var config = try Config.default(testing.allocator);
+    defer config.deinit();
+    config.foreground = .{ .r = 1, .g = 2, .b = 3 };
+    config.background = .{ .r = 4, .g = 5, .b = 6 };
+    config.@"selection-background" = .@"cell-foreground";
+    config.@"selection-foreground" = .@"cell-background";
+    config.@"cursor-color" = .{ .color = .{ .r = 7, .g = 8, .b = 9 } };
+    var value: Color.C = undefined;
+    try testing.expect(get(&config, .@"selection-background", &value));
+    try testing.expectEqual(@as(u8, 1), value.r);
+    try testing.expect(get(&config, .@"selection-foreground", &value));
+    try testing.expectEqual(@as(u8, 4), value.r);
+    try testing.expect(get(&config, .@"cursor-color", &value));
+    try testing.expectEqual(@as(u8, 7), value.r);
+    config.@"cursor-color" = null;
+    try testing.expect(!get(&config, .@"cursor-color", &value));
 }

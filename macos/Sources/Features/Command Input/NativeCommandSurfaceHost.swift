@@ -11,6 +11,7 @@ final class NativeCommandSurfaceHost: NSView {
     private let editor = CommandInputView(frame: .zero)
     private var chromePresentation: CommandChromePresentation?
     private struct CursorPresentation: Equatable {
+        let surface: ghostty_surface_t
         let enabled: Bool
         let terminalRequested: Bool
         let suppressed: Bool
@@ -22,6 +23,7 @@ final class NativeCommandSurfaceHost: NSView {
         let color: CommandInputAccent?
     }
     private var resolvedAccent: CommandInputAccent?
+    private var configuredTheme: CommandUITheme?
     private var accentPresentation: AccentPresentation?
     private struct ViewportPresentation: Equatable {
         let surface: ghostty_surface_t
@@ -110,8 +112,8 @@ final class NativeCommandSurfaceHost: NSView {
         NotificationCenter.default.addObserver(self, selector: #selector(pathViewportChanged),
                                                name: .ghosttyDidUpdateScrollbar, object: surfaceView)
         NotificationCenter.default.addObserver(self, selector: #selector(systemColorsChanged),
-                                               name: NSColor.systemColorsDidChangeNotification, object: nil)
-        for name in [NSWindow.didResignKeyNotification, NSWindow.didResizeNotification,
+                                               name: .spookyCommandThemeDidChange, object: surfaceView)
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.didResizeNotification,
                      NSWindow.didChangeScreenNotification, NSWindow.didChangeOcclusionStateNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(echoWindowChanged(_:)), name: name, object: nil)
         }
@@ -157,8 +159,15 @@ final class NativeCommandSurfaceHost: NSView {
     @objc private func systemColorsChanged() { refreshAccent() }
 
     private func refreshAccent() {
-        resolvedAccent = CommandInputAccent.resolve(appearance: effectiveAppearance)
+        let theme = surfaceView.derivedConfig.commandUITheme
+        guard theme != configuredTheme else { publishAccent(); return }
+        configuredTheme = theme
+        resolvedAccent = CommandInputAccent.resolve(theme.accent, appearance: effectiveAppearance)
+        editor.textView.applyTheme(theme)
+        paths.theme = theme
+        [editButton, terminalButton, draftButton].forEach { $0.contentTintColor = theme.accent }
         publishAccent()
+        synchronize()
     }
 
     private func prepareSubmittedEcho() {
@@ -196,6 +205,12 @@ final class NativeCommandSurfaceHost: NSView {
     @objc private func echoWindowChanged(_ notification: Notification) {
         guard let changed = notification.object as? NSWindow, changed === window else { return }
         session.cancelSubmittedEcho()
+        if notification.name == NSWindow.didResignKeyNotification {
+            editor.requestFocus(token: 0)
+        }
+        if notification.name == NSWindow.didBecomeKeyNotification, canFocusEditor {
+            _ = session.focusEditorIfActive()
+        }
         if notification.name == NSWindow.didChangeOcclusionStateNotification,
            changed.occlusionState.contains(.visible) {
             session.terminalBecameVisible()
@@ -244,8 +259,9 @@ final class NativeCommandSurfaceHost: NSView {
     private var canFocusEditor: Bool {
         guard let window, window.isKeyWindow else { return false }
         if let controller = window.windowController as? BaseTerminalController,
-           let focused = controller.focusedSurface { return focused === surfaceView }
-        return window.firstResponder === surfaceView || window.firstResponder === editor.textView
+           let focused = controller.focusedSurface, focused !== surfaceView { return false }
+        return NativeCommandFocus.canRestoreEditor(firstResponder: window.firstResponder,
+                                                  window: window, surface: surfaceView, editor: editor.textView)
     }
 
     private func synchronize() {
@@ -258,8 +274,9 @@ final class NativeCommandSurfaceHost: NSView {
         let geometry = session.layout
         let line = max(1, geometry.cellHeight)
         let padding = CommandInputView.padding
-        background = configColor("background", fallback: .black)
-        let foreground = configColor("foreground", fallback: .textColor)
+        let theme = surfaceView.derivedConfig.commandUITheme
+        background = theme.background
+        let foreground = theme.foreground
         layer?.backgroundColor = background.cgColor
         // Font and draft measurements update immediately; their callbacks stay
         // deferred. Never resize the PTY using a stale default-font height and
@@ -292,7 +309,7 @@ final class NativeCommandSurfaceHost: NSView {
         // Set before resizing/focusing: an unfocused terminal otherwise draws
         // a hollow caret that can move beyond the editor during PTY expansion.
         if let surface = surfaceView.surface {
-            let cursor = CursorPresentation(enabled: session.hasNativeIntegration,
+            let cursor = CursorPresentation(surface: surface, enabled: session.hasNativeIntegration,
                                             terminalRequested: !session.prefersNativeInput,
                                             suppressed: session.prefersNativeInput && ((shown && !recovering) || transferring))
             if cursor != cursorPresentation {
@@ -315,6 +332,7 @@ final class NativeCommandSurfaceHost: NSView {
                                                          integrated ? placement.reservedHeight + padding : 0)
             }
         } else {
+            cursorPresentation = nil
             viewportPresentation = nil
         }
 
@@ -510,14 +528,6 @@ final class NativeCommandSurfaceHost: NSView {
         terminalButton.frame = NSRect(x: max(8, bounds.width - 222), y: max(0, noticeBottom - 30), width: 110, height: 24)
         draftButton.frame = NSRect(x: max(8, bounds.width - 108), y: max(0, noticeBottom - 30), width: 100, height: 24)
         editButton.frame = NSRect(x: max(8, bounds.width - 120), y: max(0, bounds.height - 30), width: 112, height: 24)
-    }
-
-    private func configColor(_ key: String, fallback: NSColor) -> NSColor {
-        guard let config = (NSApp.delegate as? AppDelegate)?.ghostty.config.config else { return fallback }
-        var value = ghostty_config_color_s()
-        guard ghostty_config_get(config, &value, key, UInt(key.utf8.count)) else { return fallback }
-        return NSColor(srgbRed: CGFloat(value.r) / 255, green: CGFloat(value.g) / 255,
-                       blue: CGFloat(value.b) / 255, alpha: 1)
     }
 
     @objc private func editCommand() { session.useEditor() }

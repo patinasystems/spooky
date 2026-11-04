@@ -55,8 +55,8 @@ When working from Kitchen, follow its `pat run` compute-routing rules; use the
 local executor when this separate checkout is only on this Mac.
 
 Spooky defaults to the bundled **Carbonfox** theme, with a neutral `#161616`
-background, and the black CRT app icon. App theme defaults load before user
-configuration. Press Command-comma to open the usual Ghostty configuration,
+background, and the black CRT app icon. The shared core configuration declares Carbonfox as its default, so
+`ghostty +show-config --default` and newly created configuration files show it. Press Command-comma to open the usual Ghostty configuration,
 set `theme = <name>`, and press Command-Shift-comma to reload. List bundled
 themes with `ghostty +list-themes` (or the executable inside Spooky.app).
 An explicit theme, color override, or empty `theme =` in user configuration
@@ -82,7 +82,7 @@ takes precedence; personal configuration files are not rewritten.
    new cursor context, including the next directory level. Arrows navigate without animation, and typing
    filters the list with fuzzy matching. Return executes exactly the typed draft
    until you explicitly navigate/request the list, when it accepts the selection.
-   Escape dismisses suggestions; Option+Tab inserts a literal tab.
+   Escape dismisses suggestions without switching input modes; Option+Tab inserts a literal tab.
 6. Hover a block's directory or an existing file/path in output to highlight it.
    Click to copy the absolute path with a brief confirmation. Command-click or
    Control-click opens the directory or reveals the file in Finder; holding the
@@ -90,7 +90,7 @@ takes precedence; personal configuration files are not rewritten.
 7. Up on the first visual line recalls shell history; Down on the last line
    moves forward and restores your unfinished draft. Within multiline commands,
    arrows move the caret; an open completion list keeps its arrow navigation.
-   Use the terminal-input control or Escape (with no suggestions pending) for
+   Use the terminal-input control or Option-Escape for
    custom shell widgets and unsupported completion contexts. Native editing can resume
    at an empty primary prompt; clear or run any partially edited shell line.
 8. Try `read answer; print -r -- "$answer"` or a terminal application. Running

@@ -252,10 +252,15 @@ enum CommandFilePicking {
 /// One `@` session: the anchor, the cwd it started in, and a browsed scope
 /// that is bounded UI state only. Navigation never changes the shell's cwd.
 struct CommandFileSearchSession: Equatable {
+    struct DirectoryAnchor: Equatable {
+        let prefix: String
+        let path: String
+    }
     let anchor: Int
     let cwd: String
     var scope: String
     var browsed = false
+    var directoryAnchors: [DirectoryAnchor] = []
 
     init(anchor: Int, cwd: String) {
         self.anchor = anchor
@@ -291,6 +296,7 @@ final class CommandFilePicker {
     private var showsDetail = false
     private var userMovedSelection = false
     private var preferredPath: String?
+    private var lastQuery: String?
     private var task: Task<Void, Never>?
     private var indexTask: Task<Void, Never>?
     private var indexObservationID: UUID?
@@ -359,6 +365,7 @@ final class CommandFilePicker {
         resultsGeneration = nil
         userMovedSelection = false
         preferredPath = nil
+        lastQuery = nil
         childrenCache = [:]
         near = ""
         showsDetail = false
@@ -374,15 +381,27 @@ final class CommandFilePicker {
     /// longer has an active range; the caller then ends it without editing.
     @discardableResult
     func refresh(text: String, cursor: Int) -> Bool {
-        guard let session, let range = activeRange(in: text, cursor: cursor) else { return false }
-        let query = (text as NSString).substring(with: NSRange(location: range.location + 1, length: range.length - 1))
+        guard var session, let range = activeRange(in: text, cursor: cursor) else { return false }
+        let query = (text as NSString).substring(with: NSRange(location: range.location + 1,
+                                                             length: cursor - range.location - 1))
+        session.directoryAnchors.removeAll { !query.hasPrefix($0.prefix) }
+        if let lastQuery, query == lastQuery + "/", let entry = selectedEntry, entry.isDirectory,
+           let component = lastQuery.split(separator: "/").last,
+           ![".", "..", "~"].contains(String(component)), session.directoryAnchors.count < 32 {
+            session.directoryAnchors.append(.init(prefix: query, path: entry.path))
+        }
+        self.session = session
+        lastQuery = query
+        let anchor = session.directoryAnchors.last
+        let remaining = anchor.map { String(query.dropFirst($0.prefix.count)) } ?? query
+        let scope = anchor?.path ?? session.scope
         generation &+= 1
         let current = generation
         task?.cancel()
         task = nil
         queryFailed = false
-        let plan = CommandFilePicking.plan(query: query, scope: session.scope, cwd: session.cwd,
-                                           browsed: session.browsed)
+        let plan = CommandFilePicking.plan(query: remaining, scope: scope, cwd: session.cwd,
+                                           browsed: session.browsed || anchor != nil)
         switch plan {
         case let .list(directory):
             near = directory
@@ -405,6 +424,9 @@ final class CommandFilePicker {
                                empty: "Empty folder")
                 } catch {
                     guard !Task.isCancelled, let self, self.generation == current else { return }
+                    if (try? await self.redirectFuzzyDirectory(query: query, text: text, cursor: cursor,
+                                                              generation: current)) == true { return }
+                    guard self.generation == current, !Task.isCancelled else { return }
                     self.fail(error, generation: current)
                 }
                 self?.onChange()
@@ -446,6 +468,10 @@ final class CommandFilePicker {
                             (scope == nil || CommandFilePicking.relativePath($0.path, to: base) != nil)
                                 && CommandFilePicking.visible($0, relativeTo: base, includeHidden: includeHidden)
                         }
+                        if visible.isEmpty,
+                           try await self.redirectFuzzyDirectory(query: query, text: text, cursor: cursor,
+                                                                 generation: current) { return }
+                        guard self.generation == current, !Task.isCancelled else { return }
                         self.apply(visible, generation: current, empty: "No matches",
                                    truncated: results.count >= CommandFilePicking.searchLimit)
                         break
@@ -460,6 +486,47 @@ final class CommandFilePicker {
         return true
     }
 
+    /// Resolve a fuzzy directory prefix if slash was typed before its search
+    /// response arrived. Literal existing folders win; resolved aliases remain
+    /// breadcrumbs so backspacing restores the correct indexed parent.
+    private func redirectFuzzyDirectory(query: String, text: String, cursor: Int,
+                                        generation current: UInt64) async throws -> Bool {
+        guard let session, session.directoryAnchors.count < 32 else { return false }
+        let anchor = session.directoryAnchors.last
+        let remaining = anchor.map { String(query.dropFirst($0.prefix.count)) } ?? query
+        guard !remaining.hasPrefix("/"), !remaining.hasPrefix("~"), !remaining.hasPrefix("."),
+              let slash = remaining.lastIndex(of: "/") else { return false }
+        var base = anchor?.path ?? session.scope
+        var prefix = anchor?.prefix ?? ""
+        var global = anchor == nil && !session.browsed
+        for component in remaining[..<slash].split(separator: "/").prefix(32) {
+            try Task.checkCancellation()
+            guard generation == current else { return false }
+            let literal = CommandFilePicking.standardized(base + "/" + component)
+            prefix += component + "/"
+            do {
+                _ = try await provider.children(URL(fileURLWithPath: literal), 1)
+                base = literal
+                global = false
+            } catch {
+                try Task.checkCancellation()
+                guard generation == current else { return false }
+                let matches = try await provider.search(String(component), URL(fileURLWithPath: base),
+                                                        global ? nil : URL(fileURLWithPath: base),
+                                                        CommandFilePicking.searchLimit)
+                guard !Task.isCancelled, generation == current,
+                      let directory = matches.first(where: { $0.isDirectory && $0.path != literal }),
+                      var latest = self.session else { return false }
+                latest.directoryAnchors.append(.init(prefix: prefix, path: directory.path))
+                self.session = latest
+                _ = refresh(text: text, cursor: cursor)
+                onChange()
+                return true
+            }
+        }
+        return false
+    }
+
     func move(_ delta: Int) {
         guard !entries.isEmpty else { return }
         selectedIndex = (selectedIndex + delta + entries.count) % entries.count
@@ -472,6 +539,8 @@ final class CommandFilePicker {
         guard var session else { return }
         session.scope = CommandFilePicking.standardized(directory)
         session.browsed = true
+        session.directoryAnchors = []
+        lastQuery = nil
         self.session = session
         userMovedSelection = false
         preferredPath = nil

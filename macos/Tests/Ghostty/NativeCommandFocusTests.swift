@@ -4,6 +4,23 @@ import Testing
 
 @MainActor
 struct NativeCommandFocusTests {
+    @Test func recoveryLeavesSearchAndOtherPaneRespondersAlone() {
+        let window = NSWindow()
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let surface = NSView()
+        let editor = NSTextView()
+        let responders: [NSResponder?] = [nil, window, surface, editor]
+        for responder in responders {
+            #expect(NativeCommandFocus.canRestoreEditor(firstResponder: responder,
+                window: window, surface: surface, editor: editor))
+        }
+        #expect(!NativeCommandFocus.canRestoreEditor(firstResponder: NSTextView(),
+            window: window, surface: surface, editor: editor))
+        #expect(!NativeCommandFocus.canRestoreEditor(firstResponder: NSButton(),
+            window: window, surface: surface, editor: editor))
+    }
+
     @Test func nativeEditorOwnsItsSelectedActivePane() {
         let surface = NSView()
         let editor = NSTextView()

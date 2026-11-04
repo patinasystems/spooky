@@ -104,7 +104,7 @@ final class CommandTextView: NSTextView {
                              + "Return accepts after menu navigation; otherwise it runs the typed command. "
                              + "Up on the first visual line recalls shell history; Down on the last returns to your draft. "
                              + "Shift Return adds a line. Type @ to insert a file path. "
-                             + "Escape dismisses suggestions or returns to the terminal.")
+                             + "Escape dismisses suggestions. Option-Escape explicitly uses terminal input.")
     }
 
     required init?(coder: NSCoder) {
@@ -164,7 +164,9 @@ final class CommandTextView: NSTextView {
             }
 
         case 53: // Escape
-            onUseTerminal()
+            // Dismissing a menu twice must not silently give ZLE the draft or
+            // re-enable the terminal cursor beneath an apparently native prompt.
+            if event.modifierFlags.contains(.option) { onUseTerminal() }
 
         default:
             super.keyDown(with: event)
@@ -190,6 +192,17 @@ final class CommandTextView: NSTextView {
         onUseTerminal()
     }
 
+    private(set) var commandTheme: CommandUITheme?
+
+    func applyTheme(_ theme: CommandUITheme) {
+        guard commandTheme != theme else { return }
+        commandTheme = theme
+        selectedTextAttributes = [.backgroundColor: theme.selectionBackground,
+                                  .foregroundColor: theme.selectionForeground]
+        insertionPointColor = theme.cursor
+        completions.applyTheme(theme)
+    }
+
     func configureAppearance(
         font: NSFont,
         textColor: NSColor,
@@ -206,7 +219,8 @@ final class CommandTextView: NSTextView {
             self.textColor = textColor
             foregroundChanged = true
         }
-        if insertionPointColor != textColor { insertionPointColor = textColor }
+        let cursor = commandTheme?.cursor ?? textColor
+        if insertionPointColor != cursor { insertionPointColor = cursor }
         if self.backgroundColor != backgroundColor { self.backgroundColor = backgroundColor }
         let lineHeight = max(0, minimumLineHeight)
         if self.minimumLineHeight != lineHeight {

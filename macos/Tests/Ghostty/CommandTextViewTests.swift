@@ -480,7 +480,7 @@ struct CommandTextViewTests {
         #expect(submitted == ["git cherry-pick"])
     }
 
-    @Test func escapeDismissesCompletionBeforeReturningToTerminalInput() throws {
+    @Test func escapeDismissesCompletionWithoutChangingInputOwnership() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         let request = try requestCompletion(from: view)
@@ -492,7 +492,7 @@ struct CommandTextViewTests {
         #expect(view.completionItems.isEmpty)
         #expect(terminalRequests == 0)
         view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
-        #expect(terminalRequests == 1)
+        #expect(terminalRequests == 0)
     }
 
     @Test func staleCompletionCannotReplaceNewTextOrANewCursorPosition() throws {
@@ -594,7 +594,7 @@ struct CommandTextViewTests {
         #expect(current.id != old.id)
     }
 
-    @Test func escapeCancelsPendingCompletionBeforeSwitchingToTerminal() throws {
+    @Test func escapeCancelsPendingCompletionWithoutChangingInputOwnership() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         _ = try requestCompletion(from: view)
@@ -607,7 +607,7 @@ struct CommandTextViewTests {
         #expect(cancellations == 1)
         #expect(terminalRequests == 0)
         view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
-        #expect(terminalRequests == 1)
+        #expect(terminalRequests == 0)
     }
 
     @Test func typingFiltersCachedCompletionsAndAcceptsTheCurrentTokenRange() throws {
@@ -1178,6 +1178,69 @@ struct CommandTextViewTests {
         #expect(!view.completions.handleKey(try keyEvent(code: 125, characters: "")))
         view.setSelectedRange(NSRange(location: 0, length: 4))
         #expect(!view.completions.handleKey(try keyEvent(code: 125, characters: "")))
+    }
+
+    @Test func backspaceAndCaretMovesRequestTheCurrentCompletionContext() async throws {
+        let (view, window) = makeCompletionEditor(draft: "cd dev/")
+        defer { window.close() }
+        var requests: [CommandCompletionRequest] = []
+        view.onRequestCompletion = { requests.append($0) }
+        view.completions.requestAutomaticNow()
+        let old = try #require(requests.first)
+        view.deleteBackward(nil)
+        view.completionSelectionDidChange()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while requests.last?.text != "cd dev", ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(requests.last?.text == "cd dev")
+        #expect(requests.last?.shellText == "cd ")
+        view.setSelectedRange(NSRange(location: 4, length: 0))
+        view.completionSelectionDidChange()
+        while requests.last?.cursorUTF16 != 4, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(requests.last?.cursorUTF16 == 4)
+        view.receiveCompletions(.init(requestID: old.id, revision: old.revision, items: [
+            .init(displayText: "stale", detail: "", replacementText: "dev/stale",
+                  replacementRange: NSRange(location: 3, length: 4))
+        ]))
+        #expect(view.completionItems.isEmpty)
+    }
+
+    @Test func backspaceWithinTheSameDirectoryFiltersWithoutAnotherShellRequest() throws {
+        let (view, window) = makeCompletionEditor(draft: "cd dev/a")
+        defer { window.close() }
+        var requests: [CommandCompletionRequest] = []
+        view.onRequestCompletion = { requests.append($0) }
+        view.completions.requestAutomaticNow()
+        let request = try #require(requests.first)
+        view.receiveCompletions(.init(requestID: request.id, revision: request.revision, items: [
+            .init(displayText: "alpha/", detail: "", replacementText: "cd dev/alpha/",
+                  replacementRange: NSRange(location: 0, length: view.string.utf16.count)),
+            .init(displayText: "apps/", detail: "", replacementText: "cd dev/apps/",
+                  replacementRange: NSRange(location: 0, length: view.string.utf16.count))
+        ]))
+        view.deleteBackward(nil)
+        view.completionSelectionDidChange()
+        #expect(view.string == "cd dev/")
+        #expect(view.completionItems.count == 2)
+        #expect(requests.count == 1)
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
+        #expect(view.string == "cd dev/alpha/")
+    }
+
+    @Test func onlyExplicitOptionEscapeUsesTerminalInput() throws {
+        let (view, window) = makeCompletionEditor(draft: "")
+        defer { window.close() }
+        var requests = 0
+        view.onUseTerminal = { requests += 1 }
+        view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
+        view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}"))
+        #expect(requests == 0)
+        #expect(window.firstResponder === view)
+        view.keyDown(with: try keyEvent(code: 53, characters: "\u{1b}", modifiers: .option))
+        #expect(requests == 1)
     }
 
     private func makeCompletionEditor(draft: String) -> (CommandTextView, CommandFocusTestWindow) {

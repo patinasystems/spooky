@@ -1,14 +1,14 @@
 import AppKit
 
-/// Resolve AppKit's dynamic accent once per appearance/color change. The
-/// renderer consumes opaque sRGB bytes; ordinary editor updates reuse them.
+/// Convert the resolved pane theme's accent to the renderer's opaque sRGB
+/// bytes. Ordinary editor updates reuse the last published value.
 struct CommandInputAccent: Equatable {
     let red: UInt8
     let green: UInt8
     let blue: UInt8
 
     @MainActor
-    static func resolve(_ color: NSColor = .controlAccentColor, appearance: NSAppearance) -> Self? {
+    static func resolve(_ color: NSColor, appearance: NSAppearance) -> Self? {
         var result: Self?
         appearance.performAsCurrentDrawingAppearance {
             guard let rgb = color.usingColorSpace(.sRGB) else { return }

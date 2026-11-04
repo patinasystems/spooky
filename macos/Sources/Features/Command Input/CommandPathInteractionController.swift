@@ -41,6 +41,7 @@ final class CommandPathInteractionController: NSObject {
     private let callbacks: Callbacks
     private let resolve: @Sendable (CommandPathProbe) async -> CommandPathMatch?
     private var tooltip: CommandPathTooltip?
+    var theme = CommandUITheme.fallback { didSet { tooltip?.applyTheme(theme) } }
     private var task: Task<Void, Never>?
     private var clickDeadline: Task<Void, Never>?
     private var revision: UInt64 = 0
@@ -270,6 +271,7 @@ final class CommandPathInteractionController: NSObject {
         if open { callbacks.open(match.path) } else {
             callbacks.copy(match.path.path)
             if tooltip == nil { tooltip = CommandPathTooltip() }
+            tooltip?.applyTheme(theme)
             tooltip?.show(anchor: rects.first(where: { $0.contains(location) }) ?? rects[0], in: view)
         }
     }

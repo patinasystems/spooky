@@ -48,6 +48,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     private var items: [CommandCompletionCandidate] = []
     private var message: String?
     private var font = CommandCompletionView.fallbackFont
+    private(set) var theme = CommandUITheme.fallback
     private var contentWidth = CommandOverlayStyle.minimumPopupWidth
     private var anchorLocation: Int?
     var onAccept: (Int) -> Void = { _ in }
@@ -101,7 +102,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         scrollView.contentView.drawsBackground = false
         for label in [headerTitle, headerStatus] {
             label.font = .systemFont(ofSize: 11)
-            label.textColor = CommandOverlayStyle.secondaryText
+            label.textColor = CommandUITheme.fallback.secondary
             label.isHidden = true
             surface.contentView.addSubview(label)
         }
@@ -111,12 +112,34 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         panel.contentView = surface
     }
 
+    func applyTheme(_ theme: CommandUITheme) {
+        guard self.theme != theme else { return }
+        self.theme = theme
+        surface.applyTheme(theme)
+        headerTitle.textColor = theme.secondary
+        headerStatus.textColor = theme.secondary
+        refreshVisibleColors()
+    }
+
+    private func refreshVisibleColors() {
+        let visible = table.rows(in: table.visibleRect)
+        guard visible.location != NSNotFound else { return }
+        for row in visible.location..<NSMaxRange(visible) {
+            (table.rowView(atRow: row, makeIfNecessary: false) as? CommandCompletionRow)?.theme = theme
+            (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? CommandCompletionCell)?
+                .applyTheme(theme, selected: row == table.selectedRow)
+        }
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { refreshVisibleColors() }
+
     func show(items: [CommandCompletionCandidate], message: String?, selected: Int,
               header: CommandCompletionHeader? = nil, anchor: Int? = nil, for textView: NSTextView,
               diagnosticInputID: UInt64? = nil) {
         let diagnostic = CommandInputDiagnostics.beginTimeline(
             .completionShow, id: diagnosticInputID, begin: .completionShowBegin, end: .completionShowEnd)
         defer { CommandInputDiagnostics.end(diagnostic) }
+        applyTheme((textView as? CommandTextView)?.commandTheme ?? .fallback)
         let editorFont = textView.font ?? font
         let fontChanged = editorFont != font
         let headerChanged = self.header != header
@@ -343,7 +366,9 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { items.indices.contains(row) }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        CommandCompletionRow()
+        let view = CommandCompletionRow()
+        view.theme = theme
+        return view
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -356,6 +381,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         } else {
             cell.configure(title: message ?? "No completions", detail: "", font: font, muted: true)
         }
+        cell.applyTheme(theme, selected: row == tableView.selectedRow)
         return cell
     }
 
@@ -379,13 +405,14 @@ private final class CommandCompletionTable: NSTableView {
 
 @MainActor
 private final class CommandCompletionRow: NSTableRowView {
+    var theme = CommandUITheme.fallback { didSet { needsDisplay = true } }
     // The tinted selection is light; keep label colors instead of AppKit's
     // emphasized white-on-accent text, which is unreadable in light mode.
     override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
 
     override func drawSelection(in dirtyRect: NSRect) {
         guard isSelected else { return }
-        CommandOverlayStyle.selectionBackground.setFill()
+        theme.selectionBackground.setFill()
         let radius = CommandOverlayStyle.selectionRadius
         NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
     }
@@ -395,14 +422,21 @@ private final class CommandCompletionRow: NSTableRowView {
 private final class CommandCompletionCell: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
+    private var muted = false
+
+    func applyTheme(_ theme: CommandUITheme, selected: Bool) {
+        let foreground = selected ? theme.selectionForeground : theme.foreground
+        title.textColor = muted ? theme.secondary : foreground
+        detail.textColor = foreground.withAlphaComponent(0.65)
+    }
 
     init() {
         super.init(frame: .zero)
-        title.textColor = CommandOverlayStyle.primaryText
+        title.textColor = CommandUITheme.fallback.foreground
         title.lineBreakMode = .byTruncatingMiddle
         detail.font = .systemFont(ofSize: 11)
-        detail.textColor = CommandOverlayStyle.secondaryText
-        detail.lineBreakMode = .byTruncatingTail
+        detail.textColor = CommandUITheme.fallback.secondary
+        detail.lineBreakMode = .byTruncatingHead
         textField = title
         addSubview(title)
         addSubview(detail)
@@ -411,9 +445,10 @@ private final class CommandCompletionCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func configure(title: String, detail: String, font: NSFont, muted: Bool = false) {
+        self.muted = muted
         CommandInputDiagnostics.record(.completionRowsConfigured)
         if self.title.font != font { self.title.font = font }
-        self.title.textColor = muted ? CommandOverlayStyle.secondaryText : CommandOverlayStyle.primaryText
+        self.title.textColor = muted ? CommandUITheme.fallback.secondary : CommandUITheme.fallback.foreground
         self.title.stringValue = title.replacingOccurrences(of: "\n", with: "↵")
         self.detail.stringValue = detail.replacingOccurrences(of: "\n", with: " ")
         toolTip = detail.isEmpty ? nil : title + "\n" + detail

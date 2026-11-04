@@ -64,12 +64,6 @@ extension Ghostty {
                 return nil
             }
 
-            // Product defaults load first so user files and CLI arguments retain
-            // their ordinary precedence, including an explicit theme reset.
-            if let defaults = Bundle.main.url(forResource: "spooky-defaults", withExtension: "ghostty") {
-                ghostty_config_load_file(cfg, defaults.path)
-            }
-
             // Load our configuration from files, CLI args, and then any referenced files.
             if let path {
                 ghostty_config_load_file(cfg, path)
