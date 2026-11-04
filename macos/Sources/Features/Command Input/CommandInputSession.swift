@@ -181,6 +181,15 @@ final class CommandInputSession {
         terminalGeometryChanged()
     }
 
+    /// Visibility can change while recovery is in its longer inactive sleep.
+    /// Restart only on these lifecycle events, never on each scroll/update.
+    /// The presentation deadline remains absolute; restarting its observer does
+    /// not extend the submitted echo's 100 ms lifetime.
+    func terminalBecameVisible() {
+        terminalGeometryChanged()
+        startGeometryUpdates()
+    }
+
     /// Refresh immediately for core/host geometry events. Busy reads coalesce
     /// into one short retry task and never wait for the parser on MainActor.
     func terminalGeometryChanged() {

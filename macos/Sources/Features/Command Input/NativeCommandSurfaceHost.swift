@@ -198,13 +198,13 @@ final class NativeCommandSurfaceHost: NSView {
         session.cancelSubmittedEcho()
         if notification.name == NSWindow.didChangeOcclusionStateNotification,
            changed.occlusionState.contains(.visible) {
-            session.terminalGeometryChanged()
+            session.terminalBecameVisible()
         }
     }
 
     @objc private func echoSpaceChanged() {
         session.cancelSubmittedEcho()
-        if window?.isOnActiveSpace == true { session.terminalGeometryChanged() }
+        if window?.isOnActiveSpace == true { session.terminalBecameVisible() }
     }
 
     private func publishAccent() {
