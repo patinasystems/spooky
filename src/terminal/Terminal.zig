@@ -86,6 +86,8 @@ last_primary_input_id: [65]u8 = @splat(0),
 /// It never changes terminal cursor modes, and the renderer separately gates
 /// it on the native feature and an explicit request to use terminal input.
 native_prompt_active: bool = false,
+/// Ordered ZLE readiness, independent of asynchronous metadata files.
+native_input: @import("NativeInputState.zig") = .{},
 native_prompt_id: [65]u8 = @splat(0),
 
 /// The title of the terminal as set by escape sequences (e.g. OSC 0/2).
@@ -475,6 +477,10 @@ pub fn rectXtChecksum(self: *const Terminal, req: xt_checksum.Request) u16 {
 /// is general: `.default` selects the configured defaults, while any other
 /// value selects a concrete appearance until it is changed again or reset.
 pub fn setCursorStyle(self: *Terminal, value: ansi.CursorStyle) void {
+    // An inherited shell cursor is not a foreground application's request.
+    // Reset at C; only a DECSCUSR inside that running command owns its shape.
+    if (self.native_input.kind == .running and !self.native_prompt_active)
+        self.native_input.program_cursor = value != .default;
     // Remember whether future configuration changes should update the visible
     // cursor. An explicit appearance must remain in effect until the program
     // selects the default again.
@@ -2803,6 +2809,15 @@ pub fn semanticPrompt(
     self: *Terminal,
     cmd: osc.Command.SemanticPrompt,
 ) !void {
+    // Private state reports carry no cells or semantic pin changes. Validate
+    // their identities against the parsed primary prompt before publishing.
+    const native_revision = self.native_input.revision;
+    if (self.native_input.apply(cmd, self.screens.active_key == .primary, &self.native_prompt_id)) {
+        if (native_revision != self.native_input.revision)
+            self.native_prompt_active = self.native_input.kind == .ready;
+        return;
+    }
+
     switch (cmd.action) {
         .fresh_line => try self.semanticPromptFreshLine(),
 
@@ -2937,6 +2952,10 @@ pub fn semanticPrompt(
             if (!Blocks.validID(id)) return;
             switch (kind) {
                 .header => {
+                    // A new A invalidates the old ready+B pair immediately.
+                    // Its own ordered report and B must authorize the next editor.
+                    if (!std.mem.eql(u8, id, std.mem.sliceTo(&self.native_input.block_id, 0)))
+                        self.native_input.running();
                     self.native_prompt_active = (cmd.readOption(.prompt_kind) orelse .initial) == .initial;
                     self.native_prompt_id = @splat(0);
                     @memcpy(self.native_prompt_id[0..id.len], id);
@@ -2958,6 +2977,7 @@ pub fn semanticPrompt(
                 },
             }
             if (kind == .output) {
+                self.native_input.running();
                 self.last_started_command_id = @splat(0);
                 @memcpy(self.last_started_command_id[0..id.len], id);
             }
@@ -2970,6 +2990,27 @@ pub fn semanticPrompt(
             try screen.command_blocks.mark(screen.alloc, &screen.pages, kind, id, pin, end_inclusive);
         }
     }
+}
+
+/// A bounded presentation hint, not an output parser: the current command
+/// has not advanced from its C pin. At most two block identities are inspected.
+/// A renderer may coalesce this first transition for one frame, never await it.
+pub fn nativeCommandAtOutputStart(self: *const Terminal) bool {
+    if (self.screens.active_key != .primary or self.native_prompt_active or
+        self.native_input.kind != .running or self.native_input.program_cursor) return false;
+    const screen = self.screens.active;
+    if (screen.selection != null or screen.pages.viewport != .active or screen.cursor.pending_wrap) return false;
+    const blocks = screen.command_blocks.blocks.items;
+    var i = blocks.len;
+    while (i > blocks.len -| 2) {
+        i -= 1;
+        const block = blocks[i];
+        if (!std.mem.eql(u8, &block.id, &self.last_started_command_id)) continue;
+        const pin = block.output orelse return false;
+        const cursor = screen.cursor.page_pin;
+        return !pin.garbage and pin.node == cursor.node and pin.y == cursor.y and pin.x == cursor.x;
+    }
+    return false;
 }
 
 // OSC 133;L
@@ -5972,6 +6013,7 @@ pub fn fullReset(self: *Terminal) void {
     };
     self.modes.reset();
     self.native_prompt_active = false;
+    self.native_input.running();
     self.native_prompt_id = @splat(0);
     self.tabstops.reset(TABSTOP_INTERVAL);
     self.previous_char = null;
@@ -20013,4 +20055,58 @@ test "Terminal: native bootstrap padding avoids reflowing the PROMPT_SP header" 
         try testing.expectEqual(input_row, t.screens.active.cursor.y);
         try testing.expectEqualStrings("bootstrap", std.mem.sliceTo(&t.last_primary_input_id, 0));
     }
+}
+
+test "native cursor ownership distinguishes inherited shell and foreground requests" {
+    const alloc = testing.allocator;
+    var term: Terminal = try .init(testing.io, alloc, .{ .cols = 20, .rows = 10 });
+    defer term.deinit(alloc);
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=12-1" });
+    try term.semanticPrompt(.{ .action = .prompt_start, .options_unvalidated = "spooky_state=ready;spooky_generation=12-1;spooky_context=start;aid=12-1" });
+    term.setCursorStyle(.steady_block);
+    try testing.expect(!term.native_input.program_cursor);
+    try term.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=12-1" });
+    try testing.expect(!term.native_input.program_cursor);
+    term.setCursorStyle(.steady_block);
+    try testing.expect(term.native_input.program_cursor);
+    term.setCursorStyle(.default);
+    try testing.expect(!term.native_input.program_cursor);
+    term.setCursorStyle(.blinking_bar);
+    try testing.expect(term.native_input.program_cursor);
+    try term.semanticPrompt(.{ .action = .end_command, .options_unvalidated = "aid=12-1" });
+    try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=12-2" });
+    try term.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=12-2" });
+    try testing.expect(!term.native_input.program_cursor);
+}
+
+test "native first output hint releases when output advances or program claims cursor" {
+    const alloc = testing.allocator;
+    var term = try init(testing.io, alloc, .{ .cols = 20, .rows = 10 });
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=12-1\x07\x1b]133;P;spooky_state=ready;spooky_generation=12-1;spooky_context=start;aid=12-1\x07\r\nls\r\n\x1b]133;C;aid=12-1\x07");
+    try testing.expect(term.nativeCommandAtOutputStart());
+    term.setCursorStyle(.steady_block);
+    try testing.expect(!term.nativeCommandAtOutputStart());
+    term.setCursorStyle(.default);
+    try testing.expect(term.nativeCommandAtOutputStart());
+    stream.nextSlice("file.txt");
+    try testing.expect(!term.nativeCommandAtOutputStart());
+}
+
+test "native new A cannot reuse the previous ready generation and durable B" {
+    const alloc = testing.allocator;
+    var term = try init(testing.io, alloc, .{ .cols = 20, .rows = 10 });
+    defer term.deinit(alloc);
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]133;A;aid=12-1\x07\x1b]133;P;spooky_state=ready;spooky_generation=12-1;spooky_context=start;aid=12-1\x07\x1b]133;B;aid=12-1\x07");
+    try testing.expect(term.native_input.isReady(&term.last_primary_input_id));
+    stream.nextSlice("\x1b]133;A;aid=12-2\x07");
+    try testing.expect(!term.native_input.isReady(&term.last_primary_input_id));
+    stream.nextSlice("\x1b]133;P;spooky_state=ready;spooky_generation=12-2;spooky_context=start;aid=12-2\x07");
+    try testing.expect(!term.native_input.isReady(&term.last_primary_input_id));
+    stream.nextSlice("\x1b]133;B;aid=12-2\x07");
+    try testing.expect(term.native_input.isReady(&term.last_primary_input_id));
 }

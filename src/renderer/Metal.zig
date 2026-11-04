@@ -244,9 +244,12 @@ pub inline fn present(self: *Metal, target: Target, sync: bool, snapshot: render
 /// Called on main only after actual layer assignment, with no renderer lock.
 fn nativeInputPresented(context: ?*anyopaque, snapshot: rendererpkg.NativePresentation.Snapshot) void {
     const surface: *apprt.Surface = @ptrCast(@alignCast(context orelse return));
+    surface.core_surface.native_presented_generation = snapshot.generation;
+    const prompt: apprt.action.NativeInputPrompt = .{ .id = snapshot.prompt_id, .generation = snapshot.generation };
     _ = surface.app.performAction(.{ .surface = &surface.core_surface }, .native_input_presented, .{
         .serial = snapshot.serial,
         .block_id = @ptrCast(&snapshot.block_id),
+        .prompt = &prompt,
     }) catch |err| {
         log.warn("native input presentation callback failed err={}", .{err});
     };

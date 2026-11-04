@@ -749,10 +749,13 @@ pub const InitialSize = extern struct {
     };
 };
 
+pub const NativeInputPrompt = extern struct { id: [65]u8, generation: [65]u8 };
+
 pub const NativeInputPresented = extern struct {
     serial: u64,
     /// NUL-terminated ID, at most 64 bytes. Valid during the action callback.
     block_id: [*:0]const u8,
+    prompt: *const NativeInputPrompt,
 };
 
 pub const ResizeWindow = extern struct {

@@ -25,11 +25,32 @@ pub const Style = enum {
     }
 };
 
+/// Shared native cursor policy. Shell output has no timed cursor release.
+/// Actual terminal typing uses a bar; explicit foreground requests and the
+/// alternate screen retain the application's terminal cursor semantics.
+pub fn nativePolicy(opts: struct {
+    enabled: bool,
+    terminal_requested: bool,
+    primary: bool,
+    prompt: bool,
+    suppressed: bool,
+    transferring: bool,
+    program_requested: bool,
+}) struct { suppressed: bool, default_bar: bool } {
+    if (!opts.primary or !opts.enabled or opts.terminal_requested)
+        return .{ .suppressed = false, .default_bar = false };
+    if (opts.prompt) return .{ .suppressed = true, .default_bar = true };
+    if (opts.program_requested and !opts.transferring)
+        return .{ .suppressed = false, .default_bar = false };
+    return .{ .suppressed = opts.suppressed, .default_bar = true };
+}
+
 pub const StyleOptions = struct {
     preedit: bool = false,
     focused: bool = false,
     blink_visible: bool = false,
     native_input_suppressed: bool = false,
+    native_input_default_bar: bool = false,
 };
 
 /// Returns the cursor style to use for the current render state or null
@@ -53,7 +74,7 @@ pub fn style(
     // If we are in preedit, then we always show the block cursor. We do
     // this even if the cursor is explicitly not visible because it shows
     // an important editing state to the user.
-    if (opts.preedit) return .block;
+    if (opts.preedit) return if (opts.native_input_default_bar) .bar else .block;
 
     // If we're at a password input its always a lock.
     if (state.cursor.password_input) return .lock;
@@ -63,14 +84,14 @@ pub fn style(
 
     // If we're not focused, our cursor is always visible so that
     // we can show the hollow box.
-    if (!opts.focused) return .block_hollow;
+    if (!opts.focused) return if (opts.native_input_default_bar) .bar else .block_hollow;
 
     // If the cursor is blinking and our blink state is not visible,
     // then we don't show the cursor.
     if (state.cursor.blinking and !opts.blink_visible) return null;
 
     // Otherwise, we use whatever style the terminal wants.
-    return .fromTerminal(state.cursor.visual_style);
+    return if (opts.native_input_default_bar) .bar else .fromTerminal(state.cursor.visual_style);
 }
 
 test "cursor: native input suppression overrides all visual states" {
@@ -224,4 +245,43 @@ test "cursor: always block with preedit" {
     try testing.expect(style(&state, .{ .preedit = true, .focused = true, .blink_visible = false }) == null);
     try testing.expect(style(&state, .{ .preedit = true, .focused = true, .blink_visible = true }) == null);
     try testing.expect(style(&state, .{ .preedit = true, .focused = false, .blink_visible = true }) == null);
+}
+
+test "native cursor policy never releases the shell block cursor on elapsed time" {
+    const t = std.testing;
+    const hidden = nativePolicy(.{ .enabled = true, .terminal_requested = false, .primary = true, .prompt = false, .suppressed = true, .transferring = false, .program_requested = false });
+    try t.expect(hidden.suppressed and hidden.default_bar);
+    const typing = nativePolicy(.{ .enabled = true, .terminal_requested = false, .primary = true, .prompt = false, .suppressed = false, .transferring = false, .program_requested = false });
+    try t.expect(!typing.suppressed and typing.default_bar);
+    const program = nativePolicy(.{ .enabled = true, .terminal_requested = false, .primary = true, .prompt = false, .suppressed = true, .transferring = false, .program_requested = true });
+    try t.expect(!program.suppressed and !program.default_bar);
+    const prompt = nativePolicy(.{ .enabled = true, .terminal_requested = false, .primary = true, .prompt = true, .suppressed = false, .transferring = false, .program_requested = true });
+    try t.expect(prompt.suppressed);
+    const alternate = nativePolicy(.{ .enabled = true, .terminal_requested = false, .primary = false, .prompt = false, .suppressed = true, .transferring = false, .program_requested = false });
+    try t.expect(!alternate.suppressed and !alternate.default_bar);
+    const raw = nativePolicy(.{ .enabled = true, .terminal_requested = true, .primary = true, .prompt = true, .suppressed = true, .transferring = true, .program_requested = false });
+    try t.expect(!raw.suppressed and !raw.default_bar);
+}
+
+test "native default cursor stays a text bar for unfocused and preedit states" {
+    const alloc = std.testing.allocator;
+    var term: terminal.Terminal = try .init(std.testing.io, alloc, .{ .cols = 10, .rows = 10 });
+    defer term.deinit(alloc);
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    term.modes.set(.cursor_visible, true);
+    try state.update(alloc, &term);
+    for ([_]bool{ false, true }) |focused| {
+        for ([_]bool{ false, true }) |preedit| {
+            try std.testing.expectEqual(Style.bar, style(&state, .{
+                .focused = focused,
+                .preedit = preedit,
+                .blink_visible = true,
+                .native_input_default_bar = true,
+            }).?);
+        }
+    }
+    term.modes.set(.cursor_visible, false);
+    try state.update(alloc, &term);
+    try std.testing.expect(style(&state, .{ .focused = true, .native_input_default_bar = true }) == null);
 }

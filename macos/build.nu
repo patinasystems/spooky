@@ -10,6 +10,7 @@ def main [
     --arch: string = ""                # Optional architecture for a native-only GhosttyKit build
     --xcconfig: string = ""            # Optional build settings file
     --only-testing: string = ""        # Optional comma-separated target, suite, or test identifiers
+    --test-parallelism: int = 0       # Optional Swift Testing concurrency limit; 0 keeps the default
     --build-dir: string = ""           # Optional isolated output directory
 ] {
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
@@ -36,9 +37,16 @@ def main [
     let test_args = if $only_testing == "" { [] } else { $only_testing | split row "," | each { |id| $"-only-testing:($id)" } }
     let derived_args = [-derivedDataPath ($output_dir | path join "DerivedData")]
 
+    # AppKit tests share a main event loop and process-wide native services.
+    # Allow diagnostic runs to serialize them without relaxing test deadlines.
+    let test_env = if $action == "test" and $test_parallelism > 0 {
+        [$"TEST_RUNNER_SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=($test_parallelism)"]
+    } else { [] }
+
     (^env -i
         $"HOME=($env.HOME)"
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+        ...$test_env
         xcodebuild
         -project $project
         -scheme $scheme

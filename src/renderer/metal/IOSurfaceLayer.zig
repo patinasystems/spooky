@@ -118,6 +118,7 @@ const SetSurfaceBlock = objc.Block(struct {
     layer: objc.c.id,
     surface: *IOSurface,
     snapshot: NativePresentation.Snapshot,
+    deferred: bool = false,
 }, .{}, void);
 
 fn setSurfaceCallback(
@@ -147,6 +148,15 @@ fn setSurfaceCallback(
     }
 
     const presentation: *Presentation = @ptrCast(@alignCast(layer.getInstanceVariable("presentation").value orelse return));
+    if (block.snapshot.defer_prompt and !block.deferred) {
+        // Completed output/erase and the next ready prompt can straddle a
+        // PTY read. Retain at most one frame budget without another render.
+        // Running output is never tagged; a newer prompt makes this stale.
+        surface.retain();
+        var delayed = SetSurfaceBlock.init(.{ .layer = block.layer, .surface = surface, .snapshot = block.snapshot, .deferred = true }, &setSurfaceCallback);
+        dispatch_after(macos.dispatch.c.dispatch_time(macos.dispatch.c.DISPATCH_TIME_NOW, 16_666_667), @ptrCast(macos.dispatch.queue.getMain()), @ptrCast(&delayed));
+        return;
+    }
     const admission = presentation.tracker.admit(block.snapshot, true);
     if (!admission.present) return;
     layer.setProperty("contents", surface);
@@ -220,3 +230,6 @@ fn getSubclass() error{ObjCFailed}!objc.Class {
 
     return subclass;
 }
+
+// C import cannot translate Objective-C block typedefs. Same ABI as dispatch_async.
+extern "c" fn dispatch_after(when: u64, queue: *anyopaque, block: *anyopaque) void;

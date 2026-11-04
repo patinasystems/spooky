@@ -28,7 +28,7 @@ enum CommandInputDiagnostics {
         case submissionBegin, submissionResizeReady, submissionRequestPublished
         case submissionTriggerQueued, submissionReceiptObserved
         case submissionCoreBoundaryObserved, submissionHandoffReleased, hostLayoutApplied, hostLayout
-        case boundaryNotified
+        case boundaryNotified, terminalFrameAttached
         case editorEdit, editorLayoutBegin, editorLayoutEnd, editorWillDraw, editorDrawBegin, editorDrawEnd
         case editorTextLayoutBegin, editorTextLayoutEnd, mainRunLoopBeforeSources, mainRunLoopBeforeWaiting
         case mainRunLoopAfterWaiting, editorWindowDidUpdate
@@ -55,6 +55,13 @@ enum CommandInputDiagnostics {
         let token = InputToken(id: id, previousID: currentInputID)
         currentInputID = id
         return token
+    }
+
+    @MainActor static func withInputID(_ id: UInt64?, perform: () -> Void) {
+        let previous = currentInputID
+        currentInputID = id
+        defer { currentInputID = previous }
+        perform()
     }
 
     @MainActor static func endInput(_ token: InputToken?) {

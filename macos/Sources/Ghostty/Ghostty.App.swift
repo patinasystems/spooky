@@ -785,14 +785,24 @@ extension Ghostty {
                     start: UnsafeRawPointer(presented.block_id).assumingMemoryBound(to: UInt8.self),
                     count: 65).prefix { $0 != 0 }
                 let blockID = bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8)
+                func copiedID<T>(_ value: T) -> String? {
+                    withUnsafeBytes(of: value) { raw in
+                        let bytes = raw.prefix { $0 != 0 }
+                        return bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8)
+                    }
+                }
+                let promptID = copiedID(presented.prompt.pointee.id)
+                let generation = copiedID(presented.prompt.pointee.generation)
                 let serial = presented.serial
                 if Thread.isMainThread {
                     MainActor.assumeIsolated {
-                        view.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial)
+                        view.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial,
+                                                                          promptID: promptID, generation: generation)
                     }
                 } else {
                     DispatchQueue.main.async { [weak view] in
-                        view?.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial)
+                        view?.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial,
+                                                                          promptID: promptID, generation: generation)
                     }
                 }
 

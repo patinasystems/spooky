@@ -2075,6 +2075,17 @@ pub const CAPI = struct {
             .cursor_y = 0,
             .last_started_id = term.last_started_command_id,
             .last_primary_input_id = term.last_primary_input_id,
+            .native_state_revision = term.native_input.revision,
+            .native_generation = term.native_input.generation,
+            .native_accepted_request = term.native_input.accepted_request,
+            .presented_generation = core.native_presented_generation,
+            .native_block_id = term.native_input.block_id,
+            .native_cwd = @splat(0),
+            .native_state = @backingInt(term.native_input.kind),
+            .native_context_start = term.native_input.context_start,
+        };
+        if (term.getPwd()) |pwd| if (pwd.len < layout.native_cwd.len) {
+            @memcpy(layout.native_cwd[0..pwd.len], pwd);
         };
         if (!layout.primary) return 0;
         if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {

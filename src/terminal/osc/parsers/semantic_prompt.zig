@@ -76,6 +76,10 @@ pub const ClickEvents = lib.Enum(
 
 pub const Option = enum {
     aid,
+    spooky_state,
+    spooky_request,
+    spooky_generation,
+    spooky_context,
     cl,
     prompt_kind,
     err,
@@ -110,7 +114,7 @@ pub const Option = enum {
 
     pub fn Type(comptime self: Option) type {
         return switch (self) {
-            .aid => []const u8,
+            .aid, .spooky_state, .spooky_request, .spooky_generation, .spooky_context => []const u8,
             .cl => Click,
             .prompt_kind => PromptKind,
             .err => []const u8,
@@ -126,6 +130,10 @@ pub const Option = enum {
     fn key(comptime self: Option) []const u8 {
         return switch (self) {
             .aid => "aid",
+            .spooky_state => "spooky_state",
+            .spooky_request => "spooky_request",
+            .spooky_generation => "spooky_generation",
+            .spooky_context => "spooky_context",
             .cl => "cl",
             .prompt_kind => "k",
             .err => "err",
@@ -202,7 +210,7 @@ pub const Option = enum {
             };
 
             return switch (self) {
-                .aid => value,
+                .aid, .spooky_state, .spooky_request, .spooky_generation, .spooky_context => value,
                 .cl => parseClick(value),
                 .prompt_kind => if (value.len == 1) PromptKind.init(value[0]) else null,
                 .err => value,

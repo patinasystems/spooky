@@ -31,12 +31,14 @@ if (( ! ${+functions[add-zle-hook-widget]} )) ||
 fi
 
 builtin typeset -g _patina_native_loaded=1
+builtin typeset -gi _patina_native_owner_pid=$$
 builtin typeset -g _patina_native_dir=$PATINA_NATIVE_INPUT_DIR
 builtin unset PATINA_NATIVE_INPUT_DIR
 builtin typeset -gi _patina_native_counter=0
 builtin typeset -g _patina_native_generation="$$-0"
 builtin typeset -g _patina_native_last_state=''
 builtin typeset -g _patina_native_accepted_generation=''
+builtin typeset -g _patina_native_accepted_request=''
 builtin typeset -gA _patina_native_seen
 builtin typeset -gA _patina_native_completion_seen
 builtin typeset -gA _patina_native_history_seen
@@ -292,6 +294,9 @@ _patina_native_prepare_prompt() {
 }
 
 _patina_native_preexec() {
+    # zpty retirement can run inherited hooks before the worker resets them.
+    # Only the real interactive shell may publish state for this surface.
+    (( $$ == _patina_native_owner_pid && ZSH_SUBSHELL == 0 )) || return 0
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     _patina_native_restore_prompt
     _patina_native_completion_stop
@@ -309,6 +314,9 @@ _patina_native_preexec() {
 
 _patina_native_exit() {
     builtin local result=$?
+    # zpty retirement can run inherited hooks before the worker resets them.
+    # Only the real interactive shell may publish state for this surface.
+    (( $$ == _patina_native_owner_pid && ZSH_SUBSHELL == 0 )) || return 0
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     _patina_native_completion_stop
     _patina_native_history_cleanup
@@ -318,9 +326,16 @@ _patina_native_exit() {
 }
 
 _patina_native_publish() {
+    # zpty retirement can run inherited hooks before the worker resets them.
+    # Only the real interactive shell may publish state for this surface.
+    (( $$ == _patina_native_owner_pid && ZSH_SUBSHELL == 0 )) || return 0
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
     builtin local value="$1"$'\t'"$_patina_native_generation"$'\t'"$2"$'\t'"$_patina_native_block_id"
     [[ $value == $_patina_native_last_state ]] && return 0
+    # Same PTY ordering as A/B/C/D. The renderer and native editor can consume
+    # actual ZLE readiness without waiting for filesystem notifications.
+    builtin print -rnu $_patina_native_tty -- \
+        $'\e]133;P;spooky_state='"$1"';spooky_generation='"$_patina_native_generation"';spooky_context='"$2"';aid='"$_patina_native_block_id"';spooky_request='"$_patina_native_accepted_request"$'\a'
     builtin local temporary="$_patina_native_dir/state.tmp.$$"
     builtin print -r -- "$value" > "$temporary" &&
         _patina_native_move -f "$temporary" "$_patina_native_dir/state" &&
@@ -458,6 +473,7 @@ _patina_native_submit() {
             return 1
         fi
         _patina_native_accepted_generation=$_patina_native_generation
+        _patina_native_accepted_request=$identifier
         _patina_native_publish running start
         builtin zle .accept-line
     } always {

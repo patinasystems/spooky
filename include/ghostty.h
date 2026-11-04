@@ -584,6 +584,14 @@ typedef struct {
   char last_started_id[65];
   // Latest matching parsed primary-screen B; durable across display erasure.
   char last_primary_input_id[65];
+  uint64_t native_state_revision;
+  char native_generation[65];
+  char native_accepted_request[129];
+  char presented_generation[65];
+  char native_block_id[65];
+  char native_cwd[1025];
+  uint8_t native_state;
+  bool native_context_start;
 } ghostty_command_layout_s;
 
 // Metadata is copied synchronously and bounded by the implementation. Header
@@ -916,9 +924,15 @@ typedef struct {
 } ghostty_action_resize_window_s;
 
 typedef struct {
+  char id[65];
+  char generation[65];
+} ghostty_native_prompt_s;
+
+typedef struct {
   uint64_t serial;
   // NUL-terminated, at most 64 bytes; valid only during the action callback.
   const char* block_id;
+  const ghostty_native_prompt_s* prompt;
 } ghostty_action_native_input_presented_s;
 
 // apprt.action.CellSize

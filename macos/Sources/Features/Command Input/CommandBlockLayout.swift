@@ -15,6 +15,15 @@ struct CommandBlockAnchor: Equatable, Identifiable {
 }
 
 struct CommandTerminalLayout: Equatable {
+    enum NativeState: UInt8 { case none, ready, terminal, running, exited }
+    var nativeState: NativeState = .none
+    var nativeStateRevision: UInt64 = 0
+    var nativeGeneration: String?
+    var nativeAcceptedRequest: String?
+    var presentedNativeGeneration: String?
+    var nativeBlockID: String?
+    var nativeWorkingDirectory: String?
+    var nativeContextStart = false
     var primary = true
     var atBottom = true
     var hasScrollback = false
@@ -51,6 +60,20 @@ struct CommandTerminalLayout: Equatable {
         }
         guard layout.snapshot_valid else { return nil }
         var result = Self()
+        result.nativeState = NativeState(rawValue: layout.native_state) ?? .none
+        result.nativeStateRevision = layout.native_state_revision
+        result.nativeContextStart = layout.native_context_start
+        func string<T>(_ bytes: T) -> String? {
+            withUnsafeBytes(of: bytes) { raw in
+                let value = String(bytes: raw.prefix { $0 != 0 }, encoding: .utf8)
+                return value?.isEmpty == false ? value : nil
+            }
+        }
+        result.nativeGeneration = string(layout.native_generation)
+        result.nativeAcceptedRequest = string(layout.native_accepted_request)
+        result.presentedNativeGeneration = string(layout.presented_generation)
+        result.nativeBlockID = string(layout.native_block_id)
+        result.nativeWorkingDirectory = string(layout.native_cwd)
         result.primary = layout.primary
         result.atBottom = layout.viewport_at_bottom
         result.hasScrollback = layout.has_scrollback
@@ -118,7 +141,8 @@ struct CommandChromePresentation: Equatable {
     let rows: [Row]
 
     init(layout: CommandTerminalLayout, metadata: [String: CommandBlockMetadata], currentID: String?,
-         pinnedOffset: CGFloat, recovering: Bool, backingScale: CGFloat = 1) {
+         pinnedOffset: CGFloat, recovering: Bool, backingScale: CGFloat = 1,
+         promptIdentity: CommandPromptIdentity? = CommandPromptIdentity.local) {
         enabled = layout.primary
         self.pinnedOffset = pinnedOffset
         self.backingScale = backingScale
@@ -134,7 +158,9 @@ struct CommandChromePresentation: Equatable {
             let pathByteCount = cwd.hasPrefix("/") && !(recovering && current) ? label.utf8.count : 0
             if !block.branch.isEmpty { label += "  ⎇ \(block.branch)" }
             if recovering && current { label = "Retained draft (read only)" }
-            var suffix = ""
+            // Reuse the renderer's bounded, right-aligned text run. The cwd
+            // remains the label prefix so its existing path hit range is exact.
+            var suffix = current && block.status == "editing" && !recovering ? promptIdentity?.label ?? "" : ""
             if let status = block.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
             if let elapsed = block.elapsed {
                 suffix += String(format: "  %.3fs", elapsed)

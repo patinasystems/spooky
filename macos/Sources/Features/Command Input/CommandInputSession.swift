@@ -14,8 +14,16 @@ final class CommandInputSession {
     var onHistory: ((CommandHistoryResponse) -> Void)?
     var onRetainSubmittedEcho: (() -> Bool)?
     var onReleaseSubmittedEcho: (() -> Void)?
+    var onPromptPresented: (() -> Void)?
+    var onReplayPromptKey: ((NSEvent, UInt64?) -> Void)?
     private var submissionPresentation = CommandSubmissionPresentation()
     private var hasEditorFont = false
+    private var attachedPromptGeneration: String?
+    private var presentedFramesRequired = false
+    private var lastSubmissionInputID: UInt64?
+    private(set) var suppressesShellCursor = false
+    private var keepsEmptyCaret = false
+    private var promptKeys: [(event: NSEvent, inputID: UInt64?)] = []
 
     let directory: URL
     private let bridge: CommandInputBridge
@@ -69,13 +77,19 @@ final class CommandInputSession {
         return nil
     }
 
-    private var promptIsPresentable: Bool { ready && layout.hasParsedPrimaryInput(currentBlockID) }
+    private var promptIsPresentable: Bool {
+        ready && layout.hasParsedPrimaryInput(currentBlockID)
+            && ((!presentedFramesRequired && layout.nativeStateRevision == 0) || attachedPromptGeneration == generation)
+    }
     private var waitingForPromptLayout: Bool { ready && !promptIsPresentable && !terminalRequested && !failed }
     var isEditable: Bool { promptIsPresentable && !terminalRequested && pending == nil && handoff == nil && !failed }
     var historyContext: String? { isEditable ? generation : nil }
     var canReturnToEditor: Bool { promptIsPresentable && pending == nil && handoff == nil && !failed }
     var isRecoveringDraft: Bool { recoveryVisible }
-    var isTransferringSubmission: Bool { !failed && (pending != nil || handoff != nil) }
+    var isTransferringSubmission: Bool {
+        !failed && (pending != nil || handoff != nil
+            || (keepsEmptyCaret && ready && layout.nativeStateRevision > 0 && attachedPromptGeneration != generation))
+    }
     var isAwaitingInitialNativePrompt: Bool {
         !receivedFirstPrompt && !failed && Date().timeIntervalSince(launchedAt) <= 5
             && surfaceView?.childExitedMessage == nil
@@ -135,6 +149,7 @@ final class CommandInputSession {
     }
 
     func attach(to surfaceView: Ghostty.SurfaceView) {
+        presentedFramesRequired = true
         self.surfaceView = surfaceView
         let bridge = self.bridge
         let fileEvents = CommandInputFileEvents(directory: directory)
@@ -334,10 +349,13 @@ final class CommandInputSession {
         let request = Pending(id: UUID().uuidString, generation: generation, blockID: blockID, started: Date())
         let inputID = CommandInputDiagnostics.currentInputID
         submissionInputID = inputID
+        lastSubmissionInputID = inputID
         CommandInputDiagnostics.mark(.submissionBegin, id: inputID)
         let dispatchTiming = CommandInputDiagnostics.begin(.submissionDispatch)
         submissionTiming = CommandInputDiagnostics.begin(.submissionToBoundary)
         pending = request
+        keepsEmptyCaret = text.isEmpty
+        suppressesShellCursor = true
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
         // Retain the native draft, focus, and grid reservation until the core
@@ -402,6 +420,7 @@ final class CommandInputSession {
     }
 
     func useTerminal() {
+        beginTerminalTyping()
         cancelSubmissionPresentation()
         completionTask?.cancel()
         historyTask?.cancel()
@@ -412,6 +431,7 @@ final class CommandInputSession {
         status = pending == nil ? "Terminal input · use the shell's history and completion here" : "Awaiting submission receipt…"
         focusTerminal()
         changed()
+        replayPromptKeys()
     }
 
     private func cancelSubmissionPresentation() {
@@ -419,8 +439,51 @@ final class CommandInputSession {
         if let surface = surfaceView?.surface { ghostty_surface_cancel_native_submission(surface) }
     }
 
-    func nativeInputPresented(blockID: String?, serial: UInt64) {
+    func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil) {
         if submissionPresentation.presented(blockID: blockID, serial: serial) { onReleaseSubmittedEcho?() }
+        attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
+        // IOSurface assignment and this native layout happen in the same main
+        // transaction, outside the renderer lock. Never show a future prompt
+        // over pixels from the previous command.
+        if generation != nil {
+            terminalGeometryChanged()
+            if promptID == currentBlockID { presentReadyPrompt() }
+            changed()
+            if isEditable && promptID == currentBlockID {
+                onPromptPresented?()
+                replayPromptKeys()
+            }
+        }
+        CommandInputDiagnostics.mark(.terminalFrameAttached, id: submissionInputID ?? lastSubmissionInputID)
+    }
+
+    /// Preserve type-ahead once ordered ZLE readiness arrives, including the
+    /// gap before B parses. Only the matching presented B can replay it into
+    /// the editor. Running programs keep normal terminal input.
+    private func replayPromptKeys() {
+        let keys = promptKeys
+        promptKeys.removeAll(keepingCapacity: true)
+        for key in keys { onReplayPromptKey?(key.event, key.inputID) }
+    }
+
+    func deferPromptKey(_ event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.control), event.charactersIgnoringModifiers == "c" {
+            promptKeys.removeAll(keepingCapacity: true)
+            return false
+        }
+        guard ready, layout.nativeStateRevision > 0, !failed, !terminalRequested,
+              attachedPromptGeneration != generation,
+              CommandInputShortcut.routesToEditor(event, promptIsEditable: true, windowIsKey: true,
+                                                   terminalOwnsKeyboard: true, hasMarkedText: false) else { return false }
+        guard promptKeys.count < 256 else { NSSound.beep(); return true }
+        promptKeys.append((event, CommandInputDiagnostics.currentInputID))
+        return true
+    }
+
+    func beginTerminalTyping() {
+        guard suppressesShellCursor else { return }
+        suppressesShellCursor = false
+        changed()
     }
 
     func cancelSubmittedEcho() {
@@ -464,10 +527,8 @@ final class CommandInputSession {
         if isTransferringSubmission, let presentedBlockID, metadata[presentedBlockID] == nil {
             metadata[presentedBlockID] = blockMetadata[presentedBlockID]
         }
-        if blockMetadata != metadata {
-            blockMetadata = metadata
-            changed()
-        }
+        let metadataChanged = blockMetadata != metadata
+        blockMetadata = metadata
         if surfaceView?.childExitedMessage != nil {
             cancelSubmissionPresentation()
             handoff = nil
@@ -501,7 +562,9 @@ final class CommandInputSession {
             status = "No submission receipt. Draft preserved; terminal input remains available."
         }
 
-        if let state = snapshot.state {
+        if layout.nativeStateRevision > 0 {
+            applyNativeState()
+        } else if let state = snapshot.state {
             bridgeAvailable = true
             shellOwnsInput = state.kind == "terminal"
             shellContext = state.context
@@ -547,7 +610,7 @@ final class CommandInputSession {
         // The first ready file can arrive while the dormant loop is sleeping.
         // Start observing its parsed prompt now instead of waiting for recovery.
         if !hadFirstPrompt && receivedFirstPrompt && surfaceView != nil { startGeometryUpdates() }
-        if presentationKey != previous { changed() }
+        if metadataChanged || presentationKey != previous { changed() }
         if receivedFirstPrompt && pending == nil {
             deadlineTask?.cancel()
             deadlineTask = nil
@@ -616,14 +679,14 @@ final class CommandInputSession {
         submissionTiming = nil
         submissionInputID = nil
         draft = ""
-        editorVisible = promptIsPresentable && !terminalRequested
+        editorVisible = (promptIsPresentable || (keepsEmptyCaret && ready)) && !terminalRequested
         if ready {
             status = "Native input · zsh"
         } else {
             status = shellContext == "cont" ? "Incomplete command · finish or cancel it in the terminal"
                 : "Running · keyboard input goes to the terminal"
         }
-        if editorVisible {
+        if editorVisible && promptIsPresentable {
             presentedGeneration = generation
             presentedBlockID = currentBlockID
             requestEditorFocus()
@@ -637,6 +700,8 @@ final class CommandInputSession {
         presentedGeneration = generation
         presentedBlockID = currentBlockID
         editorVisible = true
+        keepsEmptyCaret = false
+        suppressesShellCursor = false
         status = "Native input · zsh"
         if shouldFocus, let view = surfaceView, view.window?.isKeyWindow == true,
            view.window?.firstResponder === view { requestEditorFocus() }
@@ -706,9 +771,52 @@ final class CommandInputSession {
     func receiveLayout(_ updated: CommandTerminalLayout) {
         if !updated.primary { cancelSubmittedEcho() }
         layout = updated
+        if updated.nativeStateRevision > 0 {
+            attachedPromptGeneration = updated.presentedNativeGeneration
+            applyNativeState()
+        }
         finishHandoffIfReady()
         presentReadyPrompt()
         changed()
+    }
+
+    /// The PTY parser is authoritative once the adapter reports readiness.
+    /// Late filesystem snapshots can enrich captions but cannot revive an old
+    /// prompt. The exact accepted request ID proves shell acceptance; a new
+    /// prompt alone might instead be Ctrl-C before the request was dispatched.
+    private func applyNativeState() {
+        guard let nextGeneration = layout.nativeGeneration, let block = layout.nativeBlockID else { return }
+        if let pending, layout.nativeAcceptedRequest == pending.id {
+            self.pending = nil
+            acceptedGeneration = pending.generation
+            handoff = CommandInputHandoff(blockID: pending.blockID, generation: pending.generation)
+        }
+        bridgeAvailable = true
+        shellOwnsInput = layout.nativeState == .terminal
+        shellContext = layout.nativeContextStart ? "start" : "cont"
+        currentBlockID = block
+        generation = nextGeneration
+        ready = layout.primary && layout.nativeState == .ready && layout.nativeContextStart
+            && nextGeneration != acceptedGeneration
+        if ready { receivedFirstPrompt = true }
+        if ready || shellOwnsInput || !layout.primary || !layout.nativeContextStart {
+            suppressesShellCursor = false
+        }
+        if blockMetadata[block] == nil, let cwd = layout.nativeWorkingDirectory, cwd.hasPrefix("/") {
+            blockMetadata[block] = CommandBlockMetadata(id: block, workingDirectory: cwd, branch: "",
+                                                       status: ready ? "editing" : "running", exitStatus: nil, elapsed: nil)
+        }
+        if pending == nil && handoff == nil && !failed {
+            if ready {
+                if promptIsPresentable { presentReadyPrompt() } else {
+                    editorVisible = recoveryVisible || (keepsEmptyCaret && editorVisible)
+                    if !keepsEmptyCaret { focusRequest = 0 }
+                }
+            } else {
+                editorVisible = recoveryVisible
+                focusRequest = 0
+            }
+        }
     }
 
     private func changed() {

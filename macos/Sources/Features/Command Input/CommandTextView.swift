@@ -8,6 +8,7 @@ final class CommandTextView: NSTextView {
     var acceptsCommandEdits = true
     var onSubmit: (String) -> Bool = { _ in false }
     var onUseTerminal: () -> Void = {}
+    var onDeferredPromptKey: (NSEvent) -> Bool = { _ in false }
     var onFocusChanged: (Bool) -> Void = { _ in }
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
@@ -112,13 +113,14 @@ final class CommandTextView: NSTextView {
     }
 
     override func keyDown(with event: NSEvent) {
-        let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp)
+        let input = CommandInputDiagnostics.currentInputID == nil
+            ? CommandInputDiagnostics.beginInput(timestamp: event.timestamp) : nil
         let diagnostic = CommandInputDiagnostics.begin(.nativeKeyDown)
         defer {
             CommandInputDiagnostics.end(diagnostic)
             CommandInputDiagnostics.endInput(input)
         }
-        guard acceptsCommandEdits else { return }
+        guard acceptsCommandEdits else { _ = onDeferredPromptKey(event); return }
         // Let the input method consume Return/Escape while composing. A Return
         // that commits an IME candidate must never also execute the command.
         guard !hasMarkedText() else {
@@ -461,6 +463,18 @@ final class CommandTextView: NSTextView {
 
     func reportContentHeight() {
         onContentHeightChanged(measuredContentHeight)
+    }
+
+    /// Called after the host's layout, in the IOSurface assignment transaction.
+    /// Ordinary layout callers keep the deferred path to avoid reentrancy.
+    func completePresentedFocusRequest() {
+        guard isEditable, let window, window.isKeyWindow,
+              !isHiddenOrHasHiddenAncestor, canRequestFocus() else { return }
+        if focusRequested, window.makeFirstResponder(self) { focusRequested = false }
+        // NSTextView's insertion indicator is maintained separately from its
+        // text backing store. Reposition it now when an empty editor moves to
+        // the next block, including when it already owns first responder.
+        if window.firstResponder === self { updateInsertionPointStateAndRestartTimer(true) }
     }
 
     func applyFocusRequest() {

@@ -1204,6 +1204,7 @@ extension Ghostty {
             let input = CommandInputDiagnostics.currentInputID == nil
                 ? CommandInputDiagnostics.beginInput(timestamp: event.timestamp) : nil
             defer { CommandInputDiagnostics.endInput(input) }
+            if commandInputSession?.deferPromptKey(event) == true { return }
             if let session = commandInputSession,
                CommandInputShortcut.routesToEditor(
                 event, promptIsEditable: session.editorVisible && session.isEditable && !readonly,
@@ -1219,6 +1220,8 @@ extension Ghostty {
                 self.interpretKeyEvents([event])
                 return
             }
+
+            commandInputSession?.beginTerminalTyping()
 
             // On any keyDown event we unset our bell state
             bell = false

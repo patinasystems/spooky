@@ -144,6 +144,9 @@ size: rendererpkg.Size,
 /// Native input reserves grid space without shrinking the renderer drawable.
 /// Keep the requested inset separate from computed padding so resize, font,
 /// and config updates cannot accumulate it. Points preserve it across DPI.
+// Main-thread presentation state; kept even if the first shell frame arrived
+// before the native host attached. Never read/written by the PTY thread.
+native_presented_generation: [65]u8 = @splat(0),
 native_input_bootstrap: bool = false,
 native_input_inset_bottom: u32 = 0,
 native_input_inset_bottom_points: f64 = 0,

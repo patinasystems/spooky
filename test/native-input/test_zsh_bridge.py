@@ -253,6 +253,43 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.shell = Shell()
         self.addCleanup(self.shell.close)
 
+    def test_zpty_child_cannot_publish_the_parent_lifecycle(self):
+        shell = self.shell
+        start = len(shell.output)
+        _, generation = shell.submit("zpty -b _guard_probe _patina_native_exit; sleep 0.05; zpty -d _guard_probe")
+        shell.ready_after(generation)
+        shell.pump()
+        self.assertNotIn(b"\x1b]133;P;spooky_state=exited;", shell.output[start:])
+        self.assertEqual(shell.state()[0], "ready")
+
+    def test_subshell_cannot_publish_the_parent_lifecycle(self):
+        shell = self.shell
+        start = len(shell.output)
+        _, generation = shell.submit("( _patina_native_publish exited end; _patina_native_exit )")
+        shell.ready_after(generation)
+        shell.pump()
+        self.assertNotIn(b"\x1b]133;P;spooky_state=exited;", shell.output[start:])
+        self.assertEqual(shell.state()[0], "ready")
+
+    def test_ordered_ready_reports_follow_the_current_generation(self):
+        shell = self.shell
+        before = shell.state()
+        def report(kind, generation, block, request=""):
+            return (b"\x1b]133;P;spooky_state=" + kind.encode()
+                    + b";spooky_generation=" + generation.encode()
+                    + b";spooky_context=start;aid=" + block.encode()
+                    + b";spooky_request=" + request.encode() + b"\x07")
+        shell.wait(lambda: report("ready", before[1], before[3]) in shell.output)
+        identifier, generation = shell.submit("printf ready-check")
+        shell.ready_after(generation)
+        after = shell.state()
+        shell.wait(lambda: report("ready", after[1], after[3], identifier) in shell.output)
+        running = shell.output.index(report("running", before[1], before[3], identifier))
+        ready = shell.output.index(report("ready", after[1], after[3], identifier))
+        self.assertLess(running, ready)
+        self.assertNotEqual(before[1], after[1])
+        self.assertNotEqual(before[3], after[3])
+
     def test_completion_quotes_paths_and_keeps_visible_terminal_empty(self):
         shell = self.shell
         (shell.root / "alpha file").touch()

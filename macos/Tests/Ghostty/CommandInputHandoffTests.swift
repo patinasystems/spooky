@@ -1,4 +1,5 @@
 import Testing
+import AppKit
 @testable import Ghostty
 
 struct CommandInputHandoffTests {
@@ -370,5 +371,96 @@ struct CommandInputHandoffTests {
     private func block(_ id: String, flags: UInt32, complete: Bool = false) -> CommandBlockAnchor {
         CommandBlockAnchor(id: id, flags: flags, headerY: 0, inputY: 18,
                            outputY: 36, endY: 54, complete: complete)
+    }
+}
+
+@MainActor
+struct OrderedNativePromptTests {
+    private func prompt(_ id: String, generation: String, revision: UInt64) -> CommandTerminalLayout {
+        var layout = CommandTerminalLayout()
+        layout.columns = 80
+        layout.rows = 24
+        layout.cursorValid = true
+        layout.lastPrimaryInputBlockID = id
+        layout.nativeStateRevision = revision
+        layout.nativeState = .ready
+        layout.nativeBlockID = id
+        layout.nativeGeneration = generation
+        layout.nativeContextStart = true
+        layout.nativeWorkingDirectory = "/tmp"
+        return layout
+    }
+
+    @Test func orderedReadyNeedsItsActualFrameAndIgnoresStaleFiles() throws {
+        let session = try CommandInputSession()
+        let first = prompt("12-1", generation: "12-3", revision: 1)
+        session.receiveLayout(first)
+        #expect(!session.isEditable)
+        #expect(!session.editorVisible)
+        session.nativeInputPresented(blockID: nil, serial: 1, promptID: "12-1", generation: "12-3")
+        #expect(session.isEditable)
+        #expect(session.editorVisible)
+        #expect(session.blockMetadata["12-1"]?.workingDirectory == "/tmp")
+        session.receive(.init(state: .init(kind: "ready", generation: "12-0", context: "start", blockID: "12-0"),
+                              receipt: nil, metadata: [:]))
+        #expect(session.currentBlockID == "12-1")
+        #expect(session.isEditable)
+        let next = prompt("12-2", generation: "12-4", revision: 2)
+        session.receiveLayout(next)
+        #expect(!session.isEditable)
+        #expect(!session.editorVisible)
+        session.nativeInputPresented(blockID: "12-1", serial: 2, promptID: "12-1", generation: "12-3")
+        #expect(!session.isEditable)
+        session.nativeInputPresented(blockID: "12-1", serial: 3, promptID: "12-2", generation: "12-4")
+        #expect(session.isEditable)
+        #expect(session.presentedBlockID == "12-2")
+    }
+
+    @Test func typeAheadWaitsForMatchingFrameAndInterruptCancelsIt() throws {
+        let session = try CommandInputSession()
+        var first = prompt("12-1", generation: "12-3", revision: 1)
+        first.lastPrimaryInputBlockID = nil
+        session.receiveLayout(first)
+        let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                              timestamp: 1, windowNumber: 0, context: nil,
+                                              characters: "a", charactersIgnoringModifiers: "a",
+                                              isARepeat: false, keyCode: 0))
+        var replayed: [String] = []
+        session.onReplayPromptKey = { event, _ in replayed.append(event.characters ?? "") }
+        #expect(session.deferPromptKey(key))
+        first.lastPrimaryInputBlockID = "12-1"
+        session.receiveLayout(first)
+        session.nativeInputPresented(blockID: nil, serial: 1, promptID: "12-0", generation: "12-2")
+        #expect(replayed.isEmpty)
+        session.nativeInputPresented(blockID: nil, serial: 2, promptID: "12-1", generation: "12-3")
+        #expect(replayed == ["a"])
+        #expect(!session.deferPromptKey(key))
+        session.receiveLayout(prompt("12-2", generation: "12-4", revision: 2))
+        #expect(session.deferPromptKey(key))
+        let interrupt = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control,
+                                                    timestamp: 2, windowNumber: 0, context: nil,
+                                                    characters: "\u{3}", charactersIgnoringModifiers: "c",
+                                                    isARepeat: false, keyCode: 8))
+        #expect(!session.deferPromptKey(interrupt))
+        session.nativeInputPresented(blockID: nil, serial: 3, promptID: "12-2", generation: "12-4")
+        #expect(replayed == ["a"])
+        session.receiveLayout(prompt("12-3", generation: "12-5", revision: 3))
+        #expect(session.deferPromptKey(key))
+        session.useTerminal()
+        #expect(replayed == ["a", "a"])
+    }
+
+    @Test func runningStateCannotBeRevivedByAnOlderReadyFile() throws {
+        let session = try CommandInputSession()
+        var layout = prompt("12-1", generation: "12-3", revision: 1)
+        session.receiveLayout(layout)
+        session.nativeInputPresented(blockID: nil, serial: 1, promptID: "12-1", generation: "12-3")
+        layout.nativeState = .running
+        layout.nativeStateRevision = 2
+        session.receiveLayout(layout)
+        session.receive(.init(state: .init(kind: "ready", generation: "12-3", context: "start", blockID: "12-1"),
+                              receipt: nil, metadata: [:]))
+        #expect(!session.isEditable)
+        #expect(!session.editorVisible)
     }
 }

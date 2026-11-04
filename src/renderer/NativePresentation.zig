@@ -6,21 +6,28 @@ pub const Snapshot = extern struct {
     serial: u64 = 0,
     block_id: [65]u8 = @splat(0),
     acknowledge: bool = false,
+    prompt_id: [65]u8 = @splat(0),
+    generation: [65]u8 = @splat(0),
+    defer_prompt: bool = false,
 };
 
 pub const Tracker = struct {
     latest_serial: u64 = 0,
     notified_id: [65]u8 = @splat(0),
+    notified_generation: [65]u8 = @splat(0),
 
     /// Run only after size validation. Synchronous resize draws establish the
     /// ordering barrier but cannot reenter the app while the draw lock is held.
     pub fn admit(self: *Tracker, snapshot: Snapshot, notify: bool) struct { present: bool, notify: bool } {
         if (snapshot.serial < self.latest_serial) return .{ .present = false, .notify = false };
         self.latest_serial = snapshot.serial;
-        if (!notify or !snapshot.acknowledge or snapshot.block_id[0] == 0 or
-            std.mem.eql(u8, &snapshot.block_id, &self.notified_id))
-            return .{ .present = true, .notify = false };
-        self.notified_id = snapshot.block_id;
+        if (!notify) return .{ .present = true, .notify = false };
+        const command_changed = snapshot.acknowledge and snapshot.block_id[0] != 0 and
+            !std.mem.eql(u8, &snapshot.block_id, &self.notified_id);
+        const prompt_changed = !std.mem.eql(u8, &snapshot.generation, &self.notified_generation);
+        if (!command_changed and !prompt_changed) return .{ .present = true, .notify = false };
+        if (command_changed) self.notified_id = snapshot.block_id;
+        self.notified_generation = snapshot.generation;
         return .{ .present = true, .notify = true };
     }
 };
@@ -67,4 +74,23 @@ test "native presentation unproven cropped C waits for a complete snapshot" {
     value.serial = 2;
     value.acknowledge = true;
     try t.expect(tracker.admit(value, true).notify);
+}
+
+test "native presentation binds ready generation to actual layer assignment independently of C" {
+    const t = std.testing;
+    var tracker: Tracker = .{};
+    var snapshot: Snapshot = .{ .serial = 1 };
+    @memcpy(snapshot.prompt_id[0..4], "12-1");
+    @memcpy(snapshot.generation[0..4], "12-3");
+    try t.expect(tracker.admit(snapshot, true).notify);
+    snapshot.serial = 2;
+    try t.expect(!tracker.admit(snapshot, true).notify);
+    snapshot.serial = 3;
+    snapshot.generation = @splat(0);
+    try t.expect(tracker.admit(snapshot, true).notify);
+    @memcpy(snapshot.generation[0..4], "12-4");
+    snapshot.serial = 4;
+    try t.expect(tracker.admit(snapshot, true).notify);
+    snapshot.serial = 3;
+    try t.expect(!tracker.admit(snapshot, true).present);
 }

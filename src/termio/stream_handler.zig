@@ -1507,17 +1507,20 @@ pub const StreamHandler = struct {
         input: [65]u8,
         output: [65]u8,
         primary_prompt: bool,
+        native_revision: u64,
 
         fn capture(term: *const terminal.Terminal) NativeInputBoundary {
             return .{
                 .input = term.last_primary_input_id,
                 .output = term.last_started_command_id,
                 .primary_prompt = term.native_prompt_active,
+                .native_revision = term.native_input.revision,
             };
         }
 
         fn changed(self: NativeInputBoundary, term: *const terminal.Terminal) bool {
-            return !std.mem.eql(u8, &self.input, &term.last_primary_input_id) or
+            return self.native_revision != term.native_input.revision or
+                !std.mem.eql(u8, &self.input, &term.last_primary_input_id) or
                 !std.mem.eql(u8, &self.output, &term.last_started_command_id) or
                 (self.primary_prompt and !term.native_prompt_active);
         }

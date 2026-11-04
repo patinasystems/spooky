@@ -103,6 +103,23 @@ final class NativeCommandSurfaceHost: NSView {
         }
         editor.onContentHeightChanged = { [weak self] _ in self?.synchronize() }
         session.onChange = { [weak self] in self?.synchronize() }
+        editor.textView.onDeferredPromptKey = { [weak session] in session?.deferPromptKey($0) ?? false }
+        session.onReplayPromptKey = { [weak self] event, inputID in
+            guard let self else { return }
+            CommandInputDiagnostics.withInputID(inputID) {
+                if self.session.isEditable { self.editor.textView.keyDown(with: event) } else {
+                    self.surfaceView.keyDown(with: event)
+                }
+            }
+        }
+        session.onPromptPresented = { [weak self] in
+            guard let self else { return }
+            self.editor.textView.completePresentedFocusRequest()
+            // CALayer.contents was just assigned. Finish the small native
+            // editor backing store before that same transaction commits,
+            // rather than leaving AppKit to draw it one frame afterward.
+            self.editor.displayIfNeeded()
+        }
         session.onRetainSubmittedEcho = { [weak self] in self?.retainSubmittedEcho() ?? false }
         session.onReleaseSubmittedEcho = { [weak self] in
             self?.submittedEcho?.clear()
@@ -281,7 +298,8 @@ final class NativeCommandSurfaceHost: NSView {
         // Font and draft measurements update immediately; their callbacks stay
         // deferred. Never resize the PTY using a stale default-font height and
         // correct it one run-loop turn later across a terminal-row boundary.
-        editor.configureAppearance(font: session.editorFont, textColor: foreground,
+        editor.configureAppearance(font: session.editorFont,
+                                   textColor: session.isTransferringSubmission ? theme.accent : foreground,
                                    backgroundColor: background, minimumLineHeight: line)
         editor.setDraft(session.draft)
         let minimumHeight = line + padding * 2
@@ -311,7 +329,8 @@ final class NativeCommandSurfaceHost: NSView {
         if let surface = surfaceView.surface {
             let cursor = CursorPresentation(surface: surface, enabled: session.hasNativeIntegration,
                                             terminalRequested: !session.prefersNativeInput,
-                                            suppressed: session.prefersNativeInput && ((shown && !recovering) || transferring))
+                                            suppressed: session.prefersNativeInput
+                                                && ((shown && !recovering) || transferring || session.suppressesShellCursor))
             if cursor != cursorPresentation {
                 ghostty_surface_set_native_input_cursor(surface, cursor.enabled, cursor.terminalRequested, cursor.suppressed)
                 cursorPresentation = cursor
@@ -328,8 +347,13 @@ final class NativeCommandSurfaceHost: NSView {
                 viewportPresentation = viewport
             }
             if !(session.isAwaitingInitialNativePrompt && ghostty_surface_native_input_bootstrap(surface)) {
+                // A one-line native prompt returns after normal commands.
+                // Keep its small reservation through C/D instead of issuing
+                // an expand/shrink resize pair for every fast submission.
+                let promptReservation = geometry.primary && session.prefersNativeInput
+                    ? max(0, minimumHeight - line) : 0
                 ghostty_surface_set_native_input_padding(surface, integrated ? padding : 0,
-                                                         integrated ? placement.reservedHeight + padding : 0)
+                    integrated ? max(placement.reservedHeight, promptReservation) + padding : 0)
             }
         } else {
             cursorPresentation = nil

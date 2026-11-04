@@ -32,6 +32,14 @@ pub const CommandLayout = extern struct {
     cursor_y: f64,
     last_started_id: [65]u8,
     last_primary_input_id: [65]u8,
+    native_state_revision: u64,
+    native_generation: [65]u8,
+    native_accepted_request: [129]u8,
+    presented_generation: [65]u8,
+    native_block_id: [65]u8,
+    native_cwd: [1025]u8,
+    native_state: u8,
+    native_context_start: bool,
 };
 
 pub const CommandChrome = extern struct {

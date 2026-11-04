@@ -186,6 +186,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         native_submission_deadline_ms: ?i64 = null,
         native_viewport: renderer.NativeViewport.Resolved = .{ .rows = 0 },
         native_input_cursor_suppressed: bool = false,
+        native_input_default_bar: bool = false,
         native_input_accent: renderer.CommandInputAccent = .{},
         /// Copied into the encoded Metal frame, never read from the live parser
         /// by a GPU-completion callback. Protected by draw_mutex.
@@ -1451,8 +1452,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 overlay_features: []const Overlay.Feature,
                 command_chrome: ?renderer.CommandChrome.Snapshot,
                 native_input_cursor_suppressed: bool,
+                native_input_default_bar: bool,
                 native_input_accent: renderer.CommandInputAccent,
                 native_presented_id: [65]u8,
+                native_prompt_id: [65]u8,
+                native_generation: [65]u8,
+                native_running: bool,
+                native_awaiting_prompt: bool,
                 native_presentation_valid: bool,
                 native_viewport: renderer.NativeViewport.Resolved,
                 path_hover: renderer.PathHover.Snapshot,
@@ -1618,6 +1624,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     ) catch &.{};
                 };
 
+                const native_cursor = @import("cursor.zig").nativePolicy(.{
+                    .enabled = state.native_input_enabled,
+                    .terminal_requested = state.native_input_terminal_requested,
+                    .primary = state.terminal.screens.active_key == .primary,
+                    .prompt = state.terminal.native_prompt_active,
+                    .suppressed = state.native_input_cursor_suppressed,
+                    .transferring = state.native_viewport.transferring,
+                    .program_requested = state.terminal.native_input.program_cursor,
+                });
                 break :critical .{
                     .links = links,
                     .mouse = state.mouse,
@@ -1631,6 +1646,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         (native_viewport.clip_bottom == null or !state.native_viewport.transferring or
                             renderer.NativeViewport.promptTailRows(state.terminal) > 0),
                     .native_presented_id = state.terminal.last_started_command_id,
+                    .native_prompt_id = state.terminal.native_input.block_id,
+                    .native_generation = if (state.native_input_enabled and !state.native_input_terminal_requested and
+                        state.terminal.screens.active_key == .primary and
+                        state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))
+                        state.terminal.native_input.generation
+                    else
+                        @splat(0),
+                    // C with no output, and D/A before ready+B, can be separate
+                    // PTY reads of one fast command. Coalesce those transitions
+                    // for one frame; actual running output never waits.
+                    .native_awaiting_prompt = state.native_input_enabled and !state.native_input_terminal_requested and
+                        state.terminal.screens.active_key == .primary and
+                        (state.terminal.nativeCommandAtOutputStart() or
+                            (state.terminal.native_input.kind == .running and state.terminal.native_prompt_active) or
+                            (state.terminal.native_input.kind == .ready and
+                                !state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))),
+                    .native_running = state.native_input_enabled and !state.native_input_terminal_requested and
+                        state.terminal.screens.active_key == .primary and
+                        (state.terminal.native_input.kind == .running or
+                            (state.terminal.native_input.kind == .ready and
+                                !state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))),
                     .native_input_accent = renderer.CommandInputAccent.snapshot(state.terminal, if (state.native_input_enabled) state.native_input_accent else null),
                     .path_hover = state.path_hover.snapshot(state.terminal, &state.command_chrome, self.size, native_viewport),
                     .command_chrome = if (!std.meta.eql(self.native_viewport, native_viewport) or self.command_chrome_dirty or
@@ -1639,10 +1675,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         try state.command_chrome.snapshotWithFooter(arena_alloc, state.terminal, native_viewport.footer_top != null)
                     else
                         null,
-                    .native_input_cursor_suppressed = state.terminal.screens.active_key == .primary and
-                        (state.native_input_cursor_suppressed or
-                            (state.native_input_enabled and !state.native_input_terminal_requested and
-                                state.terminal.native_prompt_active)),
+                    .native_input_cursor_suppressed = native_cursor.suppressed,
+                    .native_input_default_bar = native_cursor.default_bar,
                 };
             };
 
@@ -1735,6 +1769,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (self.has_custom_shaders and self.native_input_cursor_suppressed != critical.native_input_cursor_suppressed)
                     self.cells_rebuilt = true;
                 self.native_input_cursor_suppressed = critical.native_input_cursor_suppressed;
+                self.native_input_default_bar = critical.native_input_default_bar;
                 if (!std.meta.eql(self.native_input_accent, critical.native_input_accent)) {
                     self.native_input_accent = critical.native_input_accent;
                     // C commits already-rendered input without changing its
@@ -1763,6 +1798,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                         .focused = self.focused,
                         .blink_visible = cursor_blink_visible,
                         .native_input_suppressed = critical.native_input_cursor_suppressed,
+                        .native_input_default_bar = critical.native_input_default_bar,
                     }),
                     &critical.links,
                 ) catch |err| {
@@ -1836,6 +1872,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.native_presentation.serial +%= 1;
                     self.native_presentation.block_id = critical.native_presented_id;
                     self.native_presentation.acknowledge = critical.native_presentation_valid;
+                    self.native_presentation.prompt_id = critical.native_prompt_id;
+                    self.native_presentation.generation = critical.native_generation;
+                    // Finish a D -> ready/B handoff within one frame budget.
+                    // Clear may additionally expose an entirely empty running
+                    // snapshot before D arrives. Streaming output never waits.
+                    self.native_presentation.defer_prompt = critical.native_awaiting_prompt or
+                        (critical.native_running and self.command_cells.items.len == 0);
+                    if (!critical.native_awaiting_prompt and self.native_presentation.defer_prompt) {
+                        for (self.cells.fg_rows) |row| if (row.items.len != 0) {
+                            self.native_presentation.defer_prompt = false;
+                            break;
+                        };
+                    }
                 }
             }
 
@@ -2577,7 +2626,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             // Cursor style
-            const cursor_style: renderer.CursorStyle = .fromTerminal(self.terminal_state.cursor.visual_style);
+            const cursor_style: renderer.CursorStyle = if (self.native_input_default_bar) .bar else .fromTerminal(self.terminal_state.cursor.visual_style);
             uniforms.previous_cursor_style = uniforms.current_cursor_style;
             uniforms.current_cursor_style = @as(i32, @backingInt(cursor_style));
         }
