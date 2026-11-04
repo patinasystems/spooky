@@ -1,5 +1,7 @@
 # Spooky
 
+<img src="images/spooky/icon-black.png" alt="Spooky black CRT icon concept" width="160">
+
 A macOS Ghostty fork with an AppKit multiline command editor, command/output
 blocks, native selection and undo, and zsh-backed predictive completion.
 
@@ -35,9 +37,15 @@ Upstream Ghostty automatic updates are disabled for this fork.
 [Build provenance](https://downloads.patinasystems.com/spooky/latest.json) ·
 [Packaging and publishing](scripts/spooky/README.md)
 
+Release publishing requires a notarized Developer ID build by default; publishing
+an unnotarized preview requires an explicit override. The download above remains
+a preview until a verified release replaces it.
+
 [Build and run Spooky](prototype/native-input/README.md) ·
 [Implementation](docs/native-command-input.md) ·
-[Shell completion](docs/native-completion.md)
+[Shell completion](docs/native-completion.md) ·
+[Keeping up with Ghostty](docs/upstream-maintenance.md) ·
+[Black icon variant](images/spooky/README.md)
 
 Built on Ghostty. The original project and attribution follow.
 

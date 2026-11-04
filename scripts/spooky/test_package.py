@@ -4,8 +4,14 @@ import json
 import hashlib
 import plistlib
 import runpy
+import shutil
+import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+
+import package as packager
 
 
 read_bundle = runpy.run_path(str(Path(__file__).with_name("package.py")))["read_bundle"]
@@ -131,6 +137,84 @@ class PackageAdmissionTests(unittest.TestCase):
         (resources / "LICENSE.dependencies").unlink()
         with self.assertRaisesRegex(ValueError, "dependency licenses"):
             read_file_search(self.app)
+
+
+class PackageNotarizationFlowTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.app = self.root / 'Spooky.app'
+        for relative in ['Contents/MacOS/ghostty', 'Contents/Helpers/spooky-fsearch']:
+            path = self.app / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'executable fixture')
+        self.info = dict(CFBundleExecutable='ghostty', CFBundleShortVersionString='0.1', CFBundleVersion='1')
+        self.args = SimpleNamespace(app=self.app, output_dir=self.root / 'output', source_commit='a' * 40,
+                                    identity='Developer ID Application: Fixture', notary_profile='explicit-profile',
+                                    preflight=False, overwrite=False)
+        self.calls = []
+
+    def tool(self, *args):
+        self.calls.append(args)
+        if args[:2] == ('/usr/bin/ditto', '-c'):
+            Path(args[-1]).write_bytes(b'zip fixture')
+        elif args[0] == '/usr/bin/ditto':
+            shutil.copytree(args[1], args[2])
+        return subprocess.CompletedProcess(args, 0, 'arm64' if args[0] == '/usr/bin/lipo' else '', '')
+
+    def staple(self, path, **kwargs):
+        if path.suffix == '.app':
+            (path / 'Contents/stapled-ticket').write_text('ticket')
+        else:
+            path.write_bytes(path.read_bytes() + b' stapled')
+
+    def image(self, path, volume, **kwargs):
+        self.assertTrue((Path(kwargs['defines']['app']) / 'Contents/stapled-ticket').exists())
+        Path(path).write_bytes(b'dmg containing stapled app')
+
+    def execute(self, fail_second=False):
+        receipts = [dict(id='12345678-1234-1234-1234-123456789012', status='Accepted')]
+        receipts.append(ValueError('DMG notarization rejected') if fail_second else
+                        dict(id='23456789-1234-1234-1234-123456789012', status='Accepted'))
+        with patch.object(packager.sys, 'platform', 'darwin'), patch.object(
+                packager.importlib.metadata, 'version', return_value='1.6.7'), patch.dict(
+                packager.sys.modules, {'dmgbuild': SimpleNamespace(build_dmg=self.image)}), patch.object(
+                packager, 'read_bundle', return_value=self.info), patch.object(
+                packager, 'read_file_search', return_value={'revision': 'fsearch-fixture'}), patch.object(
+                packager, 'signing_targets', side_effect=lambda app: [app]), patch.object(
+                packager, 'sign_app'), patch.object(packager, 'signing_details', return_value={}), patch.object(
+                packager, 'run', side_effect=self.tool), patch.object(packager.notarization, 'preflight',
+                return_value={'sha1': 'A' * 40}), patch.object(packager.notarization, 'reject_debug_entitlement'), patch.object(
+                packager.notarization, 'verify_developer_signature', return_value='ABCDEFGHIJ'), patch.object(
+                packager.notarization, 'submit', side_effect=receipts), patch.object(
+                packager.notarization, 'staple_and_validate', side_effect=self.staple):
+            return packager.package(self.args)
+
+    def test_notarized_manifest_hashes_final_stapled_dmg_and_source_is_unchanged(self):
+        source_before = (self.app / 'Contents/MacOS/ghostty').read_bytes()
+        manifest = self.execute()
+        self.assertTrue(manifest['notarized'])
+        self.assertEqual(manifest['release_kind'], 'release')
+        image = self.args.output_dir / manifest['dmg']['file']
+        self.assertTrue(image.read_bytes().endswith(b' stapled'))
+        self.assertEqual(manifest['dmg']['sha256'], packager.sha256(image))
+        self.assertEqual(image.read_bytes(), (self.args.output_dir / 'Spooky.dmg').read_bytes())
+        self.assertEqual((self.app / 'Contents/MacOS/ghostty').read_bytes(), source_before)
+        self.assertFalse((self.app / 'Contents/stapled-ticket').exists())
+
+    def test_second_notarization_failure_publishes_no_release_artifacts(self):
+        with self.assertRaisesRegex(ValueError, 'DMG notarization rejected'):
+            self.execute(fail_second=True)
+        self.assertFalse(list(self.args.output_dir.glob('*.dmg')))
+        self.assertFalse(list(self.args.output_dir.glob('*.json')))
+        self.assertFalse((self.args.output_dir / 'SHA256SUMS').exists())
+
+    def test_empty_profile_cannot_silently_fall_back_to_preview(self):
+        self.args.notary_profile = ''
+        with patch.object(packager.sys, 'platform', 'darwin'):
+            with self.assertRaisesRegex(ValueError, '--notary-profile'):
+                packager.package(self.args)
 
 
 if __name__ == "__main__":

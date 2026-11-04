@@ -1,0 +1,50 @@
+name: Spooky Release Tools
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/spooky/**/*.py"
+      - "scripts/spooky/fsearch/upstream.json"
+      - "scripts/spooky/fsearch/Cargo.toml"
+      - "scripts/spooky/fsearch/Cargo.lock"
+      - "scripts/spooky/fsearch/src/**"
+      - "scripts/spooky/fsearch/*.patch"
+      - "scripts/spooky/fsearch/LICENSE*"
+      - ".github/workflows/spooky-release-tools.yml"
+  pull_request:
+    paths:
+      - "scripts/spooky/**/*.py"
+      - "scripts/spooky/fsearch/upstream.json"
+      - "scripts/spooky/fsearch/Cargo.toml"
+      - "scripts/spooky/fsearch/Cargo.lock"
+      - "scripts/spooky/fsearch/src/**"
+      - "scripts/spooky/fsearch/*.patch"
+      - "scripts/spooky/fsearch/LICENSE*"
+      - ".github/workflows/spooky-release-tools.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spooky-release-tools-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.repository == 'patinasystems/spooky'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts/spooky
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Test release admission and maintenance tools
+        # Standard-library mocks and temporary Git fixtures only. No signing,
+        # notarization, Apple build, credentials, or artifact uploads.
+        run: python -m unittest discover -s scripts/spooky -p 'test_*.py'

@@ -3,11 +3,12 @@
 # requires-python = ">=3.11"
 # dependencies = ["dmgbuild==1.6.7"]
 # ///
-"""Assemble a non-notarized arm64 preview without modifying its source app.
+"""Assemble an arm64 Spooky release without modifying its source app.
 
 Run with `uv run scripts/spooky/package.py --help`, or with the Python from
-an existing dmgbuild 1.6.7 environment. Building, installing, uploading, and
-notarization are separate operations. No Finder automation is used.
+an existing dmgbuild 1.6.7 environment. --notary-profile enables Developer ID
+notarization; without it this produces an explicitly unnotarized preview.
+Building, installing, and public publishing are separate. No Finder automation.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+import notarization
 
 
 BUNDLE_ID = "com.patinasystems.spooky"
@@ -128,14 +131,17 @@ def macho_files(app: Path) -> list[Path]:
     return sorted(result, key=lambda path: len(path.parts), reverse=True)
 
 
+def signing_targets(app: Path) -> list[Path]:
+    bundles = [path for path in app.rglob("*") if path.is_dir() and not path.is_symlink()
+               and path.suffix in {".app", ".xpc", ".framework", ".plugin"}]
+    return macho_files(app) + sorted(bundles, key=lambda path: len(path.parts), reverse=True) + [app]
+
+
 def sign_app(app: Path, identity: str) -> None:
     # Sign every executable, then enclosing bundles inside-out. Preserve each
     # component's entitlements, but regenerate its designated requirement for
     # the selected identity. Do not use --deep for signing.
-    bundles = [path for path in app.rglob("*") if path.is_dir() and not path.is_symlink()
-               and path.suffix in {".app", ".xpc", ".framework", ".plugin"}]
-    targets = macho_files(app) + sorted(bundles, key=lambda path: len(path.parts), reverse=True) + [app]
-    for target in targets:
+    for target in signing_targets(app):
         run("/usr/bin/codesign", "--force", "--sign", identity, "--options", "runtime", "--timestamp",
             "--preserve-metadata=entitlements", target)
 
@@ -143,6 +149,16 @@ def sign_app(app: Path, identity: str) -> None:
 def package(args: argparse.Namespace) -> dict:
     if sys.platform != "darwin":
         raise ValueError("DMG assembly and signing require macOS")
+    profile = args.notary_profile
+    if profile is not None and not profile.strip():
+        raise ValueError("--notary-profile must name an explicitly configured Keychain profile")
+    certificate = notarization.preflight(args.identity, profile, check_credentials=True) if profile else None
+    if args.preflight:
+        if not profile:
+            raise ValueError("Release preflight requires --notary-profile and a Developer ID Application --identity")
+        return {"preflight": certificate, "signed": False, "uploaded": False}
+    if args.app is None or args.output_dir is None or args.source_commit is None:
+        raise ValueError("Packaging requires --app, --output-dir and --source-commit")
     if importlib.metadata.version("dmgbuild") != "1.6.7":
         raise ValueError("Use dmgbuild 1.6.7 (uv run installs the pinned dependency)")
     import dmgbuild
@@ -163,9 +179,8 @@ def package(args: argparse.Namespace) -> dict:
     if run("/usr/bin/lipo", "-archs", app / helper).stdout.split() != ["arm64"]:
         raise ValueError("Filename-search helper must match the arm64 preview")
     run("/usr/bin/codesign", "--verify", "--strict", "--deep", app)
-    entitlements = run("/usr/bin/codesign", "--display", "--entitlements", ":-", app).stdout
-    if entitlements and plistlib.loads(entitlements.encode()).get("com.apple.security.get-task-allow"):
-        raise ValueError("Do not package a debugger-enabled app")
+    for target in signing_targets(app):
+        notarization.reject_debug_entitlement(target)
 
     stem = f"Spooky-{info['CFBundleShortVersionString']}-{args.source_commit[:9]}-arm64"
     names = [f"{stem}.dmg", "Spooky.dmg", f"{stem}.json", "SHA256SUMS"]
@@ -179,18 +194,37 @@ def package(args: argparse.Namespace) -> dict:
         staged = work / "Spooky.app"
         run("/usr/bin/ditto", app, staged)
         if args.identity:
-            sign_app(staged, args.identity)
+            sign_app(staged, certificate['sha1'] if certificate else args.identity)
         run("/usr/bin/codesign", "--verify", "--strict", "--deep", staged)
+        notary_receipts = None
+        if profile:
+            team = notarization.verify_developer_signature(staged)
+            for target in signing_targets(staged):
+                notarization.verify_developer_signature(target, team=team)
+            # Staple the app before assembling the DMG so dragging it out also
+            # carries an offline ticket. Then notarize/staple the outer image.
+            archive = work / "Spooky.zip"
+            run("/usr/bin/ditto", "-c", "-k", "--keepParent", staged, archive)
+            app_receipt = notarization.submit(archive, profile, output / "notarization", "app")
+            notarization.staple_and_validate(staged)
+            notary_receipts = {"app": {**app_receipt, "stapled": True, "gatekeeper_accepted": True}}
         packaged_sha = sha256(staged / executable)
         dmg = work / names[0]
-        dmgbuild.build_dmg(str(dmg), "Spooky Preview", settings_file=str(Path(__file__).with_name("dmg-settings.py")),
+        dmgbuild.build_dmg(str(dmg), "Spooky" if profile else "Spooky Preview",
+                          settings_file=str(Path(__file__).with_name("dmg-settings.py")),
                           defines={"app": str(staged)})
         if args.identity:
-            run("/usr/bin/codesign", "--sign", args.identity, "--timestamp", dmg)
+            run("/usr/bin/codesign", "--sign", certificate['sha1'] if certificate else args.identity,
+                "--timestamp", dmg)
             run("/usr/bin/codesign", "--verify", "--strict", dmg)
+        if profile:
+            notarization.verify_developer_signature(dmg, team=team, runtime=False)
+            dmg_receipt = notarization.submit(dmg, profile, output / "notarization", "dmg")
+            notarization.staple_and_validate(dmg, disk_image=True)
+            notary_receipts["dmg"] = {**dmg_receipt, "stapled": True, "gatekeeper_accepted": True}
         run("/usr/bin/hdiutil", "verify", dmg)
         manifest = {
-            "product": "Spooky", "release_kind": "preview", "notarized": False,
+            "product": "Spooky", "release_kind": "release" if profile else "preview", "notarized": bool(profile),
             "bundle_identifier": BUNDLE_ID, "version": info["CFBundleShortVersionString"],
             "build_number": str(info.get("CFBundleVersion", "")), "minimum_macos": info.get("LSMinimumSystemVersion"),
             "architecture": "arm64", "source_commit": args.source_commit,
@@ -202,6 +236,8 @@ def package(args: argparse.Namespace) -> dict:
                             "packaged_executable_sha256": sha256(staged / helper)},
             "dmg": {"file": names[0], "sha256": sha256(dmg), "bytes": dmg.stat().st_size},
         }
+        if notary_receipts:
+            manifest["notarization"] = notary_receipts
         (work / names[2]).write_text(json.dumps(manifest, indent=2) + "\n")
         shutil.copy2(dmg, work / names[1])
         (work / names[3]).write_text("".join(f"{sha256(work / name)}  {name}\n" for name in names[:3]))
@@ -212,14 +248,17 @@ def package(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", required=True, type=Path, help="Clean normal Spooky.app; source remains unchanged")
-    parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--source-commit", required=True, help="Commit actually compiled into the source app")
+    parser.add_argument("--app", type=Path, help="Clean normal Spooky.app; source remains unchanged")
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--source-commit", help="Commit actually compiled into the source app")
     parser.add_argument("--identity", help="Optional local signing identity; signs the staging copy and DMG")
+    parser.add_argument("--notary-profile", help="Explicit notarytool Keychain profile; requires Developer ID Application")
+    parser.add_argument("--preflight", action="store_true",
+                        help="Validate release identity/tools/credentials only; no signing, assembly or upload")
     parser.add_argument("--overwrite", action="store_true", help="Replace existing output artifacts")
     try:
         print(json.dumps(package(parser.parse_args()), indent=2))
-    except (ValueError, OSError, subprocess.CalledProcessError, importlib.metadata.PackageNotFoundError) as error:
+    except (ValueError, OSError, subprocess.SubprocessError, importlib.metadata.PackageNotFoundError) as error:
         if isinstance(error, subprocess.CalledProcessError):
             print(error.stderr, file=sys.stderr)
         parser.exit(1, f"Packaging failed: {error}\n")

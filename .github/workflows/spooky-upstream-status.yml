@@ -1,0 +1,28 @@
+name: Spooky Upstream Status
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 14 * * 1" # Weekly; this reports drift, never merges it.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spooky-upstream-status
+  cancel-in-progress: true
+
+jobs:
+  status:
+    if: github.repository == 'patinasystems/spooky'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Exact merge-base/counts need history, but not historical file blobs.
+          fetch-depth: 0
+          sparse-checkout: scripts/spooky
+          persist-credentials: false
+      - name: Report upstream divergence
+        run: python3 scripts/spooky/upstream_status.py --fetch >> "$GITHUB_STEP_SUMMARY"
