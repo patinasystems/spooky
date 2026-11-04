@@ -21,6 +21,7 @@ final class CommandTextView: NSTextView {
     private var focusRequestRevision: UInt64 = 0
     private var heightReportScheduled = false
     private var pointerTrackingArea: NSTrackingArea?
+    private var editorTrace: CommandEditorTrace?
     private let commandUndoManager = UndoManager()
     // NSTextStorage owns its layout manager; retain the root of the text system
     // for editors whose caller did not supply an existing text container.
@@ -338,12 +339,41 @@ final class CommandTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        editorTrace = nil
+        if CommandInputDiagnostics.isEnabled, let window { editorTrace = CommandEditorTrace(window: window) }
         if window == nil {
             completions.setPopupPreparationEnabled(false)
             history.reset()
             dismissCompletions()
         }
         applyFocusRequest()
+    }
+
+    override func layout() {
+        guard let editorTrace else { super.layout(); return }
+        let revisions = editorTrace.begin(.editorLayoutBegin)
+        let timing = CommandInputDiagnostics.begin(.editorLayout)
+        defer {
+            CommandInputDiagnostics.end(timing)
+            editorTrace.end(.editorLayoutEnd, revisions: revisions)
+        }
+        super.layout()
+    }
+
+    override func viewWillDraw() {
+        _ = editorTrace?.begin(.editorWillDraw)
+        super.viewWillDraw()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let editorTrace else { super.draw(dirtyRect); return }
+        let draw = editorTrace.beginDraw(dirtyRect, in: self)
+        let timing = CommandInputDiagnostics.begin(.editorDraw)
+        defer {
+            CommandInputDiagnostics.end(timing)
+            editorTrace.endDraw(draw)
+        }
+        super.draw(dirtyRect)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -373,6 +403,7 @@ final class CommandTextView: NSTextView {
     }
 
     override func didChangeText() {
+        editorTrace?.edit(inputID: CommandInputDiagnostics.currentInputID)
         super.didChangeText()
         CommandInputDiagnostics.mark(.textDidChange, id: CommandInputDiagnostics.currentInputID)
         if history.applying {
@@ -384,7 +415,7 @@ final class CommandTextView: NSTextView {
         reportContentHeight()
     }
 
-    func draftWillChangeExternally() { history.reset(); completions.externalEdit() }
+    func draftWillChangeExternally() { editorTrace?.reset(); history.reset(); completions.externalEdit() }
     func completionSelectionDidChange() { history.selectionChanged(); completions.selectionChanged() }
     func receiveCompletions(_ response: CommandCompletionResponse) { completions.receive(response) }
     func dismissCompletions() { completions.dismiss() }
@@ -392,7 +423,11 @@ final class CommandTextView: NSTextView {
 
     var measuredContentHeight: CGFloat {
         let diagnostic = CommandInputDiagnostics.begin(.textMeasurement)
-        defer { CommandInputDiagnostics.end(diagnostic) }
+        let revisions = editorTrace?.begin(.editorTextLayoutBegin)
+        defer {
+            CommandInputDiagnostics.end(diagnostic)
+            if let revisions { editorTrace?.end(.editorTextLayoutEnd, revisions: revisions) }
+        }
         guard let layoutManager, let textContainer else { return max(1, minimumLineHeight) }
         layoutManager.ensureLayout(for: textContainer)
         let oneLine = max(minimumLineHeight, layoutManager.defaultLineHeight(

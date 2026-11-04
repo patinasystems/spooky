@@ -206,7 +206,9 @@ final class CommandCompletionController {
     }
 
     func receive(_ response: CommandCompletionResponse) {
-        let diagnostic = CommandInputDiagnostics.begin(.completionResponse)
+        let inputID = request?.id == response.requestID ? requestInputID : nil
+        let diagnostic = CommandInputDiagnostics.beginTimeline(
+            .completionResponse, id: inputID, begin: .completionResponseBegin, end: .completionResponseEnd)
         defer { CommandInputDiagnostics.end(diagnostic) }
         guard let request, response.requestID == request.id, response.revision == request.revision else { return }
         guard isCurrent(request), canSuggest else { dismiss(); return }
@@ -354,7 +356,8 @@ final class CommandCompletionController {
         if listVisible {
             guard textView.window?.isVisible == true else { return }
             ensurePopup().show(items: items, message: awaitingResponse ? "Finding completions…" : message,
-                               selected: selectedIndex, for: textView)
+                               selected: selectedIndex, for: textView,
+                               diagnosticInputID: CommandInputDiagnostics.currentInputID ?? requestInputID)
             CommandInputDiagnostics.mark(.completionPresentationUpdated,
                                          id: CommandInputDiagnostics.currentInputID ?? requestInputID)
         } else {
@@ -374,7 +377,7 @@ final class CommandCompletionController {
     func updatePosition() {
         guard let textView else { return }
         if listVisible {
-            popup?.updatePosition(for: textView)
+            popup?.updatePosition(for: textView, diagnosticInputID: CommandInputDiagnostics.currentInputID)
         }
         if canSuggest, let inlineSuggestion {
             // Draft/candidate edits compute this projection in present();
@@ -465,7 +468,8 @@ extension CommandCompletionController {
         guard textView.window?.isVisible == true else { return }
         let popup = ensurePopup()
         popup.show(items: items, message: filePicker.message, selected: selectedIndex,
-                   header: filePicker.header, anchor: session.anchor, for: textView)
+                   header: filePicker.header, anchor: session.anchor, for: textView,
+                   diagnosticInputID: CommandInputDiagnostics.currentInputID ?? latestEditInputID)
         CommandInputDiagnostics.mark(.completionPresentationUpdated,
                                      id: CommandInputDiagnostics.currentInputID ?? latestEditInputID)
     }

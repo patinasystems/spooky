@@ -4,6 +4,93 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Post-handler trace and upstream control, 2026-11-03
+
+The roughly 150 ms cold post-handler tail did **not reproduce** in a new
+143-character native-scale recording while the initial filename index was
+being built. This pass adds passive, opt-in diagnostics and better measurement
+qualification. It does not claim that a rendering change fixed the old tail.
+
+| Workload | Checked responses | Median event-to-pixel bounds | p95 bounds |
+| --- | ---: | ---: | ---: |
+| Spooky, eight plain drafts during cold indexing | 128 | 14.97–31.80 ms | 30.74–48.09 ms |
+| Spooky, typing with the `@` picker open | 15 | 27.18–44.31 ms | 36.49–57.72 ms |
+| Pristine upstream Ghostty, before a Space transition | 48 | 12.81–30.52 ms | 31.83–69.09 ms |
+
+Spooky's 128 plain responses include 126 newly appearing glyphs and two correct
+draft replacements where `#` was already present in the selected old draft.
+Excluding those two gives the same medians and p95 30.76–48.12 ms. Target glyphs
+and replacement states were checked in native before/after frames, rather than
+classifying caret blinking as a response. All 143 responses have raw pixels;
+none crosses the prospective 500 ms visibility/Space guard. The menu is a child
+window, so its own pixels are outside the recording.
+
+For plain typing, handler completion to AppKit drawing was median **0.328 ms**,
+maximum **0.574 ms**. Drawing took median 0.069 ms, maximum 0.127 ms. Recorded
+dirty/visible bounds cover the full editor line. The longest plain response was
+60.60–77.58 ms: 23.49 ms reached the handler, 24.30 ms was inside it, and only
+0.57 ms preceded drawing. The longest picker response was 48.57–79.35 ms,
+including 15.87 ms before the handler, 19.81 ms inside it, and 3.52 ms before
+drawing. These are remaining cold-input costs, not evidence of a 100 ms
+post-handler layout or completion stall. The trace does not identify the
+internal AppKit/input-method work behind those handler costs.
+
+The filename helper remained in its initial crawl. In the first enclosing
+7.51-second telemetry interval it averaged 42.94% of one CPU core; in the second
+7.58-second interval it averaged 1.52%. Thus the sample includes busy indexing,
+but is not an isolated experiment establishing index causality.
+
+The reference is pristine upstream commit
+`0b1729e945978fca4bcd6165d8ac408bf675a7f2`, with only capture/event diagnostics
+and separate app branding. Its renderer, parser, shell integration and core
+are unchanged. It is neither the native-disabled fork nor the installed signed
+Ghostty 1.4.0 binary. The runs are sequential on the user's actively used Mac,
+so the overlapping median intervals do not establish population-level parity.
+The reference's first-key upper bound of 156.38 ms has a 133.46 ms observation
+gap and a 22.93 ms lower bound; it is not proof of a 156 ms typing stall.
+
+The reference also has a separate **post-Space-transition anomaly**. One entire
+draft is unobserved across a roughly two-second capture gap. Later, continuously
+observed glyphs took 295.12–312.83 ms and 247.71–265.41 ms despite visible/active
+Space flags. These remain reported separately, not removed to improve the
+comparison. A 500 ms guard flags nearby transitions but cannot prove that the
+compositor or capture stream has recovered. This upstream control does not
+identify the cause of the old Spooky tail; it shows why steady typing and Space
+transition/recovery behavior must be distinguished.
+
+In the earlier v8 recording the two long Spooky glyphs appeared about 285 ms and
+20 ms before the fully-occluded notification. Those original bounds remain
+valid captured observations, with a substantial transition confound. The new
+traces do not justify inserting synchronous draws, transaction flushes, or a
+timer change into the production path. AppKit drawing, window updates and
+runloop boundaries are CPU milestones; only the independently checked
+WindowServer frames supply the pixel endpoint, and neither measures physical
+scanout.
+
+The trace retains bounded coalesced input/revision IDs through text layout,
+view drawing, window updates, runloop phases and completion panel work.
+Disabled diagnostics create no trace state or observers and do not force
+drawing. The offline analyzer now reports nearby transition/coverage issues
+separately while preserving all original pixel bounds. Its four qualification
+regressions pass. Native checks passed 96 distinct tests across the affected
+suites, including the final seven trace/coordinate tests; the diagnostic app
+and pristine-upstream builds passed.
+
+Candidate executable SHA-256:
+`c35cb3d3dc5fa888bd4ac9da25dd541bb433dd71ca5f7c19e0c2c9a30776ac24`.
+Upstream diagnostic executable SHA-256:
+`dba85479b79c98fa3b503f959af88521ea6786531ae136ac3de1f7639b3a959b`.
+Both use the same own-window recorder at native scale/backing 2×. Narrow lossless
+strips prevent the earlier recorder's raw-byte budget from expiring; this is a
+measurement correction, not a production rendering optimization.
+
+Local evidence is retained under the ignored
+`macos/build-spooky/evidence/v9-final/`: per-event bounds, exact native frames,
+the latest raw strips, source/configuration provenance, and verification logs.
+Older diagnostic builds, indexes, recordings and comparison checkouts are
+disposable after that archive is verified. The installed production app and
+current release remain the functional `d4e8cd10b` build.
+
 ## Final presentation and interaction checks, 2026-11-03
 
 The final diagnostic candidate adds presentation acknowledgement to the existing

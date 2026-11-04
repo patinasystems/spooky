@@ -9,6 +9,8 @@ enum CommandInputDiagnostics {
         case nativeKeyDown, completionDidEdit, completionResponse, completionFilter
         case completionConstruction, completionShow, completionMeasureWidth, completionPosition, completionSelection
         case overlayLayout, inlineSuggestionLayout
+        case editorLayout, editorDraw
+        case completionSetFrame, completionPanelLayout, completionOrder
     }
 
     enum Counter: String, CaseIterable, Sendable {
@@ -27,6 +29,13 @@ enum CommandInputDiagnostics {
         case submissionTriggerQueued, submissionReceiptObserved
         case submissionCoreBoundaryObserved, submissionHandoffReleased, hostLayoutApplied, hostLayout
         case boundaryNotified
+        case editorEdit, editorLayoutBegin, editorLayoutEnd, editorWillDraw, editorDrawBegin, editorDrawEnd
+        case editorTextLayoutBegin, editorTextLayoutEnd, mainRunLoopBeforeSources, mainRunLoopBeforeWaiting
+        case mainRunLoopAfterWaiting, editorWindowDidUpdate
+        case completionResponseBegin, completionResponseEnd, completionShowBegin, completionShowEnd
+        case completionPositionBegin, completionPositionEnd
+        case completionSetFrameBegin, completionSetFrameEnd, completionPanelLayoutBegin, completionPanelLayoutEnd
+        case completionOrderBegin, completionOrderEnd
     }
 
     enum InputKind: String, Sendable { case keyboard, scroll }
@@ -64,6 +73,8 @@ enum CommandInputDiagnostics {
     struct Token: Sendable {
         fileprivate let operation: Operation
         fileprivate let started: UInt64
+        fileprivate var inputID: UInt64?
+        fileprivate var endStage: Stage?
     }
 
     static let isEnabled: Bool = {
@@ -83,6 +94,17 @@ enum CommandInputDiagnostics {
     static func end(_ token: Token?) {
         guard let token else { return }
         recorder.add(token.operation, nanoseconds: DispatchTime.now().uptimeNanoseconds &- token.started)
+        if let stage = token.endStage { mark(stage, id: token.inputID, metrics: ["span": Double(token.started)]) }
+    }
+
+    /// Precise CPU span for delayed work whose input handler has already ended.
+    /// Captured IDs are explicit; no assumption that a later active key caused it.
+    static func beginTimeline(_ operation: Operation, id: UInt64?, begin: Stage, end: Stage) -> Token? {
+        guard var token = self.begin(operation) else { return nil }
+        token.inputID = id
+        token.endStage = end
+        mark(begin, id: id, metrics: ["span": Double(token.started)])
+        return token
     }
 
     static func record(_ counter: Counter, amount: Int = 1) {

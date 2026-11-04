@@ -112,8 +112,10 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     }
 
     func show(items: [CommandCompletionCandidate], message: String?, selected: Int,
-              header: CommandCompletionHeader? = nil, anchor: Int? = nil, for textView: NSTextView) {
-        let diagnostic = CommandInputDiagnostics.begin(.completionShow)
+              header: CommandCompletionHeader? = nil, anchor: Int? = nil, for textView: NSTextView,
+              diagnosticInputID: UInt64? = nil) {
+        let diagnostic = CommandInputDiagnostics.beginTimeline(
+            .completionShow, id: diagnosticInputID, begin: .completionShowBegin, end: .completionShowEnd)
         defer { CommandInputDiagnostics.end(diagnostic) }
         let editorFont = textView.font ?? font
         let fontChanged = editorFont != font
@@ -148,7 +150,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
             CommandInputDiagnostics.record(.completionReload)
             table.reloadData()
         }
-        updatePosition(for: textView)
+        updatePosition(for: textView, diagnosticInputID: diagnosticInputID)
         select(index: selected)
     }
 
@@ -263,8 +265,9 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
                     max(CommandOverlayStyle.minimumPopupWidth, ceil(titleWidth + gap + detailWidth + chrome))), rows)
     }
 
-    func updatePosition(for textView: NSTextView) {
-        let diagnostic = CommandInputDiagnostics.begin(.completionPosition)
+    func updatePosition(for textView: NSTextView, diagnosticInputID: UInt64? = nil) {
+        let diagnostic = CommandInputDiagnostics.beginTimeline(
+            .completionPosition, id: diagnosticInputID, begin: .completionPositionBegin, end: .completionPositionEnd)
         defer { CommandInputDiagnostics.end(diagnostic) }
         guard let parent = textView.window, parent.isVisible, parent.isKeyWindow,
               !textView.isHiddenOrHasHiddenAncestor,
@@ -291,10 +294,18 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         if panel.frame != frame {
             let resized = panel.frame.size != frame.size
             CommandInputDiagnostics.record(resized ? .completionPopupResize : .completionPopupMove)
+            let frameTiming = CommandInputDiagnostics.beginTimeline(
+                .completionSetFrame, id: diagnosticInputID,
+                begin: .completionSetFrameBegin, end: .completionSetFrameEnd)
             panel.setFrame(frame, display: true, animate: false)
+            CommandInputDiagnostics.end(frameTiming)
             if resized { panel.invalidateShadow() }
         }
+        let layoutTiming = CommandInputDiagnostics.beginTimeline(
+            .completionPanelLayout, id: diagnosticInputID,
+            begin: .completionPanelLayoutBegin, end: .completionPanelLayoutEnd)
         surface.layoutSubtreeIfNeeded()
+        CommandInputDiagnostics.end(layoutTiming)
         let content = surface.contentView.bounds
         if header != nil {
             // Non-flipped content: the header occupies the top band.
@@ -312,11 +323,14 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         let tableSize = NSSize(width: scrollView.contentSize.width, height: CGFloat(table.numberOfRows) * table.rowHeight)
         if table.frame.size != tableSize { table.setFrameSize(tableSize) }
         if table.tableColumns.first?.width != tableSize.width { table.tableColumns.first?.width = tableSize.width }
+        let orderTiming = CommandInputDiagnostics.beginTimeline(
+            .completionOrder, id: diagnosticInputID, begin: .completionOrderBegin, end: .completionOrderEnd)
         if panel.parent !== parent {
             panel.parent?.removeChildWindow(panel)
             parent.addChildWindow(panel, ordered: .above)
         }
         if !panel.isVisible { panel.orderFront(nil) }
+        CommandInputDiagnostics.end(orderTiming)
     }
 
     func dismiss() {

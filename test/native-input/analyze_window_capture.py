@@ -117,6 +117,21 @@ class Capture:
                     issues.add(message)
         return sorted(issues)
 
+    def steady_window_issues(self, start, end, margin_ms):
+        """Qualify a measurement without changing or discarding its pixel bounds.
+
+        Lifecycle notifications arrive on MainActor, after an animation may have
+        started. A guard interval flags nearby transitions; it cannot prove that
+        a compositor has recovered once that interval has passed.
+        """
+        margin = margin_ms / 1000
+        start, end = start - margin, end + margin
+        issues = self.visibility_issues(start, end)
+        if (not self.valid_time_frames or start < self.valid_time_frames[0]["display_uptime_s"]
+                or end > self.valid_time_frames[-1]["display_uptime_s"]):
+            issues.append("recording does not cover the full steady-window guard interval")
+        return sorted(set(issues))
+
     def stats(self):
         complete = [row for row in self.valid_time_frames if row.get("status") == 0]
         gaps = [1000 * (right["display_uptime_s"] - left["display_uptime_s"])
@@ -143,7 +158,7 @@ class Capture:
         }
 
 
-def candidate_changes(capture: Capture, event, events, before_ms, after_ms):
+def candidate_changes(capture: Capture, event, events, before_ms, after_ms, steady_margin_ms=500):
     timestamp = event["source_uptime_s"]
     result = dict(event, classification="unconfirmed pixel candidates; requires target-glyph inspection", candidates=[])
     if timestamp is None:
@@ -189,6 +204,8 @@ def candidate_changes(capture: Capture, event, events, before_ms, after_ms):
                 "intervening_unavailable_frame_ids": unavailable,
                 "visibility_exclusions": capture.visibility_issues(
                     min(timestamp, previous["display_uptime_s"]), shown),
+                "steady_window_exclusions": capture.steady_window_issues(
+                    min(timestamp, previous["display_uptime_s"]), shown, steady_margin_ms),
                 "confirmation_required": "Verify the previous frame lacks, and changed frame contains, the target glyph.",
             })
         previous = current
@@ -252,24 +269,32 @@ def main():
     parser.add_argument("--input-id", action="append", type=int, default=[])
     parser.add_argument("--before-ms", type=float, default=50)
     parser.add_argument("--after-ms", type=float, default=250)
+    parser.add_argument("--steady-window-margin-ms", type=float, default=500,
+                        help="Flag nearby visibility/Space transitions without discarding raw bounds (default: 500)")
     parser.add_argument("--max-events", type=int, default=64)
     parser.add_argument("--max-native-frames", type=int, default=128)
     parser.add_argument("--frames-per-event", type=int, default=12)
     args = parser.parse_args()
     if not 0 <= args.before_ms <= 2000 or not 0 < args.after_ms <= 2000:
         parser.error("Intervals must be bounded to 0–2000ms, with after-ms positive")
+    if not 0 <= args.steady_window_margin_ms <= 5000:
+        parser.error("Steady-window margin must be bounded to 0–5000ms")
     if not 1 <= args.max_events <= 256 or not 1 <= args.max_native_frames <= 512 or not 1 <= args.frames_per_event <= 32:
         parser.error("Bounded export: 1–256 events, 1–512 native frames, 1–32 frames/event")
     capture = Capture(args.capture)
     events, ignored = event_rows(args.events, capture.header.get("pid"))
     selected = [row for row in events if not args.input_id or row["id"] in args.input_id][:args.max_events]
-    analyses = [candidate_changes(capture, event, events, args.before_ms, args.after_ms) for event in selected]
+    analyses = [candidate_changes(capture, event, events, args.before_ms, args.after_ms,
+                                 args.steady_window_margin_ms) for event in selected]
     args.output.mkdir(parents=True, exist_ok=True)
     exported = write_images(capture, analyses, args.output, args.max_native_frames, args.frames_per_event)
     report = {"schema": 1, "capture": str(args.capture), "diagnostics": str(args.events),
         "scope": "Source input to observed WindowServer ROI pixels; not physical scanout or a causal automatic classifier.",
         "clock": "Frame mach ticks converted by recorder timebase; input is original NSEvent.timestamp, not handler entry.",
         "inspection": "Native ROI PNGs are exact. Contact sheets are resampled navigation aids. Confirm target glyph manually.",
+        "steady_window_margin_ms": args.steady_window_margin_ms,
+        "steady_window_caveat": "Guard intervals flag nearby transitions, not their exact onset or completed recovery. "
+                                "All pixel bounds are retained; passing the guard does not prove a steady compositor.",
         "capture_summary": capture.stats(), "ignored_foreign_pid_log_rows": ignored,
         "input_count": len(events), "analyzed_input_count": len(analyses), "exported_native_frames": exported,
         "events": analyses}
