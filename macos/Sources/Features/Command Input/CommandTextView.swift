@@ -5,6 +5,10 @@ import AppKit
 @MainActor
 final class CommandTextView: NSTextView {
     /// Submission ownership is independent of TextKit's caret lifecycle.
+    var managesInsertionPoint = false
+    var onCaretChanged: () -> Void = {}
+    override var shouldDrawInsertionPoint: Bool { managesInsertionPoint ? false : super.shouldDrawInsertionPoint }
+
     var acceptsCommandEdits = true
     var onSubmit: (String) -> Bool = { _ in false }
     var onUseTerminal: () -> Void = {}
@@ -117,6 +121,7 @@ final class CommandTextView: NSTextView {
             ? CommandInputDiagnostics.beginInput(timestamp: event.timestamp) : nil
         let diagnostic = CommandInputDiagnostics.begin(.nativeKeyDown)
         defer {
+            onCaretChanged()
             CommandInputDiagnostics.end(diagnostic)
             CommandInputDiagnostics.endInput(input)
         }
@@ -471,10 +476,6 @@ final class CommandTextView: NSTextView {
         guard isEditable, let window, window.isKeyWindow,
               !isHiddenOrHasHiddenAncestor, canRequestFocus() else { return }
         if focusRequested, window.makeFirstResponder(self) { focusRequested = false }
-        // NSTextView's insertion indicator is maintained separately from its
-        // text backing store. Reposition it now when an empty editor moves to
-        // the next block, including when it already owns first responder.
-        if window.firstResponder === self { updateInsertionPointStateAndRestartTimer(true) }
     }
 
     func applyFocusRequest() {

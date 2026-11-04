@@ -10,7 +10,7 @@ enum CommandInputDiagnostics {
         case completionConstruction, completionShow, completionMeasureWidth, completionPosition, completionSelection
         case overlayLayout, inlineSuggestionLayout
         case editorLayout, editorDraw
-        case completionSetFrame, completionPanelLayout, completionOrder
+        case completionSetFrame, completionPanelLayout, completionOrder, completionDismiss
     }
 
     enum Counter: String, CaseIterable, Sendable {
@@ -35,7 +35,7 @@ enum CommandInputDiagnostics {
         case completionResponseBegin, completionResponseEnd, completionShowBegin, completionShowEnd
         case completionPositionBegin, completionPositionEnd
         case completionSetFrameBegin, completionSetFrameEnd, completionPanelLayoutBegin, completionPanelLayoutEnd
-        case completionOrderBegin, completionOrderEnd
+        case completionOrderBegin, completionOrderEnd, completionDismissBegin, completionDismissEnd
     }
 
     enum InputKind: String, Sendable { case keyboard, scroll }

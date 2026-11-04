@@ -114,11 +114,7 @@ final class NativeCommandSurfaceHost: NSView {
         }
         session.onPromptPresented = { [weak self] in
             guard let self else { return }
-            self.editor.textView.completePresentedFocusRequest()
-            // CALayer.contents was just assigned. Finish the small native
-            // editor backing store before that same transaction commits,
-            // rather than leaving AppKit to draw it one frame afterward.
-            self.editor.displayIfNeeded()
+            self.editor.completePresentedInput()
         }
         session.onRetainSubmittedEcho = { [weak self] in self?.retainSubmittedEcho() ?? false }
         session.onReleaseSubmittedEcho = { [weak self] in

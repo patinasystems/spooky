@@ -357,8 +357,15 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     }
 
     func dismiss() {
+        // Host transitions may dismiss an already hidden, prepared popup more
+        // than once. Do not send WindowServer ordering RPCs for those no-ops.
+        guard panel.isVisible || panel.parent != nil else { return }
+        let timing = CommandInputDiagnostics.beginTimeline(
+            .completionDismiss, id: CommandInputDiagnostics.currentInputID,
+            begin: .completionDismissBegin, end: .completionDismissEnd)
+        defer { CommandInputDiagnostics.end(timing) }
         panel.parent?.removeChildWindow(panel)
-        panel.orderOut(nil)
+        if panel.isVisible { panel.orderOut(nil) }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { max(items.count, message == nil ? 0 : 1) }

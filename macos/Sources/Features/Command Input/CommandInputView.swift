@@ -8,6 +8,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     static let padding: CGFloat = 6
     let textView: CommandTextView
     let scrollView: CommandEditorScrollView
+    private lazy var caret = CommandInputCaret(editor: self)
 
     var onTextChanged: (String) -> Void = { _ in }
     var onSubmit: (String) -> Bool = { _ in false }
@@ -48,11 +49,16 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.documentView = textView
         addSubview(scrollView)
 
+        textView.managesInsertionPoint = true
+        textView.onCaretChanged = { [weak self] in self?.caret.update(restart: true) }
         textView.delegate = self
         textView.onSubmit = { [weak self] text in self?.onSubmit(text) ?? false }
         textView.onUseTerminal = { [weak self] in self?.onUseTerminal() }
         textView.onFind = { [weak self] in self?.onFind() ?? false }
-        textView.onFocusChanged = { [weak self] focused in self?.onFocusChanged(focused) }
+        textView.onFocusChanged = { [weak self] focused in
+            self?.onFocusChanged(focused)
+            self?.caret.update(restart: true)
+        }
         textView.onContentHeightChanged = { [weak self] height in self?.contentHeightChanged(height) }
         textView.onRequestCompletion = { [weak self] in self?.onRequestCompletion($0) }
         textView.onCancelCompletion = { [weak self] in self?.onCancelCompletion() }
@@ -76,6 +82,18 @@ final class CommandInputView: NSView, NSTextViewDelegate {
                                   height: max(1, bounds.height - Self.padding * 2))
         scrollView.tile()
         textView.updateCompletionPosition()
+        caret.update()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        caret.attach(to: window)
+    }
+
+    func completePresentedInput() {
+        textView.completePresentedFocusRequest()
+        caret.update(restart: true)
+        displayIfNeeded()
     }
 
     /// Acknowledgement and history loading are explicit external edits. Normal
@@ -87,6 +105,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         if text.isEmpty { textView.undoManager?.removeAllActions() }
         textView.reportContentHeight()
+        caret.update(restart: true)
     }
 
     func setEditable(_ editable: Bool, preserveCaret: Bool = false) {
@@ -99,6 +118,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         if textView.isEditable != textKitEditable { textView.isEditable = textKitEditable }
         if !textView.isSelectable { textView.isSelectable = true }
         textView.applyFocusRequest()
+        caret.update()
     }
 
     func receiveCompletions(_ response: CommandCompletionResponse) { textView.receiveCompletions(response) }
@@ -140,11 +160,13 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard notification.object as? CommandTextView === textView else { return }
         onTextChanged(textView.string)
+        caret.update(restart: true)
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
         guard notification.object as? CommandTextView === textView else { return }
         textView.completionSelectionDidChange()
+        caret.update(restart: true)
     }
 
     private func contentHeightChanged(_ height: CGFloat) {
