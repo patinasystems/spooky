@@ -416,14 +416,18 @@ private final class CommandCompletionCell: NSTableCellView {
         self.title.textColor = muted ? CommandOverlayStyle.secondaryText : CommandOverlayStyle.primaryText
         self.title.stringValue = title.replacingOccurrences(of: "\n", with: "↵")
         self.detail.stringValue = detail.replacingOccurrences(of: "\n", with: " ")
+        toolTip = detail.isEmpty ? nil : title + "\n" + detail
+        setAccessibilityHelp(detail.isEmpty ? nil : detail)
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
         let pad = CommandOverlayStyle.inset
-        let detailWidth = detail.stringValue.isEmpty ? 0 : min(detail.intrinsicContentSize.width, bounds.width * 0.42)
-        let gap = detailWidth > 0 ? pad * 3 : 0
+        let gap = detail.stringValue.isEmpty ? 0 : pad * 3
+        let titleWidth = min(title.intrinsicContentSize.width, bounds.width * 0.55)
+        let detailWidth = detail.stringValue.isEmpty ? 0 : min(detail.intrinsicContentSize.width,
+            max(0, bounds.width - titleWidth - gap - pad * 2))
         let titleHeight = ceil(title.intrinsicContentSize.height)
         let detailHeight = ceil(detail.intrinsicContentSize.height)
         title.frame = NSRect(x: pad, y: floor((bounds.height - titleHeight) / 2),

@@ -70,6 +70,9 @@ actor CommandCompletionBridge {
             throw CompletionError.invalidResponse
         }
         var items: [CommandCompletionCandidate] = []
+        // Hints are advisory; malformed/oversized metadata must not discard a
+        // valid shell-owned insertion. The read still has a strict byte cap.
+        let metadata = CommandCompletionMetadata(specs: (try? specifications(root)) ?? [], request: request)
         var seen: Set<String> = []
         var bytes = 0
         for (buffer, caret) in try buffers(root, count: count) {
@@ -79,9 +82,10 @@ actor CommandCompletionBridge {
                 throw CompletionError.invalidResponse
             }
             guard seen.insert(buffer).inserted else { continue }
-            items.append(.init(displayText: CommandCompletionToken.label(
+            let label = CommandCompletionToken.label(
                 result: buffer, cursorUTF16: cursorUTF16, request: request
-            ), detail: "",
+            )
+            items.append(.init(displayText: label, detail: metadata.detail(for: label),
                                replacementText: buffer,
                                replacementRange: NSRange(location: 0, length: request.text.utf16.count),
                                cursorUTF16: cursorUTF16))
@@ -122,6 +126,15 @@ actor CommandCompletionBridge {
 
     private func responseDirectory(_ identifier: UUID) -> URL {
         directory.appendingPathComponent("completions/\(identifier.uuidString)", isDirectory: true)
+    }
+
+    private func specifications(_ root: URL) throws -> [String] {
+        let file = root.appendingPathComponent("specs-v1")
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let text = try read(file, maximum: 131_072)
+        let parts = text.split(separator: "\0", maxSplits: 1024, omittingEmptySubsequences: false)
+        guard parts.count <= 1025, parts.last?.isEmpty == true else { throw CompletionError.invalidResponse }
+        return parts.dropLast().map(String.init)
     }
 
     private func pruneResponses(except identifier: UUID) {

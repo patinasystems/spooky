@@ -336,6 +336,30 @@ class NativeInputBridgeTests(unittest.TestCase):
         self.assertIn("ls -al", stacked)
         self.assertIn("ls -aG", stacked)
 
+    def test_metadata_contains_evaluated_specs_and_skips_end_of_options(self):
+        response = self.shell.complete("ls -")
+        raw = (self.shell.bridge / "completions" / response["identifier"] / "specs-v1").read_bytes()
+        self.assertLessEqual(len(raw), 131072)
+        self.assertIn(b"(-A)-a[list entries starting with .]", raw.split(b"\0"))
+        response = self.shell.complete("ls -- ")
+        self.assertFalse((self.shell.bridge / "completions" / response["identifier"] / "specs-v1").exists())
+
+    def test_git_flag_matches_do_not_invoke_revision_provider_but_values_do(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "__git_commit_ranges() { print invoked > \"$HOME/git-revision-probe\"; compadd -- main; }\nalias g=git"
+        )
+        shell.ready_after(generation)
+        response = shell.complete("git log --auth")
+        self.assertIn("git log --author=", {x["buffer"] for x in response["items"]})
+        self.assertFalse((shell.root / "git-revision-probe").exists())
+        response = shell.complete("g log --auth")
+        self.assertTrue(response["items"])
+        self.assertFalse((shell.root / "git-revision-probe").exists())
+        response = shell.complete("git log ma")
+        self.assertTrue((shell.root / "git-revision-probe").exists())
+        self.assertIn("git log main", {x["buffer"].rstrip() for x in response["items"]})
+
     def test_completion_multiline_unicode_and_middle_caret(self):
         shell = self.shell
         (shell.root / "日本語 file").touch()

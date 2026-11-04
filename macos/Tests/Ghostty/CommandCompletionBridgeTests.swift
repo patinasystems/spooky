@@ -3,6 +3,50 @@ import Testing
 @testable import Ghostty
 
 struct CommandCompletionBridgeTests {
+    @Test func evaluatedOptionSpecsProvideDescriptionsAndExpectedValues() {
+        let request = CommandCompletionRequest(id: UUID(), revision: 1, text: "tool --fo", cursorUTF16: 9)
+        let specs = ["(--old)*--format=[output format]:format:(json yaml)", "-a[all entries]", "-l[long format]",
+                     "--file=[read \\[input\\]]:input file:_files", "--broken[unfinished"]
+        let metadata = CommandCompletionMetadata(specs: specs, request: request)
+        #expect(metadata.detail(for: "--format=") == "⟨format: json | yaml⟩  output format")
+        #expect(metadata.detail(for: "-al") == "long format")
+        #expect(metadata.detail(for: "--file=") == "⟨input file⟩  read [input]")
+        #expect(metadata.detail(for: "--broken") == "")
+        let values = CommandCompletionMetadata(specs: specs, request:
+            .init(id: UUID(), revision: 2, text: "tool --format j", cursorUTF16: 15))
+        #expect(values.detail(for: "json") == "⟨format: json | yaml⟩")
+    }
+
+    @Test func responseCarriesMetadataWithoutChangingShellReplacement() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = CommandCompletionRequest(id: UUID(), revision: 1, text: "tool --fo", cursorUTF16: 9)
+        let root = try responseDirectory(directory, request: request, generation: "123-1")
+        try write("1", to: root.appendingPathComponent("count"))
+        try write("14\0tool --format=\0", to: root.appendingPathComponent("items-v1"))
+        try write("--format=[output format]:format:(json yaml)\0", to: root.appendingPathComponent("specs-v1"))
+        let bridge = CommandCompletionBridge(directory: directory)
+        let response = try await bridge.response(to: request, generation: "123-1")
+        let item = try #require(response?.items.first)
+        #expect(item.detail == "⟨format: json | yaml⟩  output format")
+        #expect(item.replacementText == "tool --format=")
+        #expect(item.cursorUTF16 == 14)
+    }
+
+    @Test func malformedMetadataDoesNotDiscardValidCompletionBytes() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = CommandCompletionRequest(id: UUID(), revision: 1, text: "tool --fo", cursorUTF16: 9)
+        let root = try responseDirectory(directory, request: request, generation: "123-1")
+        try write("1", to: root.appendingPathComponent("count"))
+        try write("14\0tool --format=\0", to: root.appendingPathComponent("items-v1"))
+        try write(String(repeating: "x", count: 131_073), to: root.appendingPathComponent("specs-v1"))
+        let bridge = CommandCompletionBridge(directory: directory)
+        let response = try await bridge.response(to: request, generation: "123-1")
+        #expect(response?.items.first?.replacementText == "tool --format=")
+        #expect(response?.items.first?.detail == "")
+    }
+
     @Test func caretOffsetsRespectUnicodeEncodingBoundaries() {
         let text = "echo 👩🏽‍💻 café"
         let prefix = "echo 👩🏽‍💻 "

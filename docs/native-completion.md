@@ -48,8 +48,10 @@ could add several weeks. A terminal-native fish pane is a smaller alternative,
 but then the shell, rather than NSTextView, owns editing.
 
 **Data and immediacy.** The bridge returns exact replacement buffers and cursor
-positions, capped at 200 candidates; it currently does not export help text,
-argument types, or a complete syntax schema. Zsh completion functions can use
+positions, capped at 200 candidates, plus bounded evaluated `_arguments` specs.
+The menu shows option descriptions and expected-value hints where those specs
+provide them. Unsupported forms and providers without `_arguments` keep plain
+candidates; no types or descriptions are invented. This is not a full CLI schema. Zsh completion functions can use
 `_arguments` specifications, but they are executable functions whose results
 may depend on cwd, previous arguments, plugins and external programs. A command
 name alone does not identify a universal inspectable CLI grammar.
@@ -99,6 +101,22 @@ broad results omit the typed prefix, the controller requests that exact token
 once. Cached edits need no shell process, filesystem read, or IPC. Automatic
 queries are limited to 16 KiB drafts; explicit completion retains the 1 MiB
 protocol limit. Custom shell completers can still be slow on a cold query.
+
+The `_arguments` observer is installed only in the private prompt worker and
+keeps the original function's ZLE call frame. It records at most 1,024 unique
+specifications / 128 KiB in optional NUL-delimited `specs-v1`. Metadata decoding
+runs in the completion bridge actor; malformed hints cannot invalidate valid
+buffer/cursor data. Flag rows show `⟨expected value⟩` before their description;
+value rows can show the preceding option's expected type. Tooltips and native
+accessibility help retain the full bounded text. End-of-options (`--`) suppresses
+option metadata, avoiding flag hints on filename completions.
+
+For the canonical zsh `_git-log` helper, an option-name query stops positional
+state fallback once `_arguments` has actually added matches. This avoids
+unrelated branch/tag/revision/file lookups after matching a flag. Unknown flags,
+attached values and argument queries retain normal shell behavior. Custom Git
+providers are not routed through this optimization. Cold completer loading is
+still distinct from warm query latency.
 
 | Key | Behavior |
 | --- | --- |

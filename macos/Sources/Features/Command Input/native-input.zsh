@@ -549,6 +549,24 @@ _patina_native_completion_worker() {
     # A completion function may cd. Preserve user hooks, but never report the
     # worker's private cwd through the parent's terminal descriptor.
     chpwd_functions=(${chpwd_functions:#_patina_native_report_pwd})
+    # Observe the evaluated specs in the worker only. Keep _arguments in its
+    # original call frame: an ordinary wrapper restores ZLE special parameters
+    # on return and loses matches/context. The live shell is never modified.
+    if builtin autoload +X _arguments; then
+        functions[_arguments]='
+            builtin local -i _patina_before=$compstate[nmatches]
+            _patina_native_completion_specs "$@"
+            {
+'"$functions[_arguments]"'
+            } always {
+                if (( _patina_git_flags && compstate[nmatches] > _patina_before )) && [[ $funcstack[2] == _git-log ]]; then
+                    state=()
+                    compstate[restore]=""
+                    return 0
+                fi
+            }
+'
+    fi
     builtin zle -N zle-line-init _patina_native_completion_noop
     builtin zle -N zle-line-pre-redraw _patina_native_completion_noop
     builtin zle -N zle-line-finish _patina_native_completion_noop
@@ -705,11 +723,37 @@ _patina_native_complete() {
 _patina_native_completion_generate() {
     # vared otherwise completes a variable's value rather than a command line.
     compstate[vared]=''
+    builtin local -i _patina_git_flags=0
+    if (( CURRENT > 1 )); then
+        builtin local _patina_word
+        for _patina_word in "${(@)words[2,CURRENT-1]}"; do
+            [[ $_patina_word == -- ]] && _patina_metadata_allowed=0
+        done
+    fi
+    # Stock _git-log continues into repository/revision lookup after matching
+    # option names. Only suppress that positional fallback after _arguments
+    # actually added matches; values, unknown options and custom providers keep
+    # their normal completion path.
+    [[ ${_comps[git]-} == _git && $PREFIX == -* && $PREFIX != *=* ]] && _patina_git_flags=1
     _main_complete
     _patina_completion_matches=$compstate[nmatches]
     compstate[insert]='menu:1'
     compstate[list]=''
     builtin unset MENUSELECT
+}
+
+_patina_native_completion_specs() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin local LC_ALL=C _patina_spec
+    for _patina_spec in "$@"; do
+        (( ${#_patina_specs} >= 1024 )) && break
+        [[ -z $_patina_spec || -n ${_patina_spec_seen[$_patina_spec]-} ]] && continue
+        (( _patina_spec_bytes + ${#_patina_spec} + 1 > 131072 )) && continue
+        _patina_spec_seen[$_patina_spec]=1
+        (( _patina_spec_bytes += ${#_patina_spec} + 1 ))
+        _patina_specs+=("$_patina_spec")
+    done
+    return 0
 }
 
 _patina_native_completion_worker_widget() {
@@ -736,6 +780,10 @@ _patina_native_completion_worker_widget() {
     builtin local packed_descriptor
     builtin local -i _patina_completion_matches=0 index count=0 total_bytes=0 truncated=0 bytes
     builtin local -A seen
+    builtin local -a _patina_specs
+    builtin local -A _patina_spec_seen
+    builtin local -i _patina_spec_bytes=0
+    builtin local -i _patina_metadata_allowed=1
     {
         builtin exec {packed_descriptor}> "$staging/items-v1" || return 1
         BUFFER=$payload
@@ -779,6 +827,10 @@ _patina_native_completion_worker_widget() {
         done
         builtin exec {packed_descriptor}>&-
         packed_descriptor=''
+        # Optional, bounded NUL records; buffers/cursors retain their v1 format.
+        if (( _patina_metadata_allowed && ${#_patina_specs} )); then
+            builtin print -rN -- "${_patina_specs[@]}" > "$staging/specs-v1"
+        fi
         builtin print -rn -- "$generation" > "$staging/generation"
         builtin print -rn -- "$identifier" > "$staging/identifier"
         builtin print -rn -- ok > "$staging/status"

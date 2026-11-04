@@ -4,6 +4,42 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Completion metadata and Git option fallback, 2026-11-04
+
+Function-level instrumentation localized `git log --auth` latency to generation:
+a representative profiled cold call spent 246.75 ms in generation and 0.042 ms
+advancing the second candidate. The profile included local/remote heads, tags,
+recent commits and tree-file providers. A warm profiled generation was 81 ms.
+The option-name pass now clears the stock `_git-log` positional fallback state
+only after `_arguments` added matches. An executable regression proves revision
+providers remain called for actual arguments.
+
+Source-pinned private-PTY runs, 12 warm samples/query, builds/tests paused:
+
+| Query | Before median / max | With metadata + fix median / max | Matches |
+| --- | ---: | ---: | ---: |
+| `git log --auth` | 85.87 / 92.49 ms | 22.33 / 23.01 ms | 2 → 2 |
+| `git log --` | 28.92 / 33.59 ms | 31.41 / 33.22 ms | 168 → 168 |
+| `git --ver` | 5.28 / 5.39 ms | 5.30 / 6.68 ms | 1 → 1 |
+
+This is a 74% lower median for the targeted warm query, not a universal Git
+speedup. Metadata-bearing `ls -a` measured median 10.31 ms / max 13.12 ms;
+`ls -` 11.44 / 11.83 ms. These intervals cover request staging through atomic
+response publication (1 ms polling), not popup pixels. Metadata adds bounded
+work and can slightly increase already-fast queries.
+
+Fresh-worker first-use probes remained 191–250 ms. Autoloading `_git` with `+X`
+at worker startup did not consistently improve that tail, so no eager startup
+work was added. Typing a command/space starts its context query, but a pasted
+cold Git draft can still incur loading time. This remains a limitation.
+
+Current source-pinned evidence is in ignored local-current `git-baseline-raw.json`
+(adapter from `ed5c49ef9`), `git-fast-raw.json`, `ls-metadata-raw.json`, profiling
+scripts/results and `git-cold-load-results.json`. These refreshed samples replace
+the earlier private-shell sample files; the historical summaries below remain.
+The diagnostic zprof run itself produced an invalid UTF-8 profile and timed out
+on a later attempt; those profiles are diagnostic evidence, not latency samples.
+
 ## Context-sensitive flags and query latency, 2026-11-04
 
 Completion indexes now reuse candidates only within the same broadened query
@@ -31,7 +67,7 @@ probe was mixed: `git --ver` median 5.32 ms, while `git log --auth` was 101.90 m
 not guarantee faster shell functions. No universal speedup is claimed.
 
 The ignored local-current directory retains benchmark scripts, raw samples in
-`ls-query-results.json` and `flag-query-results.json`, and focused test logs.
+the refreshed source-pinned comparison files listed above, and focused test logs.
 
 ## Stable native caret during empty submissions, 2026-11-04
 
