@@ -124,9 +124,9 @@ struct CommandCompletionQuery: Sendable, Equatable {
         let directoryLength = slash.location == NSNotFound ? 0 : NSMaxRange(slash)
         var component = body.substring(to: directoryLength)
         if !command, directoryLength == 0, beforeCaret.hasPrefix("-") {
-            // Preserve option context for compsys/_arguments. An empty broad
-            // token can instead ask the shell for positional arguments/files.
-            component = beforeCaret.hasPrefix("--") ? "--" : "-"
+            // Flags and attached option values are context-sensitive. Send
+            // their actual prefix instead of enumerating a capped option set.
+            return nil
         }
         if command {
             // The shell caps results at 200. Keeping one typed character avoids
@@ -231,6 +231,7 @@ struct CommandCompletionFilter {
     private let suffix: String
     private let candidates: [IndexedCandidate]
     private let locale: Locale
+    private let queryContext: CommandCompletionQuery
 
     init?(request: CommandCompletionRequest, items: [CommandCompletionCandidate]) {
         guard let range = CommandCompletionToken.range(in: request.text, cursorUTF16: request.cursorUTF16),
@@ -264,9 +265,14 @@ struct CommandCompletionFilter {
         self.suffix = suffix
         self.candidates = candidates
         self.locale = locale
+        self.queryContext = CommandCompletionQuery.broadened(text: request.text, cursorUTF16: request.cursorUTF16)
+            ?? .init(text: request.text, cursorUTF16: request.cursorUTF16)
     }
 
     func items(in current: String, cursorUTF16: Int) -> [CommandCompletionCandidate]? {
+        let context = CommandCompletionQuery.broadened(text: current, cursorUTF16: cursorUTF16)
+            ?? .init(text: current, cursorUTF16: cursorUTF16)
+        guard context == queryContext else { return nil }
         guard let token = CommandCompletionToken.replacement(in: current, prefix: prefix, suffix: suffix) else { return nil }
         let currentRange = NSRange(location: prefix.utf16.count, length: token.utf16.count)
         guard cursorUTF16 >= currentRange.location, cursorUTF16 <= NSMaxRange(currentRange),

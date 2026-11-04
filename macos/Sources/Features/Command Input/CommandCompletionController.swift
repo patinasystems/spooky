@@ -169,8 +169,15 @@ final class CommandCompletionController {
         guard canSuggest, let textView, !textView.string.isEmpty, textView.string.utf8.count <= 16_384 else { return }
         let expected = revision
         automaticSelection = textView.selectedRange()
+        let caret = textView.selectedRange().location
+        let preceding = caret > 0 ? (textView.string as NSString).character(at: caret - 1) : 0
+        let contextBoundary = [9, 10, 32, 45, 47, 61].contains(preceding)
         automaticTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(60)) } catch { return }
+            // Let the edit/delegate finish publishing its draft before asking
+            // the live shell. Context boundaries need no typing debounce.
+            if contextBoundary { await Task.yield() } else {
+                do { try await Task.sleep(for: .milliseconds(24)) } catch { return }
+            }
             guard !Task.isCancelled, let self, self.revision == expected else { return }
             self.automaticTask = nil
             self.automaticSelection = nil

@@ -328,6 +328,14 @@ class NativeInputBridgeTests(unittest.TestCase):
             response = shell.complete(draft)
             self.assertIn(expected, {item["buffer"] for item in response["items"]})
 
+    def test_ls_short_flags_and_stacked_flags(self):
+        flags = {item["buffer"] for item in self.shell.complete("ls -")["items"]}
+        self.assertIn("ls -a", flags)
+        self.assertIn("ls -l", flags)
+        stacked = {item["buffer"] for item in self.shell.complete("ls -a")["items"]}
+        self.assertIn("ls -al", stacked)
+        self.assertIn("ls -aG", stacked)
+
     def test_completion_multiline_unicode_and_middle_caret(self):
         shell = self.shell
         (shell.root / "日本語 file").touch()

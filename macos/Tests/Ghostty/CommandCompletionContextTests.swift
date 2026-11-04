@@ -4,13 +4,30 @@ import Testing
 
 struct CommandCompletionContextTests {
     @Test func optionQueriesKeepTheirDashPrefixAndPrecedingArguments() throws {
-        for (draft, expected) in [("git log --auth", "git log --"), ("ls -al", "ls -"),
-                                  ("tool build --format j", "tool build --format ")] {
+        for draft in ["git log --auth", "ls -al", "tool --format=j"] {
+            #expect(CommandCompletionQuery.broadened(text: draft, cursorUTF16: draft.utf16.count) == nil)
+        }
+        for (draft, expected) in [("tool build --format j", "tool build --format ")] {
             let query = try #require(CommandCompletionQuery.broadened(text: draft, cursorUTF16: draft.utf16.count))
             #expect(query.text == expected)
             #expect(query.cursorUTF16 == expected.utf16.count)
         }
         #expect(CommandCompletionQuery.broadened(text: "tool --format=j", cursorUTF16: 15) == nil)
+    }
+
+    @Test func changingFromFilesToFlagsOrIntoADirectoryInvalidatesTheOldUniverse() throws {
+        let original = request("tool ", cursor: 5)
+        let filter = try #require(CommandCompletionFilter(request: original, items: [
+            candidate("tool report-file", option: "report-file", request: original, cursor: 16)
+        ]))
+        #expect(filter.items(in: "tool rep", cursorUTF16: 8)?.count == 1)
+        #expect(filter.items(in: "tool -", cursorUTF16: 6) == nil)
+        #expect(filter.items(in: "tool report/", cursorUTF16: 12) == nil)
+        let flag = request("tool --format", cursor: 13)
+        let flags = try #require(CommandCompletionFilter(request: flag, items: [
+            candidate("tool --format=", option: "--format=", request: flag, cursor: 14)
+        ]))
+        #expect(flags.items(in: "tool --format=", cursorUTF16: 14) == nil)
     }
 
     @Test func argumentQueryPreservesTheCommandAndTrailingArguments() throws {

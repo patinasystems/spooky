@@ -4,6 +4,35 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Context-sensitive flags and query latency, 2026-11-04
+
+Completion indexes now reuse candidates only within the same broadened query
+context. Changing a filename token into a flag, entering a directory, or typing
+an attached option value invalidates the old universe. Flags use the exact typed
+prefix, which also asks zsh for valid stacked short flags (`ls -a` → `-al`).
+Context delimiters request on the next actor turn; other uncached edits coalesce
+for 24 ms instead of 60 ms. Existing synchronous fuzzy name filtering remains.
+
+Private normal-zsh PTY measurements, 12 warm alternating requests per case:
+
+| Query | Median request→publication | Maximum | Candidates |
+| --- | ---: | ---: | ---: |
+| `ls -` | 10.32 ms | 16.39 ms | 39 |
+| `ls -a` | 9.11 ms | 22.82 ms | 37 |
+| `ls -G` | 9.56 ms | 11.47 ms | 38 |
+| `ls -al` | 9.06 ms | 9.20 ms | 31 |
+
+Timing includes request-file staging, shell wakeup, generation and atomic
+response publication with 1 ms polling; it excludes native rendering/debounce.
+Our builds were stopped for these measurements. This does not establish popup
+pixel latency or performance of arbitrary user completers. An independent Git
+probe was mixed: `git --ver` median 5.32 ms, while `git log --auth` was 101.90 ms
+(maximum 363.30 ms). Exact-prefix queries improve context correctness, but do
+not guarantee faster shell functions. No universal speedup is claimed.
+
+The ignored local-current directory retains benchmark scripts, raw samples in
+`ls-query-results.json` and `flag-query-results.json`, and focused test logs.
+
 ## Stable native caret during empty submissions, 2026-11-04
 
 Source `ff150dc69` keeps TextKit editable during an empty-command ownership

@@ -4,6 +4,39 @@ import Testing
 
 @MainActor
 struct CommandTextViewTests {
+    @Test func lsFlagsReplaceFileSuggestionsAndRefreshForStackedOptions() async throws {
+        let (view, window) = makeCompletionEditor(draft: "ls ")
+        defer { window.close() }
+        let files = try requestCompletion(from: view)
+        view.receiveCompletions(.init(requestID: files.id, revision: files.revision, items: [
+            .init(displayText: "some-file", detail: "", replacementText: "some-file",
+                  replacementRange: NSRange(location: 3, length: 0))
+        ]))
+        var requests: [CommandCompletionRequest] = []
+        view.onRequestCompletion = { requests.append($0) }
+        view.insertText("-", replacementRange: view.selectedRange())
+        #expect(view.completionItems.isEmpty)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while requests.isEmpty, ContinuousClock.now < deadline { await Task.yield() }
+        let flags = try #require(requests.last)
+        #expect(flags.shellText == "ls -")
+        view.receiveCompletions(.init(requestID: flags.id, revision: flags.revision, items: [
+            .init(displayText: "-a", detail: "", replacementText: "-a",
+                  replacementRange: NSRange(location: 3, length: 1))
+        ]))
+        view.insertText("a", replacementRange: view.selectedRange())
+        while requests.count < 2, ContinuousClock.now < deadline { await Task.yield() }
+        let stacked = try #require(requests.last)
+        #expect(requests.count == 2)
+        #expect(stacked.id != flags.id)
+        #expect(stacked.shellText == "ls -a")
+        view.receiveCompletions(.init(requestID: stacked.id, revision: stacked.revision, items: [
+            .init(displayText: "-al", detail: "", replacementText: "-al",
+                  replacementRange: NSRange(location: 3, length: 2))
+        ]))
+        #expect(view.completionItems.map(\.displayText) == ["-al"])
+    }
+
     @Test func tabAcceptanceImmediatelyRequestsTheNextDirectoryAndKeepsReturnPassive() throws {
         let (view, window) = makeCompletionEditor(draft: "cd do")
         defer { window.close() }

@@ -47,7 +47,19 @@ widgets, remote shells, and exact fish/zsh editing parity are separate work and
 could add several weeks. A terminal-native fish pane is a smaller alternative,
 but then the shell, rather than NSTextView, owns editing.
 
-**Implemented AppKit interface.** Typing starts a 60 ms debounced shell query
+**Data and immediacy.** The bridge returns exact replacement buffers and cursor
+positions, capped at 200 candidates; it currently does not export help text,
+argument types, or a complete syntax schema. Zsh completion functions can use
+`_arguments` specifications, but they are executable functions whose results
+may depend on cwd, previous arguments, plugins and external programs. A command
+name alone does not identify a universal inspectable CLI grammar.
+
+Typing whitespace, `-`, `/`, or `=` requests the new context on the next actor
+turn, after the draft delegate publishes its edit. Other uncached edits use
+24 ms coalescing. File/name fuzzy filtering remains synchronous within the
+same broadened query context; exact option queries ask zsh again as they change.
+
+**Implemented AppKit interface.** Typing starts a 24 ms debounced shell query
 when there is no reusable result set. A faint inline annotation previews the
 best match without changing the NSTextView document, selection, undo history,
 measured height, or command bytes. Prefix matches show their remaining suffix;
@@ -74,8 +86,9 @@ accepts it or recursively requests another list.
 
 The full command prefix reaches zsh's `compsys`, including existing `compdef`
 and `_arguments` definitions. Those definitions supply command-specific flags,
-option values and positional arguments. Broad fuzzy queries preserve `-` and
-`--` so options are not mistaken for files or positional arguments. Commands
+option values and positional arguments. Flags use the exact typed prefix, including stacked short flags and attached
+option values. Broad file-result sets are invalidated when the token becomes
+an option, gains `=`, or enters a different directory. Commands
 without a completion definition retain the shell's fallback behavior.
 
 For straightforward arguments, a broader shell query preserves the command and
