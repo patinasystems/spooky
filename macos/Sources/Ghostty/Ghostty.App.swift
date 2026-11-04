@@ -2161,6 +2161,7 @@ extension Ghostty {
                 DispatchQueue.main.async { [weak surfaceView] in
                     guard let surfaceView else { return }
                     surfaceView.cellSize = surfaceView.convertFromBacking(backingSize)
+                    surfaceView.commandInputSession?.terminalGeometryChanged()
                 }
 
             default:

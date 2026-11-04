@@ -56,6 +56,34 @@ builtin typeset -g _patina_native_saved_rps1=$RPS1 _patina_native_saved_rps2=$RP
 builtin typeset -g _patina_native_marked_ps1='' _patina_native_marked_ps2=''
 builtin typeset -g _patina_native_block_cwd=''
 builtin typeset -gi _patina_native_prompt_active=0
+builtin typeset -gi _patina_native_title_enabled=0
+[[ ,${GHOSTTY_SHELL_FEATURES-}, == *,title,* ]] && _patina_native_title_enabled=1
+
+# Native mode replaces upstream's prompt markers, but the terminal still needs
+# its cwd for new panes and optional titles. Match upstream's kitty-shell-cwd
+# format: print literally and strip control bytes from filesystem/host text so
+# a path cannot terminate the OSC and inject another terminal command.
+_patina_native_report_pwd() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    builtin print -rnu $_patina_native_tty -- \
+        $'\e]7;kitty-shell-cwd://'"${HOST//[[:cntrl:]]}""${PWD//[[:cntrl:]]}"$'\a'
+    return 0
+}
+
+_patina_native_report_prompt_title() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    (( _patina_native_title_enabled )) || return 0
+    builtin local title=${(%):-%(4~|…/%3~|%~)}
+    builtin print -rnu $_patina_native_tty -- $'\e]2;'"${title//[[:cntrl:]]}"$'\a'
+    return 0
+}
+
+_patina_native_report_command_title() {
+    builtin emulate -L zsh -o no_aliases -o no_warn_create_global
+    (( _patina_native_title_enabled )) || return 0
+    builtin print -rnu $_patina_native_tty -- $'\e]2;'"${1//[[:cntrl:]]}"$'\a'
+    return 0
+}
 
 _patina_native_restore_prompt() {
     builtin emulate -L zsh -o no_aliases -o no_warn_create_global
@@ -233,6 +261,9 @@ _patina_native_precmd() {
         _patina_native_completion_options=("${(@kv)options[@]}")
     fi
     _patina_native_prepare_prompt "$result"
+    # Programs can publish their own OSC7, so chpwd alone is insufficient.
+    _patina_native_report_pwd
+    _patina_native_report_prompt_title
     _patina_native_completion_start
     return 0
 }
@@ -272,6 +303,7 @@ _patina_native_preexec() {
     _patina_native_metadata status running
     builtin print -rnu $_patina_native_tty -- \
         $'\e]133;C;aid='"$_patina_native_block_id"$'\a'
+    _patina_native_report_command_title "$1"
     return 0
 }
 
@@ -323,6 +355,8 @@ _patina_native_line_init() {
         builtin local REPLY
         _patina_native_branch
         _patina_native_metadata branch "$REPLY"
+        _patina_native_report_pwd
+        _patina_native_report_prompt_title
     fi
     _patina_native_redraw
 }
@@ -512,6 +546,9 @@ _patina_native_completion_worker() {
     precmd_functions=()
     preexec_functions=()
     zshexit_functions=()
+    # A completion function may cd. Preserve user hooks, but never report the
+    # worker's private cwd through the parent's terminal descriptor.
+    chpwd_functions=(${chpwd_functions:#_patina_native_report_pwd})
     builtin zle -N zle-line-init _patina_native_completion_noop
     builtin zle -N zle-line-pre-redraw _patina_native_completion_noop
     builtin zle -N zle-line-finish _patina_native_completion_noop
@@ -946,8 +983,9 @@ builtin bindkey -M main $'\e[99;3~' _patina_native_history
 builtin bindkey -M emacs $'\e[99;3~' _patina_native_history
 builtin bindkey -M viins $'\e[99;3~' _patina_native_history
 builtin bindkey -M vicmd $'\e[99;3~' _patina_native_history
-builtin typeset -ga precmd_functions preexec_functions zshexit_functions
+builtin typeset -ga precmd_functions preexec_functions zshexit_functions chpwd_functions
 precmd_functions+=(_patina_native_precmd)
 preexec_functions+=(_patina_native_preexec)
 zshexit_functions+=(_patina_native_exit)
+chpwd_functions+=(_patina_native_report_pwd)
 _patina_native_publish running bootstrap

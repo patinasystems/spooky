@@ -942,6 +942,29 @@ fn queueIo(
     self.io.queueMessage(msg, mutex);
 }
 
+/// Private shell widgets are protocol traffic, not user text. In particular,
+/// automatic completion/history must not scroll a viewport being read, clear
+/// selection, cancel an in-flight presentation, or wake the renderer.
+pub const NativeInputRequest = enum(c_int) {
+    submit,
+    completion,
+    history,
+
+    fn sequence(self: NativeInputRequest) []const u8 {
+        return switch (self) {
+            .submit => "\x1b[99;1~",
+            .completion => "\x1b[99;2~",
+            .history => "\x1b[99;3~",
+        };
+    }
+};
+
+pub fn nativeInputRequest(self: *Surface, request: NativeInputRequest) bool {
+    if (self.readonly) return false;
+    self.queueIo(.{ .write_stable = request.sequence() }, .unlocked);
+    return true;
+}
+
 /// Forces the surface to render. This is useful for when the surface
 /// is in the middle of animation (such as a resize, etc.) or when
 /// the render timer is managed manually by the apprt.
@@ -2656,14 +2679,6 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
     if (self.size.screen.equals(new_screen_size)) return;
 
     try self.resize(new_screen_size);
-}
-
-/// Reserve physical pixels at the bottom of the full drawable for native
-/// input. The application runtime converts its logical layout to pixels.
-/// Safe to call from the main thread; ordinary resize messages update the PTY
-/// and renderer together without changing the runtime surface dimensions.
-pub fn setNativeInputInset(self: *Surface, bottom_px: u32) !void {
-    try self.setNativeInputPadding(self.native_input_inset_horizontal, bottom_px);
 }
 
 pub fn setNativeInputPadding(self: *Surface, horizontal_px: u32, bottom_px: u32) !void {
@@ -5098,7 +5113,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 );
                 return true;
             };
-            if (!std.mem.eql(u8, text, "\x1b[99;1~")) self.cancelNativeSubmission();
+            self.cancelNativeSubmission();
             self.queueIo(try termio.Message.writeReq(
                 self.alloc,
                 text,
@@ -6782,6 +6797,30 @@ test "queueIo frees allocated writes in readonly mode" {
         .alloc = testing.allocator,
         .data = data,
     } }, .unlocked);
+}
+
+test "native input requests only wake shell without touching scrollback or renderer" {
+    const testing = std.testing;
+    const surface = try testing.allocator.create(Surface);
+    defer testing.allocator.destroy(surface);
+    surface.readonly = false;
+    surface.io.mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer surface.io.mailbox.deinit(testing.allocator);
+    // No renderer, terminal, selection or presentation state is initialized:
+    // the internal wakeup must not even consult these user-visible states.
+    const requests = [_]NativeInputRequest{ .submit, .completion, .history };
+    const sequences = [_][]const u8{ "\x1b[99;1~", "\x1b[99;2~", "\x1b[99;3~" };
+    for (requests, sequences) |request, expected| {
+        try testing.expect(surface.nativeInputRequest(request));
+        const message = surface.io.mailbox.spsc.queue.pop(global.io()).?;
+        defer message.deinit();
+        try testing.expectEqualStrings(expected, message.write_stable);
+        try testing.expect(surface.io.mailbox.spsc.queue.pop(global.io()) == null);
+    }
+    surface.readonly = true;
+    for (requests) |request| try testing.expect(!surface.nativeInputRequest(request));
+    try testing.expect(surface.io.mailbox.spsc.queue.pop(global.io()) == null);
+    try @import("lib/enum.zig").checkGhosttyHEnum(NativeInputRequest, "GHOSTTY_NATIVE_INPUT_REQUEST_");
 }
 
 test "Mouse.click_state holds every button" {

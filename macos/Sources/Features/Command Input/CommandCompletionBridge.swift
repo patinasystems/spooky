@@ -17,8 +17,7 @@ actor CommandCompletionBridge {
             throw CompletionError.invalidRequest
         }
         let state = try read(directory.appendingPathComponent("state"), maximum: 4096)
-            .trimmingCharacters(in: .newlines).components(separatedBy: "\t")
-        guard state.count == 4, Array(state.prefix(3)) == ["ready", generation, "start"] else {
+        guard CommandShellBridgeFiles.isReady(state, generation: generation) else {
             throw CompletionError.promptChanged
         }
         pruneResponses(except: request.id)
@@ -36,7 +35,8 @@ actor CommandCompletionBridge {
                          timeout: Duration = .seconds(3)) async throws -> CommandCompletionResponse {
         try Task.checkCancellation()
         if let response = try response(to: request, generation: generation) { return response }
-        let events = CommandInputFileEvents(directory: directory.appendingPathComponent("completions", isDirectory: true))
+        let events = CommandInputFileEvents(
+            directory: directory.appendingPathComponent("completions", isDirectory: true), scope: .response)
         return try await withThrowingTaskGroup(of: CommandCompletionResponse.self) { group in
             defer { group.cancelAll() }
             group.addTask {
@@ -91,12 +91,8 @@ actor CommandCompletionBridge {
     }
 
     func cancel(_ identifier: UUID) {
-        let request = directory.appendingPathComponent("completion-request")
-        if let contents = try? read(request, maximum: Self.maximumDraftBytes + 512),
-           contents.split(separator: "\n", maxSplits: 2, omittingEmptySubsequences: false).dropFirst().first
-            == Substring(identifier.uuidString) {
-            try? FileManager.default.removeItem(at: request)
-        }
+        CommandShellBridgeFiles.removeRequest(directory.appendingPathComponent("completion-request"),
+                                              matching: identifier, maximum: Self.maximumDraftBytes + 512)
         try? FileManager.default.removeItem(at: responseDirectory(identifier))
     }
 
@@ -188,12 +184,7 @@ actor CommandCompletionBridge {
     }
 
     private func read(_ url: URL, maximum: Int) throws -> String {
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let size = attributes[.size] as? NSNumber, size.intValue <= maximum,
-              let text = String(data: try Data(contentsOf: url), encoding: .utf8) else {
-            throw CompletionError.invalidResponse
-        }
-        return text
+        try CommandShellBridgeFiles.readUTF8(url, maximum: maximum, invalidResponse: CompletionError.invalidResponse)
     }
 
     enum CompletionError: LocalizedError {

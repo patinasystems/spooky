@@ -3,6 +3,27 @@ import Testing
 @testable import Ghostty
 
 struct CommandInputFileEventsTests {
+    @Test func responseWatchIgnoresNestedBlockDataButObservesAtomicResponsePublication() async throws {
+        let fixture = try Fixture()
+        let directory = fixture.directory
+        let block = directory.appendingPathComponent("blocks/1-1", isDirectory: true)
+        try FileManager.default.createDirectory(at: block, withIntermediateDirectories: true)
+        let watcher = CommandInputFileEvents(directory: directory, scope: .response, watchdogInterval: 60)
+        defer { withExtendedLifetime(watcher) {} }
+        let counter = EventCounter()
+        let task = Task { for await _ in watcher.events { await counter.increment() } }
+        defer { task.cancel() }
+        watcher.updateLiveBlock("1-1")
+        try await counter.wait(for: 1)
+        try await Task.sleep(for: .milliseconds(20))
+        let initial = await counter.count
+        try Data("done".utf8).write(to: block.appendingPathComponent("status"), options: .atomic)
+        try await Task.sleep(for: .milliseconds(30))
+        #expect(await counter.count == initial)
+        try Data("ready".utf8).write(to: directory.appendingPathComponent(UUID().uuidString), options: .atomic)
+        try await counter.wait(for: initial + 1)
+    }
+
     @Test func observesAtomicStateAndLaterReceiptReplacement() async throws {
         let fixture = try Fixture()
         let watcher = CommandInputFileEvents(directory: fixture.directory, watchdogInterval: 60)

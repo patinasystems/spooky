@@ -583,14 +583,14 @@ typedef struct {
   bool pinned;
 } ghostty_command_chrome_s;
 
-// Visible directory-label cell bounds, in logical points from the surface top.
-typedef struct {
-  char id[65];
-  double x;
-  double y;
-  double width;
-  double height;
-} ghostty_command_path_hit_s;
+// Internal shell widgets. These wake the live shell without typing draft text,
+// changing selection, or moving the viewport. The host validates prompt ownership
+// and publishes the generation-bound request before sending a widget trigger.
+typedef enum {
+  GHOSTTY_NATIVE_INPUT_REQUEST_SUBMIT = 0,
+  GHOSTTY_NATIVE_INPUT_REQUEST_COMPLETION = 1,
+  GHOSTTY_NATIVE_INPUT_REQUEST_HISTORY = 2,
+} ghostty_native_input_request_e;
 
 // A bounded, copied hover probe. The application validates literal local paths
 // asynchronously; no filesystem operations occur in libghostty. Byte ranges
@@ -1303,9 +1303,8 @@ GHOSTTY_API uintptr_t ghostty_surface_command_layout(ghostty_surface_t,
     ghostty_command_layout_s*, ghostty_command_block_s*, uintptr_t capacity);
 GHOSTTY_API void ghostty_surface_set_command_chrome(ghostty_surface_t, bool enabled,
     double pinned_offset_from_bottom, const ghostty_command_chrome_s*, uintptr_t count);
-// Nonblocking; false also means the parser owns the lock or geometry is changing.
-GHOSTTY_API bool ghostty_surface_command_path_at(ghostty_surface_t, double x, double y,
-    ghostty_command_path_hit_s*);
+GHOSTTY_API bool ghostty_surface_native_input_request(ghostty_surface_t,
+    ghostty_native_input_request_e);
 GHOSTTY_API ghostty_path_probe_status_e ghostty_surface_path_probe(
     ghostty_surface_t, double x, double y, ghostty_path_probe_s*);
 // Returns false for an obsolete probe, invalid range, or a busy terminal.
@@ -1317,7 +1316,6 @@ GHOSTTY_API void ghostty_surface_path_clear(ghostty_surface_t);
 // Parsing/PTY I/O continue; visible output and interaction fail open immediately.
 GHOSTTY_API bool ghostty_surface_begin_native_empty_submission(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_cancel_native_submission(ghostty_surface_t);
-GHOSTTY_API void ghostty_surface_set_native_input_inset(ghostty_surface_t, double bottom);
 // Resolved AppKit accent for default-foreground committed semantic input only.
 GHOSTTY_API void ghostty_surface_set_native_input_accent(ghostty_surface_t, bool enabled,
     uint8_t red, uint8_t green, uint8_t blue);

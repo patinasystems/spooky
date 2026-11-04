@@ -1150,6 +1150,13 @@ extension Ghostty {
             commandPathInteraction?.geometryWillChange()
             let input = CommandInputDiagnostics.beginInput(timestamp: event.timestamp, kind: .scroll)
             defer { CommandInputDiagnostics.endInput(input) }
+            if CommandInputDiagnostics.isEnabled {
+                CommandInputDiagnostics.mark(.scrollInput, id: CommandInputDiagnostics.currentInputID, metrics: [
+                    "delta_x": Double(event.scrollingDeltaX), "delta_y": Double(event.scrollingDeltaY),
+                    "precise": event.hasPreciseScrollingDeltas ? 1 : 0,
+                    "phase": Double(event.phase.rawValue), "momentum_phase": Double(event.momentumPhase.rawValue)
+                ])
+            }
             guard let surfaceModel else { return }
 
             var x = event.scrollingDeltaX
@@ -1441,6 +1448,17 @@ extension Ghostty {
                 }
 
                 self.keyDown(with: event)
+                return true
+            }
+
+            if let session = commandInputSession,
+               CommandInputShortcut.returnsToEditor(
+                event, promptIsEditable: session.canReturnToEditor && !readonly,
+                windowIsKey: window?.isKeyWindow == true,
+                terminalOwnsKeyboard: NativeCommandFocus.ownsTerminalKeyboard(
+                    paneIsFocused: focused, firstResponder: window?.firstResponder, surface: self),
+                hasMarkedText: hasMarkedText()) {
+                session.useEditor()
                 return true
             }
 

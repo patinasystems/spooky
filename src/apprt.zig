@@ -55,6 +55,7 @@ pub const Surface = runtime.Surface;
 test {
     _ = Runtime;
     _ = runtime;
+    _ = @import("apprt/native_command.zig");
     _ = action;
     _ = structs;
 }

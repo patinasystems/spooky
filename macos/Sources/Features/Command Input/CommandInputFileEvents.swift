@@ -5,9 +5,15 @@ import Foundation
 /// The current block needs its own watch because directory events do not recurse.
 /// A bounded stream coalesces bursts while a snapshot is being read.
 final class CommandInputFileEvents: @unchecked Sendable {
+    enum Scope: Sendable {
+        case session
+        case response
+    }
+
     let events: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
     private let directory: URL
+    private let scope: Scope
     private let queue = DispatchQueue(label: "com.patinasystems.ghostty.input-events", qos: .userInitiated)
     // Everything below is confined to queue. Queued work retains no session.
     private var sources: [URL: DispatchSourceFileSystemObject] = [:]
@@ -17,8 +23,10 @@ final class CommandInputFileEvents: @unchecked Sendable {
     private let coalescingInterval: TimeInterval
     private let watchdog: DispatchSourceTimer
 
-    init(directory: URL, watchdogInterval: TimeInterval = 2, coalescingInterval: TimeInterval = 0.002) {
+    init(directory: URL, scope: Scope = .session,
+         watchdogInterval: TimeInterval = 2, coalescingInterval: TimeInterval = 0.002) {
         self.directory = directory
+        self.scope = scope
         self.coalescingInterval = max(0, coalescingInterval)
         let stream = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         events = stream.stream
@@ -66,6 +74,7 @@ final class CommandInputFileEvents: @unchecked Sendable {
     }
 
     func updateLiveBlock(_ id: String?) {
+        guard scope == .session else { return }
         let safeID = id.flatMap { value in
             !value.isEmpty && value.utf8.count <= 64
                 && value.utf8.allSatisfy { (48...57).contains($0) || $0 == 45 } ? value : nil
@@ -81,9 +90,12 @@ final class CommandInputFileEvents: @unchecked Sendable {
     }
 
     private func installWatches() {
-        let blocks = directory.appendingPathComponent("blocks", isDirectory: true)
-        var desired: Set<URL> = [directory, blocks]
-        if let liveBlock { desired.insert(blocks.appendingPathComponent(liveBlock, isDirectory: true)) }
+        var desired: Set<URL> = [directory]
+        if scope == .session {
+            let blocks = directory.appendingPathComponent("blocks", isDirectory: true)
+            desired.insert(blocks)
+            if let liveBlock { desired.insert(blocks.appendingPathComponent(liveBlock, isDirectory: true)) }
+        }
         for url in Array(sources.keys) where !desired.contains(url) {
             sources.removeValue(forKey: url)?.cancel()
         }

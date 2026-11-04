@@ -19,6 +19,7 @@ const terminal = @import("../terminal/main.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
+const native_command = @import("native_command.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
@@ -1549,59 +1550,11 @@ pub const CAPI = struct {
         cell_height_px: u32,
     };
 
-    const CommandBlock = extern struct {
-        id: [65]u8,
-        flags: u32,
-        header_y: f64,
-        input_y: f64,
-        output_y: f64,
-        end_y: f64,
-        complete: bool,
-    };
-
-    const CommandLayout = extern struct {
-        snapshot_valid: bool,
-        primary: bool,
-        viewport_at_bottom: bool,
-        has_scrollback: bool,
-        cursor_valid: bool,
-        columns: u32,
-        rows: u32,
-        scrollback_rows: u64,
-        active_cursor_row: u32,
-        compact_prompt_rows: u32,
-        unreserved_grid_height: f64,
-        cell_width: f64,
-        cell_height: f64,
-        padding_left: f64,
-        padding_top: f64,
-        cursor_x: f64,
-        cursor_y: f64,
-        last_started_id: [65]u8,
-        last_primary_input_id: [65]u8,
-    };
-
-    const CommandChrome = extern struct {
-        id: [65]u8,
-        label: ?[*]const u8,
-        label_len: usize,
-        path_len: usize,
-        suffix: ?[*]const u8,
-        suffix_len: usize,
-        current: bool,
-        pinned: bool,
-    };
-
-    const CommandPathHit = extern struct {
-        id: [65]u8,
-        x: f64,
-        y: f64,
-        width: f64,
-        height: f64,
-    };
-
-    const PathRect = extern struct { x: f64, y: f64, width: f64, height: f64 };
-    const PathRects = extern struct { count: u32, rects: [8]PathRect };
+    const CommandBlock = native_command.CommandBlock;
+    const CommandLayout = native_command.CommandLayout;
+    const CommandChrome = native_command.CommandChrome;
+    const PathRect = native_command.PathRect;
+    const PathRects = native_command.PathRects;
 
     fn pathRects(result: *PathRects, snapshot: renderer.PathHover.Snapshot, scale: apprt.ContentScale) void {
         result.* = std.mem.zeroes(PathRects);
@@ -2197,29 +2150,9 @@ pub const CAPI = struct {
         if (changed) surface.refresh();
     }
 
-    /// Resolve only the directory portion of the caption currently under a
-    /// click. No text extraction, filesystem work, or waiting on the parser.
-    export fn ghostty_surface_command_path_at(surface: *Surface, x: f64, y: f64, result: *CommandPathHit) bool {
-        if (!std.math.isFinite(x) or !std.math.isFinite(y)) return false;
-        const core = &surface.core_surface;
-        const state = &core.renderer_state;
-        if (!state.mutex.tryLock()) return false;
-        defer state.mutex.unlock(global.io());
-        const term = state.terminal;
-        const size = core.size;
-        const grid = size.grid();
-        if (grid.columns != term.cols or grid.rows != term.rows) return false;
-        const scale = surface.content_scale;
-        const hit = state.command_chrome.pathAtViewport(core.alloc, term, size, @floatCast(x * scale.x), @floatCast(y * scale.y), state.nativeViewport(size)) catch return false;
-        const rect = hit orelse return false;
-        result.* = .{
-            .id = rect.id,
-            .x = @as(f64, rect.x) / scale.x,
-            .y = @as(f64, rect.y) / scale.y,
-            .width = @as(f64, rect.width) / scale.x,
-            .height = @as(f64, rect.height) / scale.y,
-        };
-        return true;
+    export fn ghostty_surface_native_input_request(surface: *Surface, raw: c_int) bool {
+        const request = std.enums.fromInt(CoreSurface.NativeInputRequest, raw) orelse return false;
+        return surface.core_surface.nativeInputRequest(request);
     }
 
     /// Nonblocking, bounded text probe. Local path resolution belongs to the
@@ -2271,15 +2204,6 @@ pub const CAPI = struct {
     export fn ghostty_surface_cancel_native_submission(surface: *Surface) void {
         surface.core_surface.renderer_state.native_submission.requestCancel();
         surface.refresh();
-    }
-
-    /// Reserve native UI inside the existing Metal drawable's bottom padding.
-    export fn ghostty_surface_set_native_input_inset(surface: *Surface, bottom: f64) void {
-        if (!std.math.isFinite(bottom) or bottom < 0) return;
-        const pixels: u32 = @intFromFloat(@min(bottom * surface.content_scale.y, 1_000_000));
-        surface.core_surface.setNativeInputInset(pixels) catch |err| {
-            log.err("error updating native input inset err={}", .{err});
-        };
     }
 
     /// True only while confirmed native zsh retains its pre-PTY startup insets.

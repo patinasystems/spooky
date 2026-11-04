@@ -12,9 +12,7 @@ actor CommandHistoryBridge {
     func prepare(_ request: CommandHistoryRequest, generation: String) throws {
         try Task.checkCancellation()
         let state = try read(directory.appendingPathComponent("state"), maximum: 4096)
-            .trimmingCharacters(in: .newlines).components(separatedBy: "\t")
-        guard !generation.isEmpty, !generation.contains("\n"), state.count == 4,
-              Array(state.prefix(3)) == ["ready", generation, "start"] else { throw HistoryError.promptChanged }
+        guard CommandShellBridgeFiles.isReady(state, generation: generation) else { throw HistoryError.promptChanged }
         let responses = directory.appendingPathComponent("histories", isDirectory: true)
         try FileManager.default.createDirectory(at: responses, withIntermediateDirectories: true)
         for url in try FileManager.default.contentsOfDirectory(at: responses, includingPropertiesForKeys: nil) {
@@ -30,7 +28,8 @@ actor CommandHistoryBridge {
                          timeout: Duration = .seconds(3)) async throws -> CommandHistoryResponse {
         try Task.checkCancellation()
         if let response = try response(to: request, generation: generation) { return response }
-        let events = CommandInputFileEvents(directory: directory.appendingPathComponent("histories", isDirectory: true))
+        let events = CommandInputFileEvents(
+            directory: directory.appendingPathComponent("histories", isDirectory: true), scope: .response)
         return try await withThrowingTaskGroup(of: CommandHistoryResponse.self) { group in
             defer { group.cancelAll() }
             group.addTask {
@@ -76,12 +75,8 @@ actor CommandHistoryBridge {
     }
 
     func cancel(_ identifier: UUID) {
-        let request = directory.appendingPathComponent("history-request")
-        if let contents = try? read(request, maximum: 512),
-           contents.split(separator: "\n", omittingEmptySubsequences: false).dropFirst().first
-            == Substring(identifier.uuidString) {
-            try? FileManager.default.removeItem(at: request)
-        }
+        CommandShellBridgeFiles.removeRequest(directory.appendingPathComponent("history-request"),
+                                              matching: identifier, maximum: 512)
         try? FileManager.default.removeItem(at: responseDirectory(identifier))
     }
 
@@ -94,14 +89,7 @@ actor CommandHistoryBridge {
     }
 
     private func read(_ url: URL, maximum: Int) throws -> String {
-        // A capped read also bounds allocation if a file changes after opening.
-        let file = try FileHandle(forReadingFrom: url)
-        defer { try? file.close() }
-        let data = try file.read(upToCount: maximum + 1) ?? Data()
-        guard data.count <= maximum, let text = String(data: data, encoding: .utf8) else {
-            throw HistoryError.invalidResponse
-        }
-        return text
+        try CommandShellBridgeFiles.readUTF8(url, maximum: maximum, invalidResponse: HistoryError.invalidResponse)
     }
 
     enum HistoryError: LocalizedError, Equatable {

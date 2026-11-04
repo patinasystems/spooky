@@ -31,7 +31,8 @@ HISTORY_TRIGGER = b"\x1b[99;3~"
 
 
 class Shell:
-    def __init__(self, *, user_rc="", startup_files=None, login=False, zdotdir="home", native_ready=True):
+    def __init__(self, *, user_rc="", startup_files=None, login=False, zdotdir="home", native_ready=True,
+                 shell_features=None):
         self.temporary = tempfile.TemporaryDirectory(prefix="ghostty-native-input-")
         self.root = Path(self.temporary.name)
         self.bridge = self.root / "bridge"
@@ -63,6 +64,8 @@ class Shell:
             "TERM": "xterm-256color", "PATH": "/usr/bin:/bin",
             "LC_ALL": "en_US.UTF-8",
         }
+        if shell_features is not None:
+            environment["GHOSTTY_SHELL_FEATURES"] = shell_features
         if zdotdir != "unset":
             environment["SPOOKY_ZSH_ZDOTDIR"] = "" if zdotdir == "empty" else str(self.root)
         self.pid, self.terminal = pty.fork()
@@ -239,6 +242,9 @@ class Shell:
                 self.output,
             )
         ]
+
+    def osc(self, command):
+        return re.findall(rb"\x1b\]" + str(command).encode() + rb";([^\x07\x1b]*)\x07", self.output)
 
 
 @unittest.skipUnless(Path("/bin/zsh").exists(), "requires /bin/zsh")
@@ -1097,6 +1103,99 @@ class UserStartupCompatibilityTests(unittest.TestCase):
         shell = Shell(**options)
         self.addCleanup(shell.close)
         return shell
+
+    def test_cwd_and_titles_follow_prompt_and_foreground_cd_without_duplicate_blocks(self):
+        shell = self.shell(
+            shell_features="cursor:blink,path,title",
+            user_rc='_probe_chpwd() { print -r -- "$PWD" >> "$HOME/chpwd-ran"; }\n'
+            'chpwd_functions+=(_probe_chpwd)\n',
+        )
+        shell.wait(lambda: shell.osc(7) and shell.osc(2))
+        self.assertTrue(shell.osc(7)[-1].endswith(str(shell.root.resolve()).encode()))
+        # The PTY's initial getcwd may resolve macOS /var's symlink, while
+        # HOME preserves its logical spelling. Match upstream's short title.
+        self.assertTrue(shell.osc(2)[-1].endswith(shell.root.name.encode()))
+        block = shell.state()[3]
+        draft = 'cd "$_PROBE_DIR/work"; read -r PROBE_DONE'
+        _, generation = shell.submit(draft)
+        expected = str(shell.root / "work").encode()
+        shell.wait(lambda: shell.result("chpwd-ran") is not None and
+                   any(value.endswith(expected) for value in shell.osc(7)))
+        self.assertEqual(shell.state()[0], "running")
+        self.assertEqual(shell.osc(2)[-1], draft.encode())
+        shell.raw("done\r")
+        shell.ready_after(generation)
+        shell.wait(lambda: shell.osc(2)[-1] == b"~/work")
+        self.assertTrue(shell.osc(7)[-1].endswith(expected))
+        self.assertEqual(shell.result("chpwd-ran"), expected + b"\n")
+        for marker in ("A", "C", "D"):
+            self.assertEqual(shell.markers().count((marker, block)), 1)
+
+    def test_prompt_restores_cwd_after_program_report_and_preserves_failed_exit_status(self):
+        shell = self.shell(shell_features="title")
+        shell.wait(lambda: shell.osc(2))
+        initial_title = shell.osc(2)[-1]
+        block = shell.state()[3]
+        _, generation = shell.submit("printf '\\033]7;kitty-shell-cwd://program/fake\\a'; false")
+        shell.ready_after(generation)
+        shell.wait(lambda: shell.osc(7) and shell.osc(7)[-1].endswith(str(shell.root.resolve()).encode()))
+        self.assertIn(b"kitty-shell-cwd://program/fake", shell.osc(7))
+        self.assertNotEqual(shell.osc(7)[-1], b"kitty-shell-cwd://program/fake")
+        self.assertEqual(shell.metadata(block, "exit-status"), b"1")
+        self.assertEqual(shell.osc(2)[-1], initial_title)
+
+    def test_disabled_title_feature_does_not_disable_cwd_reporting(self):
+        for features in (None, "", "cursor:blink,path", "notitle"):
+            with self.subTest(features=features):
+                shell = self.shell(shell_features=features)
+                _, generation = shell.submit('cd "$_PROBE_DIR/work"')
+                shell.ready_after(generation)
+                shell.wait(lambda: shell.osc(7) and shell.osc(7)[-1].endswith(b"/work"))
+                self.assertEqual(shell.osc(2), [])
+
+    def test_cwd_and_command_titles_strip_control_bytes_but_keep_literal_paths(self):
+        shell = self.shell(shell_features="title", user_rc="HOST=$'host\\a\\e]52;c;HOST\\a'\n")
+        name = "quarter\\report café %\x07\x1b]52;c;PATH\x07"
+        directory = shell.root / name
+        directory.mkdir()
+        draft = "cd " + shlex.quote(str(directory))
+        _, generation = shell.submit(draft)
+        shell.ready_after(generation)
+        expected = b"kitty-shell-cwd://host]52;c;HOST" + str(directory).encode().replace(b"\x07", b"").replace(b"\x1b", b"")
+        shell.wait(lambda: expected in shell.osc(7))
+        self.assertIn(draft.encode().replace(b"\x07", b"").replace(b"\x1b", b""), shell.osc(2))
+        self.assertEqual(shell.osc(52), [])
+        self.assertEqual(shell.metadata(shell.state()[3], "cwd"), str(directory).encode())
+
+    def test_late_user_prompt_chdir_refreshes_cwd_and_prompt_title(self):
+        shell = self.shell(
+            shell_features="title",
+            user_rc='_probe_first_prompt() { cd "$HOME/work"; '
+            'precmd_functions=(${precmd_functions:#_probe_first_prompt}); }\n'
+            'precmd_functions+=(_probe_first_prompt)\n',
+        )
+        shell.wait(lambda: shell.osc(2) and shell.osc(2)[-1] == b"~/work")
+        self.assertTrue(shell.osc(7)[-1].endswith(b"/work"))
+        self.assertEqual(shell.metadata(shell.state()[3], "cwd"), str(shell.root / "work").encode())
+
+    def test_completion_worker_chdir_keeps_user_hooks_without_publishing_terminal_cwd(self):
+        shell = self.shell(
+            shell_features="title",
+            user_rc='autoload -Uz compinit; compinit -i -D\n'
+            '_probe_chpwd() { print -rn -- "$PWD" > "$HOME/worker-chpwd"; }\n'
+            'chpwd_functions+=(_probe_chpwd)\n'
+            '_probe_completion() { cd "$HOME/work"; compadd -- candidate; }\n'
+            'compdef _probe_completion probe\n',
+        )
+        shell.pump()
+        before = shell.osc(7), shell.osc(2), shell.state()
+        response = shell.complete("probe ")
+        self.assertEqual(response["items"][0]["buffer"], "probe candidate ")
+        self.assertEqual(shell.result("worker-chpwd"), str(shell.root / "work").encode())
+        shell.pump()
+        # ZLE can erase/redraw its empty input after the transport widget;
+        # neither cwd/title announcements nor ownership may change.
+        self.assertEqual((shell.osc(7), shell.osc(2), shell.state()), before)
 
     def test_login_loads_user_files_once_in_normal_order(self):
         shell = self.shell(

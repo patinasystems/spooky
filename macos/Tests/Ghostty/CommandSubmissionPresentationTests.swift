@@ -50,6 +50,8 @@ struct CommandSubmissionPresentationTests {
         let start = ContinuousClock.now
         let outcome14 = state.begin(blockID: "1-1", now: start)
         #expect(outcome14)
+        #expect(state.nextCheckDelay(maximum: .milliseconds(250), now: start) == .milliseconds(100))
+        #expect(state.nextCheckDelay(maximum: .seconds(2), now: start) == .milliseconds(100))
         let outcome15 = !state.expire(now: start + .milliseconds(99))
         #expect(outcome15)
         #expect(state.nextCheckDelay(maximum: .milliseconds(33), now: start + .milliseconds(99)) == .milliseconds(1))

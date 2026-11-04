@@ -36,6 +36,7 @@ final class NativeCommandSurfaceHost: NSView {
     private let terminalButton = NSButton(title: "Use Terminal", target: nil, action: nil)
     private let draftButton = NSButton(title: "View Draft", target: nil, action: nil)
     private var synchronizing = false
+    private var observedLayoutSize: NSSize?
     private var background = NSColor.black
     private var docking = CommandInputDocking()
     private var diagnosticLayout: [String: Double]?
@@ -65,6 +66,7 @@ final class NativeCommandSurfaceHost: NSView {
             button.target = self
         }
         editButton.action = #selector(editCommand)
+        editButton.toolTip = "Return to native input (⌘⌥Return)"
         terminalButton.action = #selector(useTerminal)
         draftButton.action = #selector(viewDraft)
         editor.onTextChanged = { [weak session] in session?.setDraft($0) }
@@ -130,7 +132,10 @@ final class NativeCommandSurfaceHost: NSView {
     override func layout() {
         super.layout()
         if let echoContainerSize, echoContainerSize != bounds.size { session.cancelSubmittedEcho() }
+        let sizeChanged = observedLayoutSize != bounds.size
+        observedLayoutSize = bounds.size
         synchronize()
+        if sizeChanged { session.terminalGeometryChanged() }
     }
 
     override func viewDidMoveToWindow() {
@@ -141,6 +146,7 @@ final class NativeCommandSurfaceHost: NSView {
         paths.pointerExited()
         refreshAccent()
         synchronize()
+        if window != nil { session.terminalGeometryChanged() }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -190,9 +196,16 @@ final class NativeCommandSurfaceHost: NSView {
     @objc private func echoWindowChanged(_ notification: Notification) {
         guard let changed = notification.object as? NSWindow, changed === window else { return }
         session.cancelSubmittedEcho()
+        if notification.name == NSWindow.didChangeOcclusionStateNotification,
+           changed.occlusionState.contains(.visible) {
+            session.terminalGeometryChanged()
+        }
     }
 
-    @objc private func echoSpaceChanged() { session.cancelSubmittedEcho() }
+    @objc private func echoSpaceChanged() {
+        session.cancelSubmittedEcho()
+        if window?.isOnActiveSpace == true { session.terminalGeometryChanged() }
+    }
 
     private func publishAccent() {
         guard let surface = surfaceView.surface else { accentPresentation = nil; return }
@@ -213,6 +226,7 @@ final class NativeCommandSurfaceHost: NSView {
             self?.viewportPresentation = nil
             self?.paths.pointerExited()
             self?.synchronize()
+            self?.session.terminalGeometryChanged()
         }
     }
 
@@ -471,7 +485,11 @@ final class NativeCommandSurfaceHost: NSView {
         }
     }
 
-    @objc private func pathViewportChanged() { paths.geometryWillChange(); paths.refresh() }
+    @objc private func pathViewportChanged() {
+        paths.geometryWillChange()
+        paths.refresh()
+        session.terminalGeometryChanged()
+    }
 
     private func layoutNotice(foreground: NSColor) {
         let message = session.notice

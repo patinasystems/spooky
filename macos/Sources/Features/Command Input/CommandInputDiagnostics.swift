@@ -23,7 +23,7 @@ enum CommandInputDiagnostics {
 
     /// CPU/application milestones, never evidence that pixels reached a display.
     enum Stage: String, Sendable {
-        case inputReceived, inputHandled, textDidChange
+        case inputReceived, inputHandled, scrollInput, textDidChange
         case completionRequested, completionResponseReceived, completionPresentationUpdated
         case submissionBegin, submissionResizeReady, submissionRequestPublished
         case submissionTriggerQueued, submissionReceiptObserved

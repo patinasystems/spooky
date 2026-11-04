@@ -139,6 +139,17 @@ There is no stdout pipe, second text renderer, screenshot reconstruction, or
 plaintext replay. Headers show metadata from the command's original context,
 rather than reusing the current directory for older commands.
 
+Completion and history use the typed `ghostty_surface_native_input_request`
+transport. It writes only a fixed shell-widget trigger, preserving the transcript
+viewport and selection; ordinary Ghostty text actions retain their usual scroll
+behavior. Submission explicitly returns to the live prompt before dispatch.
+
+Native geometry refreshes immediately on prompt boundaries, scrollbar updates,
+font/cell changes, and host resize/scale/visibility events. Busy or unapplied
+resize snapshots receive a bounded asynchronous retry. A 250 ms visible recovery
+check handles missed events (2 seconds while inactive); it is not a display clock.
+A newly retained submission echo wakes its existing 100 ms deadline immediately.
+
 The core tracks tagged OSC 133 boundaries with pins that follow terminal cells.
 The embedded API exposes their geometry, terminal cell size, cursor position,
 primary-screen state, actual scrollback presence, and whether the viewport is at the live bottom. The native
@@ -191,6 +202,19 @@ search paths/definitions, options, and the main keymap. It chains existing ZLE
 hooks. Spooky’s block header owns the visible primary prompt; theme hooks still
 run and see their own saved prompt values. Arbitrary asynchronous prompt rewrites
 and widgets requiring direct ZLE editing need separate compatibility work.
+
+The native adapter also restores the upstream cwd/title announcements that the
+private startup path bypasses. OSC 7 reports the logical working directory at
+each prompt and through a chained `chpwd` hook, including `cd` inside a running
+command. Prompt reporting restores the shell directory after a foreground
+program publishes its own cwd. OSC 2 uses upstream-style directory/command
+titles only when `GHOSTTY_SHELL_FEATURES` includes `title` (the core derives this
+from `shell-integration-features`). These announcements strip control bytes and
+print path backslashes literally, as upstream does. Block metadata retains the
+original raw cwd. The adapter remains the sole owner of its OSC 133 markers;
+it does not load a second copy of upstream prompt integration. Completion
+workers retain user directory hooks but omit the adapter's terminal cwd hook,
+so a completion function's private `cd` cannot change the real pane's cwd.
 
 The app atomically publishes a request containing:
 

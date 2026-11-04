@@ -162,9 +162,10 @@ final class CommandInputSession {
                 let active = self?.needsGeometryUpdates == true
                 if active { self?.refreshGeometry() }
                 do {
-                    // Parser notifications drive ownership transitions. This
-                    // cadence is only the ordinary geometry/recovery fallback.
-                    let maximum: Duration = .milliseconds(active ? 33 : 250)
+                    // Boundaries, scrollbar changes, and host resize/scale
+                    // events drive geometry. This is missed-event recovery,
+                    // not a second display clock scanning the transcript.
+                    let maximum: Duration = .milliseconds(active ? 250 : 2_000)
                     let delay = self?.submissionPresentation.nextCheckDelay(maximum: maximum, now: .now) ?? maximum
                     try await Task.sleep(for: delay)
                 } catch {
@@ -177,14 +178,20 @@ final class CommandInputSession {
     func terminalBoundaryChanged() {
         CommandInputDiagnostics.mark(.boundaryNotified, id: submissionInputID)
         fileEvents?.requestRefresh(immediate: true)
+        terminalGeometryChanged()
+    }
+
+    /// Refresh immediately for core/host geometry events. Busy reads coalesce
+    /// into one short retry task and never wait for the parser on MainActor.
+    func terminalGeometryChanged() {
         guard surfaceView?.surface != nil, !refreshGeometry(), boundaryRefreshTask == nil else { return }
-        // The notification is sent after the parser unlocks, but the renderer
-        // can acquire the same mutex before this callback. Retry briefly without
-        // blocking MainActor; ordinary geometry polling remains a fallback.
+        // The renderer may own the mutex, or IO may still be applying its
+        // coalesced resize (25 ms). Retry briefly without blocking MainActor;
+        // the slower recovery check remains a fallback under sustained load.
         boundaryRefreshTask = Task { [weak self] in
             defer { self?.boundaryRefreshTask = nil }
-            for _ in 0..<8 {
-                do { try await Task.sleep(for: .milliseconds(1)) } catch { return }
+            for attempt in 0..<16 {
+                do { try await Task.sleep(for: .milliseconds(attempt < 8 ? 1 : 4)) } catch { return }
                 guard let self, !Task.isCancelled else { return }
                 if self.refreshGeometry() { return }
             }
@@ -230,7 +237,7 @@ final class CommandInputSession {
                                           message: "History cancelled. Press Up to try again."))
                     return
                 }
-                guard surfaceView.surfaceModel?.perform(action: "text:\\x1b[99;3~") == true else {
+                guard self.sendShellRequest(GHOSTTY_NATIVE_INPUT_REQUEST_HISTORY) else {
                     throw BridgeError.unavailable("The terminal rejected the history request.")
                 }
                 let response = try await historyBridge.waitForResponse(to: request, generation: generation)
@@ -244,6 +251,11 @@ final class CommandInputSession {
                                      message: error.localizedDescription))
             }
         }
+    }
+
+    private func sendShellRequest(_ request: ghostty_native_input_request_e) -> Bool {
+        guard let surface = surfaceView?.surface, surfaceView?.readonly != true else { return false }
+        return ghostty_surface_native_input_request(surface, request)
     }
 
     func cancelHistory() { historyTask?.cancel() }
@@ -271,7 +283,7 @@ final class CommandInputSession {
                                              message: "Completion cancelled. Press Tab to try again."))
                     return
                 }
-                guard surfaceView.surfaceModel?.perform(action: "text:\\x1b[99;2~") == true else {
+                guard self.sendShellRequest(GHOSTTY_NATIVE_INPUT_REQUEST_COMPLETION) else {
                     throw BridgeError.unavailable("The terminal rejected the completion request.")
                 }
                 let response = try await completionBridge.waitForResponse(to: request, generation: generation)
@@ -322,7 +334,7 @@ final class CommandInputSession {
         // Retain the native draft, focus, and grid reservation until the core
         // parses this command's ownership boundary or the next ready prompt.
         changed()
-        // Wake a potentially dormant 250 ms geometry fallback immediately.
+        // Wake a dormant geometry fallback immediately.
         // Parsed boundary notifications drive the prompt handoff itself.
         startGeometryUpdates()
         submissionTask = Task { [weak self, bridge] in
@@ -353,14 +365,14 @@ final class CommandInputSession {
                 guard let self, self.pending?.id == request.id, !Task.isCancelled else { return }
                 // This action writes only the dedicated widget trigger, never the command.
                 // Its shell widget validates the private file's prompt generation again.
-                guard let model = self.surfaceView?.surfaceModel else {
+                guard self.surfaceView?.surface != nil else {
                     throw BridgeError.unavailable("The terminal rejected the submit trigger.")
                 }
                 guard CommandSubmissionGate.dispatch(text: text, begin: {
                     guard let surface = self.surfaceView?.surface else { return false }
                     return ghostty_surface_begin_native_empty_submission(surface)
                 }, cancel: { self.cancelSubmissionPresentation() }, trigger: {
-                    model.perform(action: "text:\\x1b[99;1~")
+                    self.sendShellRequest(GHOSTTY_NATIVE_INPUT_REQUEST_SUBMIT)
                 }) else { throw BridgeError.unavailable("The terminal rejected the submit trigger.") }
                 CommandInputDiagnostics.mark(.submissionTriggerQueued, id: inputID)
                 CommandInputDiagnostics.end(dispatchTiming)
@@ -524,7 +536,7 @@ final class CommandInputSession {
         finishHandoffIfReady()
         presentReadyPrompt()
         // The first ready file can arrive while the dormant loop is sleeping.
-        // Start observing its parsed prompt now, not up to 250 ms later.
+        // Start observing its parsed prompt now instead of waiting for recovery.
         if !hadFirstPrompt && receivedFirstPrompt && surfaceView != nil { startGeometryUpdates() }
         if presentationKey != previous { changed() }
         if receivedFirstPrompt && pending == nil {
@@ -580,8 +592,14 @@ final class CommandInputSession {
         CommandInputDiagnostics.mark(.submissionHandoffReleased, id: submissionInputID)
         if layout.primary, layout.lastStartedBlockID == handoff.blockID, !draft.isEmpty {
             cancelSubmittedEcho()
-            if submissionPresentation.begin(blockID: handoff.blockID, now: .now), onRetainSubmittedEcho?() != true {
-                cancelSubmittedEcho()
+            if submissionPresentation.begin(blockID: handoff.blockID, now: .now) {
+                if onRetainSubmittedEcho?() == true {
+                    // A new 100 ms presentation deadline must interrupt a
+                    // sleeping 250 ms geometry recovery check immediately.
+                    startGeometryUpdates()
+                } else {
+                    cancelSubmittedEcho()
+                }
             }
         }
         self.handoff = nil
@@ -655,7 +673,11 @@ final class CommandInputSession {
             CommandInputDiagnostics.record(.geometryBusy)
             return false
         }
-        guard updated != layout || !hasEditorFont else { return true }
+        // A valid snapshot can still describe the old grid while IO applies a
+        // queued resize. Publish it, but keep the event's bounded retry alive.
+        let desired = ghostty_surface_size(surface)
+        let sizeApplied = updated.rows > 0 && updated.rows == desired.rows && updated.columns == desired.columns
+        guard updated != layout || !hasEditorFont else { return sizeApplied }
         CommandInputDiagnostics.record(.geometryChanged)
         if updated.blocks.map(\.id) != layout.blocks.map(\.id) {
             fileEvents?.requestRefresh()
@@ -668,7 +690,7 @@ final class CommandInputSession {
             }
         }
         receiveLayout(updated)
-        return true
+        return sizeApplied
     }
 
     /// Apply the same owned geometry value used by the real core and fixtures.
