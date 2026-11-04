@@ -13,6 +13,7 @@ final class CommandTextView: NSTextView {
     var onSubmit: (String) -> Bool = { _ in false }
     var onUseTerminal: () -> Void = {}
     var onDeferredPromptKey: (NSEvent) -> Bool = { _ in false }
+    var onTerminalKey: (NSEvent) -> Void = { _ in }
     var onFocusChanged: (Bool) -> Void = { _ in }
     var onContentHeightChanged: (CGFloat) -> Void = { _ in }
     var onRequestCompletion: (CommandCompletionRequest) -> Void = { _ in }
@@ -125,7 +126,10 @@ final class CommandTextView: NSTextView {
             CommandInputDiagnostics.end(diagnostic)
             CommandInputDiagnostics.endInput(input)
         }
-        guard acceptsCommandEdits else { _ = onDeferredPromptKey(event); return }
+        guard acceptsCommandEdits else {
+            if !onDeferredPromptKey(event) { onTerminalKey(event) }
+            return
+        }
         // Let the input method consume Return/Escape while composing. A Return
         // that commits an IME candidate must never also execute the command.
         guard !hasMarkedText() else {

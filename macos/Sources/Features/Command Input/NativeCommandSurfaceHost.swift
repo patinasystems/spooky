@@ -104,6 +104,7 @@ final class NativeCommandSurfaceHost: NSView {
         editor.onContentHeightChanged = { [weak self] _ in self?.synchronize() }
         session.onChange = { [weak self] in self?.synchronize() }
         editor.textView.onDeferredPromptKey = { [weak session] in session?.deferPromptKey($0) ?? false }
+        editor.textView.onTerminalKey = { [weak self] in self?.surfaceView.keyDown(with: $0) }
         session.onReplayPromptKey = { [weak self] event, inputID in
             guard let self else { return }
             CommandInputDiagnostics.withInputID(inputID) {

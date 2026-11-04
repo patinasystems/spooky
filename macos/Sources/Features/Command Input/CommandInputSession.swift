@@ -457,22 +457,24 @@ final class CommandInputSession {
         CommandInputDiagnostics.mark(.terminalFrameAttached, id: submissionInputID ?? lastSubmissionInputID)
     }
 
-    /// Preserve type-ahead once ordered ZLE readiness arrives, including the
-    /// gap before B parses. Only the matching presented B can replay it into
-    /// the editor. Running programs keep normal terminal input.
+    /// Replay one event at a time: Return may transfer ownership again before
+    /// the following event. The host routes each to its current input owner.
     private func replayPromptKeys() {
         let keys = promptKeys
         promptKeys.removeAll(keepingCapacity: true)
         for key in keys { onReplayPromptKey?(key.event, key.inputID) }
     }
 
+    /// Retain editing keys through submission and ready-before-presentation.
+    /// A parsed C can replay them to a foreground program; native editing waits
+    /// for its matching presented B. Interrupts remain ordinary terminal input.
     func deferPromptKey(_ event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.control), event.charactersIgnoringModifiers == "c" {
             promptKeys.removeAll(keepingCapacity: true)
             return false
         }
-        guard ready, layout.nativeStateRevision > 0, !failed, !terminalRequested,
-              attachedPromptGeneration != generation,
+        guard layout.nativeStateRevision > 0, !failed, !terminalRequested,
+              pending != nil || handoff != nil || (ready && attachedPromptGeneration != generation),
               CommandInputShortcut.routesToEditor(event, promptIsEditable: true, windowIsKey: true,
                                                    terminalOwnsKeyboard: true, hasMarkedText: false) else { return false }
         guard promptKeys.count < 256 else { NSSound.beep(); return true }
@@ -691,6 +693,9 @@ final class CommandInputSession {
             presentedBlockID = currentBlockID
             requestEditorFocus()
         } else { focusRequest = 0 }
+        // Acceptance and a parsed C authorize foreground type-ahead. A fast
+        // next prompt instead keeps it queued until that prompt is presented.
+        if !ready { replayPromptKeys() }
     }
 
     private func presentReadyPrompt() {

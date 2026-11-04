@@ -4,6 +4,32 @@ import Testing
 
 @MainActor
 struct CommandTextViewTests {
+    @Test func blockedNativeInputRetainsTypeAheadAndForwardsTerminalInterrupts() throws {
+        let view = CommandTextView(frame: .zero, textContainer: nil)
+        view.acceptsCommandEdits = false
+        var retained: [UInt16] = []
+        var terminal: [UInt16] = []
+        view.onDeferredPromptKey = { event in
+            guard event.modifierFlags.isDisjoint(with: .control) else { return false }
+            retained.append(event.keyCode)
+            return true
+        }
+        view.onTerminalKey = { terminal.append($0.keyCode) }
+        let enter = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                timestamp: 1, windowNumber: 0, context: nil,
+                                                characters: "\r", charactersIgnoringModifiers: "\r",
+                                                isARepeat: true, keyCode: 36))
+        let interrupt = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .control,
+                                                    timestamp: 2, windowNumber: 0, context: nil,
+                                                    characters: "\u{3}", charactersIgnoringModifiers: "c",
+                                                    isARepeat: false, keyCode: 8))
+        view.keyDown(with: enter)
+        view.keyDown(with: interrupt)
+        #expect(retained == [36])
+        #expect(terminal == [8])
+        #expect(view.string.isEmpty)
+    }
+
     @Test func lsFlagsReplaceFileSuggestionsAndRefreshForStackedOptions() async throws {
         let (view, window) = makeCompletionEditor(draft: "ls ")
         defer { window.close() }
