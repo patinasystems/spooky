@@ -4,6 +4,34 @@ The newest measurements include source-event-to-WindowServer pixels. Older
 sections below describe earlier revisions and app/shell-side timings; they do
 not establish rendering throughput or stock-Ghostty parity.
 
+## Stable native caret during empty submissions, 2026-11-04
+
+Source `ff150dc69` keeps TextKit editable during an empty-command ownership
+handoff and rejects edits/duplicate submits through a separate gate. Previously,
+each pending request disabled NSTextView, removing its insertion point even
+though focus and editor geometry stayed fixed. Readonly, failure, terminal
+handoff and nonempty-command behavior retain their normal editability rules.
+
+The own-window `caret-stable-a` recording covers 60 rapid Return presses plus
+one 2-second held Return. CUA delivered only one event for the held key, so this
+is not proof of physical keyboard autorepeat. All 61 empty requests were
+accepted. Capture retained 1,806 frames with zero missing ROI; 297 observations
+cover the burst plus guards, with no visibility/Space exclusions.
+
+The earlier D recording had 16 short caret dropouts, about 7.8–25.6 ms each,
+during 16 empty submissions. The new recording has **zero short dropouts**:
+complete dim phases are 382–383 ms, alternating with 617–619 ms visible phases.
+Native-frame contact sheets confirm a regular native blink, with no block-cursor
+flash. Editor y=571, height=29, reservation=12 and core rows=34 remain constant.
+Shell handoff is median 10.39 ms, maximum 23.42 ms for the 61 requests; these
+are app-side milestones, not independently attributed blank-block pixel latency.
+Identical blank headers prevent assigning each Return a unique pixel endpoint.
+
+85 focused native test executions pass, including a 20-cycle ownership/caret
+regression, docking and presentation deadline tests. Raw strips, event logs,
+`caret-stable-analysis.json`, `caret-stable-contact.png`, provenance and the
+reproduction script remain under ignored `macos/build-spooky/evidence/2026-11-04-benchmark/`.
+
 ## Fresh stock control, indexing, scrolling and submission, 2026-11-04
 
 The 150 ms cold-typing tail did not reproduce in these admitted pixel samples.
