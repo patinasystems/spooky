@@ -25,7 +25,8 @@ It checks out only the maintenance scripts plus root files, retaining commit
 history for exact counts. It writes a GitHub job summary; it does not build,
 merge, open issues or pull requests, post comments, or publish releases. A green
 status means the report ran, **not** that Spooky contains the latest upstream.
-The first hosted run still needs verification after this workflow is pushed.
+The [first hosted run](https://github.com/patinasystems/spooky/actions/runs/41774416714)
+passed on 2026-11-03.
 
 On 2026-11-03, Spooky `6f5934fda` was **14 commits ahead and 20 behind** upstream
 `c7f68a7f4`, based on common ancestor `0b1729e945978fca4bcd6165d8ac408bf675a7f2`.
@@ -81,7 +82,10 @@ Upstream release, publishing, vouch, milestone, Snap, and artifact-cleanup jobs
 are restricted to exactly `ghostty-org/ghostty`. Their runner labels, secrets,
 release hosts, and contributor policy belong to Ghostty. Spooky must not enable
 them by substituting its repository name. Ordinary inherited test/path gates
-are unchanged; upstream-only skipped jobs are **not Spooky test coverage**.
+are unchanged. The inherited Test summary job now uses the same repository
+guard as its entry job so it cannot wait forever for Ghostty's private runner
+after every test was skipped. Upstream-only skipped jobs are **not Spooky test
+coverage**; porting the native/core build suite to Spooky-owned CI remains work.
 
 **Spooky Release Tools** runs the mocked release-admission and hermetic Git
 tests on Ubuntu/Python 3.12 when those scripts or fsearch provenance inputs
