@@ -313,6 +313,21 @@ class NativeInputBridgeTests(unittest.TestCase):
             {"patina_probe first\\ value", "patina_probe second\\ value"},
         )
 
+    def test_completion_contextual_flags_values_and_positional_arguments(self):
+        shell = self.shell
+        _, generation = shell.submit(
+            "_patina_options() { _arguments '--format=[output format]:format:(json yaml)' '1:action:(build test)'; }\n"
+            "compdef _patina_options patina_options"
+        )
+        shell.ready_after(generation)
+        for draft, expected in [
+            ("patina_options --for", "patina_options --format="),
+            ("patina_options --format=j", "patina_options --format=json "),
+            ("patina_options t", "patina_options test "),
+        ]:
+            response = shell.complete(draft)
+            self.assertIn(expected, {item["buffer"] for item in response["items"]})
+
     def test_completion_multiline_unicode_and_middle_caret(self):
         shell = self.shell
         (shell.root / "日本語 file").touch()

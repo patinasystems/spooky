@@ -65,6 +65,19 @@ UTF-16 token range through normal native editing. Caret/selection changes, loss
 of focus, external edits, and IME composition dismiss stale predictions. Height
 and width changes reposition annotations without cancelling valid suggestions.
 
+Accepting a candidate immediately requests a fresh list at the shell-provided
+cursor position. This supports successive directory levels and subsequent
+arguments without typing another character or pressing Tab to reopen the menu.
+The new list is passive: Return still runs the draft unless the user navigates
+that list. Each acceptance issues one request; receiving a response never
+accepts it or recursively requests another list.
+
+The full command prefix reaches zsh's `compsys`, including existing `compdef`
+and `_arguments` definitions. Those definitions supply command-specific flags,
+option values and positional arguments. Broad fuzzy queries preserve `-` and
+`--` so options are not mistaken for files or positional arguments. Commands
+without a completion definition retain the shell's fallback behavior.
+
 For straightforward arguments, a broader shell query preserves the command and
 directory prefix while asking for options for the active basename. Command-name
 queries retain the first typed character to avoid exhausting the 200-result cap.

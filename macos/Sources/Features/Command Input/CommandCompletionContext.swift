@@ -123,6 +123,11 @@ struct CommandCompletionQuery: Sendable, Equatable {
         let slash = (beforeCaret as NSString).range(of: "/", options: .backwards)
         let directoryLength = slash.location == NSNotFound ? 0 : NSMaxRange(slash)
         var component = body.substring(to: directoryLength)
+        if !command, directoryLength == 0, beforeCaret.hasPrefix("-") {
+            // Preserve option context for compsys/_arguments. An empty broad
+            // token can instead ask the shell for positional arguments/files.
+            component = beforeCaret.hasPrefix("--") ? "--" : "-"
+        }
         if command {
             // The shell caps results at 200. Keeping one typed character avoids
             // enumerating the entire command universe and dropping most names.

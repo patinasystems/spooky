@@ -4,6 +4,38 @@ import Testing
 
 @MainActor
 struct CommandTextViewTests {
+    @Test func tabAcceptanceImmediatelyRequestsTheNextDirectoryAndKeepsReturnPassive() throws {
+        let (view, window) = makeCompletionEditor(draft: "cd do")
+        defer { window.close() }
+        let first = try requestCompletion(from: view)
+        view.receiveCompletions(.init(requestID: first.id, revision: first.revision, items: [
+            .init(displayText: "docs/", detail: "", replacementText: "docs/",
+                  replacementRange: NSRange(location: 3, length: 2))
+        ]))
+        var next: [CommandCompletionRequest] = []
+        view.onRequestCompletion = { next.append($0) }
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
+        let child = try #require(next.first)
+        #expect(next.count == 1)
+        #expect(child.id != first.id)
+        #expect(child.text == "cd docs/")
+        #expect(child.cursorUTF16 == 8)
+        #expect(child.automatic)
+        #expect(view.completions.listVisible)
+        view.receiveCompletions(.init(requestID: child.id, revision: child.revision, items: [
+            .init(displayText: "docs/guides/", detail: "", replacementText: "docs/guides/",
+                  replacementRange: NSRange(location: 3, length: 5))
+        ]))
+        view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
+        #expect(next.count == 2)
+        #expect(next.last?.text == "cd docs/guides/")
+        #expect(view.string == "cd docs/guides/")
+        var submitted: String?
+        view.onSubmit = { submitted = $0; return true }
+        view.keyDown(with: try returnEvent())
+        #expect(submitted == "cd docs/guides/")
+    }
+
     @Test func emptySubmissionKeepsTextKitActiveWithoutAcceptingEditsOrDuplicateReturn() throws {
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 50))
         var submissions = 0
@@ -860,7 +892,7 @@ struct CommandTextViewTests {
         #expect(editor.textView.string == "git chp")
     }
 
-    @Test func automaticMenuAndGhostAppearTogetherAndFirstTabAcceptsWithoutASecondQuery() throws {
+    @Test func automaticMenuAndGhostAppearTogetherAndFirstTabAcceptsThenQueriesNextContext() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         var requests: [CommandCompletionRequest] = []
@@ -877,9 +909,10 @@ struct CommandTextViewTests {
         view.keyDown(with: try keyEvent(code: 48, characters: "\t"))
         manager.endUndoGrouping()
         #expect(view.string == "git checkout")
-        #expect(!view.completions.listVisible)
+        #expect(view.completions.listVisible)
         #expect(view.completions.inlineSuggestion == nil)
-        #expect(requests.count == 1)
+        #expect(requests.count == 2)
+        #expect(requests.last?.text == "git checkout")
         #expect(submissions == 0)
         manager.undo()
         #expect(view.string == "git ch")

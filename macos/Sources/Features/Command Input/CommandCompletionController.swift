@@ -159,7 +159,7 @@ final class CommandCompletionController {
 
     private var canSuggest: Bool {
         guard let textView else { return false }
-        return textView.isEditable && !textView.hasMarkedText()
+        return textView.isEditable && textView.acceptsCommandEdits && !textView.hasMarkedText()
             && textView.selectedRange().length == 0 && textView.selectedRange().location != NSNotFound
             && textView.window?.firstResponder === textView && textView.window?.isKeyWindow == true
             && !textView.isHiddenOrHasHiddenAncestor
@@ -338,7 +338,13 @@ final class CommandCompletionController {
         guard Self.valid(candidate, in: textView.string) else { dismiss(); return }
         dismiss()
         accepting = true
-        defer { accepting = false }
+        defer {
+            accepting = false
+            // Acceptance suppresses ordinary edit callbacks. Query the final
+            // buffer/caret once, after insertion and shell cursor placement,
+            // so a directory or next argument immediately gets its own list.
+            if canSuggest { requestCompletions(showList: true, automatic: true) }
+        }
         textView.breakUndoCoalescing()
         textView.insertText(candidate.replacementText, replacementRange: candidate.replacementRange)
         if let cursor = candidate.cursorUTF16 { textView.setSelectedRange(NSRange(location: cursor, length: 0)) }

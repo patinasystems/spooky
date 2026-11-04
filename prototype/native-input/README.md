@@ -70,7 +70,8 @@ local executor when this separate checkout is only on this Mac.
    at the bottom while the transcript scrolls independently.
 5. Typing shows the best zsh-backed completion as faint text together with a
    compact option list. Tab accepts the selected option immediately; Right
-   accepts its inline preview. Arrows navigate without animation, and typing
+   accepts its inline preview. Acceptance immediately opens suggestions for the
+   new cursor context, including the next directory level. Arrows navigate without animation, and typing
    filters the list with fuzzy matching. Return executes exactly the typed draft
    until you explicitly navigate/request the list, when it accepts the selection.
    Escape dismisses suggestions; Option+Tab inserts a literal tab.

@@ -3,6 +3,16 @@ import Testing
 @testable import Ghostty
 
 struct CommandCompletionContextTests {
+    @Test func optionQueriesKeepTheirDashPrefixAndPrecedingArguments() throws {
+        for (draft, expected) in [("git log --auth", "git log --"), ("ls -al", "ls -"),
+                                  ("tool build --format j", "tool build --format ")] {
+            let query = try #require(CommandCompletionQuery.broadened(text: draft, cursorUTF16: draft.utf16.count))
+            #expect(query.text == expected)
+            #expect(query.cursorUTF16 == expected.utf16.count)
+        }
+        #expect(CommandCompletionQuery.broadened(text: "tool --format=j", cursorUTF16: 15) == nil)
+    }
+
     @Test func argumentQueryPreservesTheCommandAndTrailingArguments() throws {
         let draft = "git ckt --quiet"
         let query = try #require(CommandCompletionQuery.broadened(text: draft, cursorUTF16: 7))
