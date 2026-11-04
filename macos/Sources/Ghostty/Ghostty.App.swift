@@ -781,12 +781,10 @@ extension Ghostty {
                 let presented = action.action.native_input_presented
                 // The bounded pointer belongs to this callback only. Copy it
                 // before even the off-main defensive fallback can enqueue work.
-                let blockID = presented.block_id.flatMap { pointer -> String? in
-                    let bytes = UnsafeBufferPointer(start: UnsafeRawPointer(pointer).assumingMemoryBound(to: UInt8.self),
-                                                    count: 65).prefix { $0 != 0 }
-                    guard !bytes.isEmpty else { return nil }
-                    return String(bytes: bytes, encoding: .utf8)
-                }
+                let bytes = UnsafeBufferPointer(
+                    start: UnsafeRawPointer(presented.block_id).assumingMemoryBound(to: UInt8.self),
+                    count: 65).prefix { $0 != 0 }
+                let blockID = bytes.isEmpty ? nil : String(bytes: bytes, encoding: .utf8)
                 let serial = presented.serial
                 if Thread.isMainThread {
                     MainActor.assumeIsolated {
