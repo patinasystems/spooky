@@ -5037,9 +5037,9 @@ fn showMouse(self: *Surface) void {
 /// will ever return false. We can expand this in the future if it becomes
 /// useful. We did previous/next tab so we could implement #498.
 pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool {
-    // The sole exception is the dedicated native submit widget below. All
-    // other user actions (including search, scroll and selection) release a
-    // pending blank presentation before observing or changing terminal state.
+    // Text releases a pending presentation after escape parsing below. Other
+    // user actions (including search, scroll and selection) release it before
+    // observing or changing terminal state. Private shell requests bypass this.
     if (action != .text) self.cancelNativeSubmission();
     // Forward app-scoped actions to the app. Some app-scoped actions are
     // special-cased here because they do some special things when performed
