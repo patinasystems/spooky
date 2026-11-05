@@ -397,6 +397,7 @@ struct OrderedNativePromptTests {
         session.receiveLayout(first)
         #expect(!session.isEditable)
         #expect(!session.editorVisible)
+        #expect(session.canPrepareNativePrompt)
         session.nativeInputPresented(blockID: nil, serial: 1, promptID: "12-1", generation: "12-3")
         #expect(session.isEditable)
         #expect(session.editorVisible)
@@ -409,6 +410,7 @@ struct OrderedNativePromptTests {
         session.receiveLayout(next)
         #expect(!session.isEditable)
         #expect(!session.editorVisible)
+        #expect(session.canPrepareNativePrompt)
         session.nativeInputPresented(blockID: "12-1", serial: 2, promptID: "12-1", generation: "12-3")
         #expect(!session.isEditable)
         session.nativeInputPresented(blockID: "12-1", serial: 3, promptID: "12-2", generation: "12-4")
@@ -421,6 +423,7 @@ struct OrderedNativePromptTests {
         var first = prompt("12-1", generation: "12-3", revision: 1)
         first.lastPrimaryInputBlockID = nil
         session.receiveLayout(first)
+        #expect(!session.canPrepareNativePrompt)
         let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
                                               timestamp: 1, windowNumber: 0, context: nil,
                                               characters: "a", charactersIgnoringModifiers: "a",
@@ -430,6 +433,7 @@ struct OrderedNativePromptTests {
         #expect(session.deferPromptKey(key))
         first.lastPrimaryInputBlockID = "12-1"
         session.receiveLayout(first)
+        #expect(session.canPrepareNativePrompt)
         session.nativeInputPresented(blockID: nil, serial: 1, promptID: "12-0", generation: "12-2")
         #expect(replayed.isEmpty)
         session.nativeInputPresented(blockID: nil, serial: 2, promptID: "12-1", generation: "12-3")

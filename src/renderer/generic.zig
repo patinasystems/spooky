@@ -1458,6 +1458,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 native_presented_id: [65]u8,
                 native_prompt_id: [65]u8,
                 native_generation: [65]u8,
+                native_layout_pending: bool,
                 native_running: bool,
                 native_awaiting_prompt: bool,
                 native_presentation_valid: bool,
@@ -1634,6 +1635,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .transferring = state.native_viewport.transferring,
                     .program_requested = state.terminal.native_input.program_cursor,
                 });
+                const native_generation: [65]u8 = if (state.native_input_enabled and !state.native_input_terminal_requested and
+                    state.terminal.screens.active_key == .primary and
+                    state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))
+                    state.terminal.native_input.generation
+                else
+                    @splat(0);
                 break :critical .{
                     .links = links,
                     .mouse = state.mouse,
@@ -1648,12 +1655,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             renderer.NativeViewport.promptTailRows(state.terminal) > 0),
                     .native_presented_id = state.terminal.last_started_command_id,
                     .native_prompt_id = state.terminal.native_input.block_id,
-                    .native_generation = if (state.native_input_enabled and !state.native_input_terminal_requested and
-                        state.terminal.screens.active_key == .primary and
-                        state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))
-                        state.terminal.native_input.generation
-                    else
-                        @splat(0),
+                    .native_generation = native_generation,
+                    .native_layout_pending = native_generation[0] != 0 and
+                        (!std.mem.eql(u8, &state.command_chrome.current_id, &state.terminal.native_input.block_id) or
+                            (state.native_viewport.footer_height > 0 and native_viewport.footer_top == null)),
                     // C with no output, and D/A before ready+B, can be separate
                     // PTY reads of one fast command. Coalesce those transitions
                     // for one frame; actual running output never waits.
@@ -1875,6 +1880,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.native_presentation.block_id = critical.native_presented_id;
                     self.native_presentation.acknowledge = critical.native_presentation_valid;
                     self.native_presentation.prompt_id = critical.native_prompt_id;
+                    self.native_presentation.awaiting_native_layout = critical.native_layout_pending;
                     self.native_presentation.generation = if (!self.command_chrome_dirty)
                         critical.native_generation
                     else

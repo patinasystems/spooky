@@ -83,6 +83,12 @@ final class CommandInputSession {
             && ((!presentedFramesRequired && layout.nativeStateRevision == 0) || attachedPromptGeneration == generation)
     }
     private var waitingForPromptLayout: Bool { ready && !promptIsPresentable && !terminalRequested && !failed }
+    /// Prepare the GPU footer/chrome before its frame grants native visibility.
+    /// Keyboard ownership still waits for that exact presented generation.
+    var canPrepareNativePrompt: Bool {
+        ready && layout.hasParsedPrimaryInput(currentBlockID) && prefersNativeInput
+            && pending == nil && handoff == nil && !failed
+    }
     var isEditable: Bool { promptIsPresentable && !terminalRequested && pending == nil && handoff == nil && !failed }
     var historyContext: String? { isEditable ? generation : nil }
     var canReturnToEditor: Bool { promptIsPresentable && pending == nil && handoff == nil && !failed }

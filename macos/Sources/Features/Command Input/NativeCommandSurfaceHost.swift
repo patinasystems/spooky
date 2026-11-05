@@ -312,7 +312,8 @@ final class NativeCommandSurfaceHost: NSView {
                          max(minimumHeight, min(line * 12 + padding * 2, bounds.height * 0.45)))
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission
-        let editing = recovering || (session.editorVisible && geometry.primary && session.currentBlockID != nil)
+        let preparing = session.canPrepareNativePrompt && !recovering
+        let editing = recovering || ((session.editorVisible || preparing) && geometry.primary && session.currentBlockID != nil)
         // Evaluate the prospective inline grid, excluding the dock's own
         // reservation. Retained rows alone can come from an earlier resize.
         let inlineReservation = max(0, height - line) + padding
@@ -323,11 +324,11 @@ final class NativeCommandSurfaceHost: NSView {
         let geometryIsSettled = terminalView.frame == bounds && !terminalView.needsLayout
             && (requestedSize.map { UInt32($0.rows) == geometry.rows && UInt32($0.columns) == geometry.columns } ?? false)
         let placement = docking.placement(layout: geometry, editing: editing, recovering: recovering,
-                                           transferring: transferring,
+                                           transferring: transferring && !preparing,
                                            metrics: .init(editorHeight: height, containerHeight: bounds.height,
                                                           padding: padding, inlineRows: inlineRows,
                                                           geometryIsSettled: geometryIsSettled))
-        let shown = placement.shown
+        let shown = placement.shown && session.editorVisible
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
         // a hollow caret that can move beyond the editor during PTY expansion.
@@ -343,8 +344,8 @@ final class NativeCommandSurfaceHost: NSView {
             let integrated = session.hasNativeIntegration
             let viewport = ViewportPresentation(
                 surface: surface,
-                height: shown && placement.pinned && !recovering ? placement.pinnedOffset : 0,
-                coveredRows: placement.coveredRows, transferring: transferring,
+                height: placement.shown && placement.pinned && !recovering ? placement.pinnedOffset : 0,
+                coveredRows: placement.coveredRows, transferring: transferring && !preparing,
                 backingScale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)).height)
             if viewport != viewportPresentation {
                 ghostty_surface_set_native_input_viewport(surface, viewport.height,
@@ -376,7 +377,8 @@ final class NativeCommandSurfaceHost: NSView {
 
         // Protocol readiness can precede parsed B. Keep the caption tied to
         // the draft that is actually on screen until both can advance together.
-        let chromeID = editing || transferring ? session.presentedBlockID : session.currentBlockID
+        let chromeID = preparing ? session.currentBlockID
+            : (editing || transferring ? session.presentedBlockID : session.currentBlockID)
         let chrome = CommandChromePresentation(
             layout: geometry, metadata: session.blockMetadata, currentID: chromeID,
             pinnedOffset: placement.pinnedOffset,

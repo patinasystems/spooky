@@ -9,6 +9,7 @@ pub const Snapshot = extern struct {
     prompt_id: [65]u8 = @splat(0),
     generation: [65]u8 = @splat(0),
     defer_prompt: bool = false,
+    awaiting_native_layout: bool = false,
 };
 
 pub const Tracker = struct {
@@ -21,6 +22,11 @@ pub const Tracker = struct {
     pub fn admit(self: *Tracker, snapshot: Snapshot, notify: bool) struct { present: bool, notify: bool } {
         if (snapshot.serial < self.latest_serial) return .{ .present = false, .notify = false };
         self.latest_serial = snapshot.serial;
+        // A parsed B can precede the UI's preparation of its footer. Such a
+        // frame is an ordering barrier, not a presentable prompt. The prepared
+        // chrome revision wakes a fresh draw; running/alternate output never
+        // enters this gate and does not wait for native UI.
+        if (snapshot.awaiting_native_layout) return .{ .present = false, .notify = false };
         if (!notify) return .{ .present = true, .notify = false };
         const command_changed = snapshot.acknowledge and snapshot.block_id[0] != 0 and
             !std.mem.eql(u8, &snapshot.block_id, &self.notified_id);
@@ -31,6 +37,25 @@ pub const Tracker = struct {
         return .{ .present = true, .notify = true };
     }
 };
+
+test "native presentation never exposes ready pixels built before native footer preparation" {
+    const t = std.testing;
+    var tracker: Tracker = .{};
+    var ready: Snapshot = .{ .serial = 5, .awaiting_native_layout = true, .acknowledge = true };
+    @memcpy(ready.block_id[0..3], "cmd");
+    @memcpy(ready.generation[0..3], "new");
+    for ([_]bool{ false, true }) |notify| {
+        const withheld = tracker.admit(ready, notify);
+        try t.expect(!withheld.present and !withheld.notify);
+    }
+    // Neither a queued older image nor a synchronous resize may bypass it.
+    try t.expect(!tracker.admit(.{ .serial = 4 }, true).present);
+    ready.serial = 6;
+    ready.awaiting_native_layout = false;
+    const prepared = tracker.admit(ready, true);
+    try t.expect(prepared.present and prepared.notify);
+    try t.expect(!tracker.admit(ready, true).notify);
+}
 
 test "native presentation acknowledges new IDs once and rejects older queued frames" {
     const t = std.testing;
