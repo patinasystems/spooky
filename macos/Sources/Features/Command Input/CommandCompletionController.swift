@@ -375,6 +375,7 @@ final class CommandCompletionController {
     }
 
     private func accept(at index: Int) {
+        guard !submissionPresentationHeld else { return }
         if filePicker.isActive { acceptFile(at: index); return }
         guard let textView, let request, isCurrent(request), items.indices.contains(index), textView.isEditable else {
             dismiss()

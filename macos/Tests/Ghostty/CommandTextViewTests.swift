@@ -1042,6 +1042,8 @@ struct CommandTextViewTests {
         #expect(view.completions.listVisible)
         #expect(view.completionItems.map(\.displayText) == labels)
         #expect(view.completions.inlineSuggestion == preview)
+        view.completions.popup?.onAccept(1)
+        #expect(view.string == "git ch")
         #expect(window.firstResponder === view)
         view.completions.setSubmissionPresentationHeld(false)
         #expect(view.completionItems.isEmpty)
