@@ -50,6 +50,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         addSubview(scrollView)
 
         textView.managesInsertionPoint = true
+        // The editor owns an opaque, theme-matched viewport. Transparent
+        // TextKit drawing can retain its old backing pixels across hide/show
+        // until an ancestor display pass, after the terminal has presented.
+        textView.drawsBackground = true
         textView.onCaretChanged = { [weak self] in self?.caret.update(restart: true) }
         textView.delegate = self
         textView.onSubmit = { [weak self] text in self?.onSubmit(text) ?? false }
@@ -95,7 +99,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         if let container = textView.textContainer { textView.layoutManager?.ensureLayout(for: container) }
         textView.completePresentedFocusRequest()
         caret.update(restart: restartCaret)
-        displayIfNeeded()
+        textView.displayIfNeeded()
     }
 
     /// Acknowledgement and history loading are explicit external edits. Normal
@@ -104,6 +108,9 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         guard textView.string != text else { return }
         textView.draftWillChangeExternally()
         textView.string = text
+        // External acknowledgements bypass didChangeText. Invalidate the old
+        // glyphs explicitly, including the transition to an empty document.
+        textView.needsDisplay = true
         textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
         if text.isEmpty { textView.undoManager?.removeAllActions() }
         textView.reportContentHeight()
