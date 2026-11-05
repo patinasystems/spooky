@@ -100,10 +100,18 @@ final class CommandInputView: NSView, NSTextViewDelegate {
 
     override func layout() {
         super.layout()
-        scrollView.frame = NSRect(x: Self.padding, y: Self.padding,
-                                  width: max(1, bounds.width - Self.padding * 2),
-                                  height: max(1, bounds.height - Self.padding * 2))
+        let viewport = NSRect(x: Self.padding, y: Self.padding,
+                              width: max(1, bounds.width - Self.padding * 2),
+                              height: max(1, bounds.height - Self.padding * 2))
+        let resized = scrollView.frame.size != viewport.size
+        scrollView.frame = viewport
         scrollView.tile()
+        // TextKit may reveal the caret before the host grows/caps this view.
+        // Reconcile only an actual viewport resize; ordinary wheel scrolling
+        // must never jump back to the selection.
+        if resized, window?.firstResponder === textView {
+            textView.scrollRangeToVisible(textView.selectedRange())
+        }
         updateScrollFades()
         textView.updateCompletionPosition()
         caret.update()

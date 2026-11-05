@@ -186,8 +186,21 @@ final class CommandPathInteractionController: NSObject {
     }
 
     func mouseDown(with event: NSEvent) {
+        if CommandInputDiagnostics.isEnabled {
+            CommandInputDiagnostics.mark(.selectionIntercept, id: nil,
+                                         metrics: ["count": Double(event.clickCount), "timestamp": event.timestamp])
+        }
         guard let view else { return }
         let point = view.convert(event.locationInWindow, from: nil)
+        if event.type == .leftMouseDown, event.clickCount > 1 {
+            // AppKit may keep delivering a repeated press to the first click's
+            // view, even when hitTest now declines it. Complete the real
+            // terminal gesture instead of swallowing that second/third press.
+            pointerExited()
+            click = Click(event: event, point: point, id: 0, workingDirectory: nil, forwarding: true)
+            callbacks.forward(event)
+            return
+        }
         guard claimsClick(at: point, modifiers: event.modifierFlags, clickCount: event.clickCount) else { return }
         // Pointer movement shares a pending line lookup, but a real press must
         // validate the exact token under that press rather than an earlier byte.
@@ -281,6 +294,10 @@ final class CommandPathInteractionController: NSObject {
         let up = release ?? click.release
         self.click = click
         clearHover()
+        if CommandInputDiagnostics.isEnabled {
+            CommandInputDiagnostics.mark(.selectionForward, id: nil,
+                                         metrics: ["count": Double(click.event.clickCount), "timestamp": click.event.timestamp])
+        }
         callbacks.forward(click.event)
         if let up {
             self.click = nil

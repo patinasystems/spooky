@@ -95,6 +95,20 @@ struct CommandPathInteractionTests {
         #expect(fixture.copies.isEmpty && fixture.forwards.isEmpty)
     }
 
+    @Test func repeatedPressDeliveredToTheOriginalPathViewForwardsACompleteSelectionGesture() throws {
+        let fixture = PathInteractionFixture()
+        defer { fixture.window.close() }
+        let controller = fixture.controller()
+        controller.mouseDown(with: try fixture.event(.leftMouseDown))
+        controller.mouseUp(with: try fixture.event(.leftMouseUp))
+        #expect(fixture.copies.count == 1)
+        controller.mouseDown(with: try fixture.event(.leftMouseDown, clickCount: 2))
+        controller.mouseDragged(with: try fixture.event(.leftMouseDragged, x: 30))
+        controller.mouseUp(with: try fixture.event(.leftMouseUp))
+        #expect(fixture.forwards == [.leftMouseDown, .leftMouseDragged, .leftMouseUp])
+        #expect(fixture.copies.count == 1)
+    }
+
     @Test func slowFilesystemFailsOpenAndLateResolutionCannotCopy() async throws {
         let fixture = PathInteractionFixture()
         defer { fixture.window.close() }

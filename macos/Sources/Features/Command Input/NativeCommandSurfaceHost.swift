@@ -428,6 +428,11 @@ final class NativeCommandSurfaceHost: NSView {
     override func scrollWheel(with event: NSEvent) { surfaceView.scrollWheel(with: event) }
 
     override func mouseDown(with event: NSEvent) {
+        if event.clickCount > 1, let footerHitTop,
+           convert(event.locationInWindow, from: nil).y >= footerHitTop {
+            paths.pointerExited()
+            return
+        }
         if let surface = surfaceView.surface { ghostty_surface_cancel_native_submission(surface) }
         paths.mouseDown(with: event)
     }

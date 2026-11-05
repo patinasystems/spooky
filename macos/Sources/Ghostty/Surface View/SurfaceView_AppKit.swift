@@ -770,6 +770,10 @@ extension Ghostty {
             // being used to transfer split focus. Consume it so it does not
             // get forwarded to the terminal as a mouse click.
             if NSApp.isActive && window.isKeyWindow {
+                if CommandInputDiagnostics.isEnabled {
+                    CommandInputDiagnostics.mark(.selectionFocus, id: nil,
+                                                 metrics: ["count": Double(event.clickCount), "timestamp": event.timestamp])
+                }
                 window.makeFirstResponder(self)
                 // Repeated clicks must select text even when the first press
                 // only transferred focus from the native command editor.
@@ -984,6 +988,12 @@ extension Ghostty {
         }
 
         override func mouseDown(with event: NSEvent) {
+            if CommandInputDiagnostics.isEnabled {
+                CommandInputDiagnostics.mark(.selectionPress, id: nil, metrics: [
+                    "count": Double(event.clickCount), "timestamp": event.timestamp,
+                    "x": event.locationInWindow.x, "y": event.locationInWindow.y
+                ])
+            }
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             if commandPathInteraction != nil {
