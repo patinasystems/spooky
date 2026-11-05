@@ -32,7 +32,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     private var scrollObserver: NSObjectProtocol?
 
     static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat, pinned: Bool = false) -> CGFloat {
-        min(max(line + padding * 2, content), max(1, terminal * (pinned ? 0.9 : 1)))
+        let available = max(1, terminal)
+        let minimum = pinned ? max(200, line + padding * 2) : line + padding * 2
+        let maximum = pinned ? min(available, max(200, available * 0.5)) : available
+        return min(max(minimum, content), maximum)
     }
 
     /// Updated synchronously by TextKit; the notification stays deferred so a
@@ -64,7 +67,12 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.updateScrollFades() } }
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.updateScrollFades()
+                self?.caret.update()
+            }
+        }
         addSubview(scrollView)
         for fade in [topFade, bottomFade] {
             fade.zPosition = 2

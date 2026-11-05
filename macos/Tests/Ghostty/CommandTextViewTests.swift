@@ -305,9 +305,13 @@ struct CommandTextViewTests {
 
     @Test func editorGrowsNaturallyWithViewportAndDockedLimits() {
         #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600) == 600)
-        #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600, pinned: true) == 540)
+        #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600, pinned: true) == 300)
         #expect(CommandInputView.viewportHeight(content: 350, line: 18, terminal: 600) == 350)
-        #expect(CommandInputView.viewportHeight(content: 350, line: 18, terminal: 600, pinned: true) == 350)
+        #expect(CommandInputView.viewportHeight(content: 350, line: 18, terminal: 600, pinned: true) == 300)
+        #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 600, pinned: true) == 200)
+        #expect(CommandInputView.viewportHeight(content: 250, line: 18, terminal: 600, pinned: true) == 250)
+        #expect(CommandInputView.viewportHeight(content: 800, line: 18, terminal: 300, pinned: true) == 200)
+        #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 150, pinned: true) == 150)
         #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 600) == 30)
         #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 20) == 20)
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))

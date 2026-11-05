@@ -293,7 +293,7 @@ final class NativeCommandSurfaceHost: NSView {
         }
         var placement = place(editorHeight: inlineHeight)
         // Decide docking against the same prospective inline grid in both
-        // modes. Only then apply the dock's 90% cap, before publishing any UI
+        // modes. Only then apply the dock's height limits, before publishing any UI
         // geometry. The different caps cannot feed back into the decision.
         let resolvedHeight = CommandInputView.viewportHeight(content: preparedHeight, line: line,
                                                              terminal: bounds.height, pinned: placement.pinned)
