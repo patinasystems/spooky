@@ -3,7 +3,12 @@
 The public Apple Silicon preview is
 <https://downloads.patinasystems.com/spooky/Spooky.dmg>.
 Open the image, drag Spooky to Applications, then launch it there.
-The app installs alongside Ghostty and uses the existing Ghostty configuration.
+The app installs alongside Ghostty with independent preferences and configuration.
+On macOS, Spooky reads `~/.config/spooky/config.ghostty` (or legacy `config`)
+and `~/Library/Application Support/com.patinasystems.spooky/config.ghostty`.
+User themes belong in `~/.config/spooky/themes`; caches and crash/SSH state are
+namespaced to Spooky too. Stock Ghostty's files are never loaded implicitly.
+To migrate settings, copy them explicitly into Spooky's configuration.
 
 The currently published preview is **Apple Development signed, not Developer ID
 signed or notarized**. macOS may require explicit approval in Privacy & Security

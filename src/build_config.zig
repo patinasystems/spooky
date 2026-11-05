@@ -55,7 +55,10 @@ pub const i18n: bool = config.i18n;
 /// There are many places that don't use this variable so simply swapping
 /// this variable is NOT ENOUGH to change the bundle ID. I just wanted to
 /// avoid it in Zig coe as much as possible.
-pub const bundle_id = "com.mitchellh.ghostty";
+pub const bundle_id = if (builtin.target.os.tag == .macos) "com.patinasystems.spooky" else "com.mitchellh.ghostty";
+
+/// User configuration and state must never overlap an installed stock Ghostty.
+pub const config_app_name = if (builtin.target.os.tag == .macos) "spooky" else "ghostty";
 
 /// True if we should have "slow" runtime safety checks. The initial motivation
 /// for this was terminal page/pagelist integrity checks. These were VERY
