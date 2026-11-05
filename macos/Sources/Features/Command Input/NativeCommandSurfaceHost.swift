@@ -184,6 +184,7 @@ final class NativeCommandSurfaceHost: NSView {
         guard let changed = notification.object as? NSWindow, changed === window else { return }
         session.cancelSubmissionVisualHold()
         if notification.name == NSWindow.didResignKeyNotification {
+            editor.dismissCompletions()
             editor.requestFocus(token: 0)
         }
         if notification.name == NSWindow.didBecomeKeyNotification, canFocusEditor {
@@ -196,6 +197,7 @@ final class NativeCommandSurfaceHost: NSView {
     }
 
     @objc private func submissionSpaceChanged() {
+        editor.dismissCompletions()
         session.cancelSubmissionVisualHold()
         if window?.isOnActiveSpace == true { session.terminalBecameVisible() }
     }
