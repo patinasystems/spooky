@@ -24,6 +24,7 @@ final class CommandInputSession {
     private var lastSubmissionInputID: UInt64?
     private(set) var suppressesShellCursor = false
     private var keepsEmptyCaret = false
+    private(set) var submittedEditorRetired = false
     private var promptKeys: [(event: NSEvent, inputID: UInt64?)] = []
 
     let directory: URL
@@ -362,6 +363,7 @@ final class CommandInputSession {
         submissionTiming = CommandInputDiagnostics.begin(.submissionToBoundary)
         pending = request
         keepsEmptyCaret = text.isEmpty
+        submittedEditorRetired = false
         suppressesShellCursor = true
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
@@ -449,20 +451,27 @@ final class CommandInputSession {
     func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil) {
         defer { onFramePresented?() }
         if submissionPresentation.presented(blockID: blockID, serial: serial) { onReleaseSubmittedEcho?() }
+        if let blockID, !blockID.isEmpty, !keepsEmptyCaret,
+           blockID == pending?.blockID || blockID == handoff?.blockID {
+            // A matching C frame already contains the committed command. A
+            // delayed receipt must not leave the old native draft over it.
+            submittedEditorRetired = true
+        }
         attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
         // IOSurface assignment and this native layout happen in the same main
         // transaction, outside the renderer lock. Never show a future prompt
         // over pixels from the previous command.
+        terminalGeometryChanged()
         if generation != nil {
-            terminalGeometryChanged()
             if promptID == currentBlockID { presentReadyPrompt() }
-            changed()
             if isEditable && promptID == currentBlockID {
                 onPromptPresented?()
                 replayPromptKeys()
             }
         }
-        CommandInputDiagnostics.mark(.terminalFrameAttached, id: submissionInputID ?? lastSubmissionInputID)
+        changed()
+        CommandInputDiagnostics.mark(.terminalFrameAttached, id: submissionInputID ?? lastSubmissionInputID,
+                                     metrics: ["ready": generation == nil ? 0 : 1, "serial": Double(serial)])
     }
 
     /// Replay one event at a time: Return may transfer ownership again before

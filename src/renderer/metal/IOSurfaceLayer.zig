@@ -73,6 +73,10 @@ pub fn setPresentationCallback(self: *IOSurfaceLayer, callback: PresentationCall
 ///
 /// Makes sure to do so on the main thread to avoid visual artifacts.
 pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface, snapshot: NativePresentation.Snapshot) !void {
+    self.enqueueSurface(surface, snapshot, true);
+}
+
+fn enqueueSurface(self: *IOSurfaceLayer, surface: *IOSurface, snapshot: NativePresentation.Snapshot, inline_if_main: bool) void {
     // We retain the surface to make sure it's not GC'd
     // before we can set it as the contents of the layer.
     //
@@ -90,7 +94,7 @@ pub inline fn setSurface(self: *IOSurfaceLayer, surface: *IOSurface, snapshot: N
 
     // We check if we're on the main thread and run the block directly if so.
     const NSThread = objc.getClass("NSThread").?;
-    if (NSThread.msgSend(bool, "isMainThread", .{})) {
+    if (inline_if_main and NSThread.msgSend(bool, "isMainThread", .{})) {
         setSurfaceCallback(&block);
     } else {
         // NOTE: The block will be copied when we pass it to dispatch_async,
@@ -111,6 +115,13 @@ pub inline fn setSurfaceSync(self: *IOSurfaceLayer, surface: *IOSurface, snapsho
     // A synchronous resize draw holds the renderer's draw lock. It establishes
     // frame ordering but must not reenter AppKit/native APIs under that lock.
     if (!self.presentation.tracker.admit(snapshot, false).present) return;
+    if (self.presentation.tracker.needsNotification(snapshot)) {
+        // Native boundary frames must never become visible without their
+        // AppKit handoff. Always enqueue, even on main: this caller holds the
+        // draw lock and invoking native layout here could reenter the renderer.
+        self.enqueueSurface(surface, snapshot, false);
+        return;
+    }
     self.layer.setProperty("contents", surface);
 }
 

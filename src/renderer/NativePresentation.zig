@@ -17,6 +17,13 @@ pub const Tracker = struct {
     notified_id: [65]u8 = @splat(0),
     notified_generation: [65]u8 = @splat(0),
 
+    /// A new native boundary needs an AppKit callback outside the draw lock.
+    pub fn needsNotification(self: *const Tracker, snapshot: Snapshot) bool {
+        return (snapshot.acknowledge and snapshot.block_id[0] != 0 and
+            !std.mem.eql(u8, &snapshot.block_id, &self.notified_id)) or
+            !std.mem.eql(u8, &snapshot.generation, &self.notified_generation);
+    }
+
     /// Run only after size validation. Synchronous resize draws establish the
     /// ordering barrier but cannot reenter the app while the draw lock is held.
     pub fn admit(self: *Tracker, snapshot: Snapshot, notify: bool) struct { present: bool, notify: bool } {
@@ -30,8 +37,7 @@ pub const Tracker = struct {
         if (!notify) return .{ .present = true, .notify = false };
         const command_changed = snapshot.acknowledge and snapshot.block_id[0] != 0 and
             !std.mem.eql(u8, &snapshot.block_id, &self.notified_id);
-        const prompt_changed = !std.mem.eql(u8, &snapshot.generation, &self.notified_generation);
-        if (!command_changed and !prompt_changed) return .{ .present = true, .notify = false };
+        if (!self.needsNotification(snapshot)) return .{ .present = true, .notify = false };
         if (command_changed) self.notified_id = snapshot.block_id;
         self.notified_generation = snapshot.generation;
         return .{ .present = true, .notify = true };
@@ -82,10 +88,13 @@ test "native presentation synchronous draw defers app callback without losing ac
     var tracker: Tracker = .{};
     var value: Snapshot = .{ .serial = 8, .acknowledge = true };
     @memcpy(value.block_id[0..3], "cmd");
+    try t.expect(tracker.needsNotification(value));
     const sync = tracker.admit(value, false);
     try t.expect(sync.present and !sync.notify);
+    try t.expect(tracker.needsNotification(value));
     try t.expect(!tracker.admit(.{ .serial = 7 }, true).present);
     try t.expect(tracker.admit(value, true).notify);
+    try t.expect(!tracker.needsNotification(value));
     value.serial = 9;
     try t.expect(!tracker.admit(value, true).notify);
 }

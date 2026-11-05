@@ -329,6 +329,7 @@ final class NativeCommandSurfaceHost: NSView {
                                                           padding: padding, inlineRows: inlineRows,
                                                           geometryIsSettled: geometryIsSettled))
         let shown = placement.shown && session.editorVisible
+            && !(transferring && session.submittedEditorRetired)
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
         // a hollow caret that can move beyond the editor during PTY expansion.
