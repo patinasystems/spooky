@@ -159,6 +159,17 @@ fn setSurfaceCallback(
     }
     const admission = presentation.tracker.admit(block.snapshot, true);
     if (!admission.present) return;
+
+    // Native AppKit views can draw/flush while the callback lays them out.
+    // Keep their backing-layer updates and this IOSurface replacement in one
+    // explicit transaction, including any synchronous resize draw it causes.
+    // Ordinary streaming frames retain the existing implicit transaction path.
+    const transaction = objc.getClass("CATransaction").?;
+    if (admission.notify) {
+        transaction.msgSend(void, "begin", .{});
+        transaction.msgSend(void, "setDisableActions:", .{true});
+    }
+    defer if (admission.notify) transaction.msgSend(void, "commit", .{});
     layer.setProperty("contents", surface);
     // The native visual handoff changes in this same main-thread transaction,
     // after the new pixels are attached; GPU completion alone is insufficient.

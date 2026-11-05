@@ -91,9 +91,11 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     }
 
     func completePresentedInput(restartCaret: Bool = true) {
+        layoutSubtreeIfNeeded()
+        if let container = textView.textContainer { textView.layoutManager?.ensureLayout(for: container) }
         textView.completePresentedFocusRequest()
-        displayIfNeeded()
         caret.update(restart: restartCaret)
+        displayIfNeeded()
     }
 
     /// Acknowledgement and history loading are explicit external edits. Normal

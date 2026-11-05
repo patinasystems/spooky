@@ -117,6 +117,14 @@ final class NativeCommandSurfaceHost: NSView {
             guard let self else { return }
             self.editor.completePresentedInput()
         }
+        session.onFramePresented = { [weak self] in
+            guard let self else { return }
+            // Executed inside the IOSurface's explicit transaction. AppKit
+            // must publish the retired echo/empty editor backing stores now,
+            // not at a separate display pass after Metal has already changed.
+            self.layoutSubtreeIfNeeded()
+            self.displayIfNeeded()
+        }
         session.onRetainSubmittedEcho = { [weak self] in self?.retainSubmittedEcho() ?? false }
         session.onReleaseSubmittedEcho = { [weak self] in
             self?.submittedEcho?.clear()

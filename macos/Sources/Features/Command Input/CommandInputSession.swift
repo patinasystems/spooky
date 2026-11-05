@@ -15,6 +15,7 @@ final class CommandInputSession {
     var onRetainSubmittedEcho: (() -> Bool)?
     var onReleaseSubmittedEcho: (() -> Void)?
     var onPromptPresented: (() -> Void)?
+    var onFramePresented: (() -> Void)?
     var onReplayPromptKey: ((NSEvent, UInt64?) -> Void)?
     private var submissionPresentation = CommandSubmissionPresentation()
     private var hasEditorFont = false
@@ -440,6 +441,7 @@ final class CommandInputSession {
     }
 
     func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil) {
+        defer { onFramePresented?() }
         if submissionPresentation.presented(blockID: blockID, serial: serial) { onReleaseSubmittedEcho?() }
         attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
         // IOSurface assignment and this native layout happen in the same main
