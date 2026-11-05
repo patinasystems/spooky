@@ -58,5 +58,5 @@ vec4 cell_bg() {
 }
 
 void main() {
-    out_FragColor = cell_bg();
+    out_FragColor = cell_bg() * scroll_opacity(gl_FragCoord.y);
 }

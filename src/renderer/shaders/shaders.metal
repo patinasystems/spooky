@@ -31,7 +31,19 @@ struct Uniforms {
   float native_clip_bottom;
   float command_padded_y;
   float command_padded_separator_y;
+  float4 scroll_fade;
 };
+
+// Fade scrolling content into the existing surface background. All colors
+// are premultiplied; pinned input and screen-space overlays stay untouched.
+float scroll_opacity(float y, constant Uniforms& uniforms) {
+  float opacity = 1.0;
+  if (uniforms.scroll_fade.z > 0)
+    opacity *= smoothstep(0.0, uniforms.scroll_fade.z, y - uniforms.scroll_fade.x);
+  if (uniforms.scroll_fade.w > 0)
+    opacity *= smoothstep(0.0, uniforms.scroll_fade.w, uniforms.scroll_fade.y - y);
+  return opacity;
+}
 
 //-------------------------------------------------------------------
 // Color Functions
@@ -510,7 +522,7 @@ fragment float4 cell_bg_fragment(
     cell_color,
     uniforms.use_display_p3,
     uniforms.use_linear_blending
-  );
+  ) * scroll_opacity(in.position.y, uniforms);
 }
 
 //-------------------------------------------------------------------
@@ -732,6 +744,8 @@ fragment float4 cell_text_fragment(
     const float bottom = top + float(uniforms.grid_size.y) * uniforms.cell_size.y;
     if (in.position.y < top || in.position.y >= bottom) discard_fragment();
   }
+  const float fade = (in.chrome_flags & (IS_PINNED_COMMAND | IS_PATH_OVERLAY)) != 0
+      ? 1.0 : scroll_opacity(in.position.y, uniforms);
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
@@ -739,7 +753,7 @@ fragment float4 cell_text_fragment(
   );
 
   switch (in.atlas) {
-    case ATLAS_SOLID: return in.color;
+    case ATLAS_SOLID: return in.color * fade;
     default:
     case ATLAS_GRAYSCALE: {
       // Our input color is always linear.
@@ -788,7 +802,7 @@ fragment float4 cell_text_fragment(
       // the correct way to apply the mask.
       color *= a;
 
-      return color;
+      return color * fade;
     }
 
     case ATLAS_COLOR: {
@@ -798,7 +812,7 @@ fragment float4 cell_text_fragment(
 
       // If we're doing linear blending, we can return this right away.
       if (uniforms.use_linear_blending) {
-        return color;
+        return color * fade;
       }
 
       // Otherwise we need to unlinearize the color. Since the alpha is
@@ -807,7 +821,7 @@ fragment float4 cell_text_fragment(
       color = unlinearize(color);
       color.rgb *= color.a;
 
-      return color;
+      return color * fade;
     }
   }
 }
@@ -902,6 +916,6 @@ fragment float4 image_fragment(
 
   rgba.rgb *= rgba.a;
 
-  return rgba;
+  return rgba * scroll_opacity(in.position.y, uniforms);
 }
 

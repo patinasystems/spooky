@@ -18,5 +18,5 @@ void main() {
 
     rgba.rgb *= vec3(rgba.a);
 
-    out_FragColor = rgba;
+    out_FragColor = rgba * scroll_opacity(screen_size.y - gl_FragCoord.y);
 }

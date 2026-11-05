@@ -1468,6 +1468,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 native_viewport: renderer.NativeViewport.Resolved,
                 path_hover: renderer.PathHover.Snapshot,
                 scroll_offset_y: f32,
+                scroll_fade: [4]f32,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1656,6 +1657,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .links = links,
                     .mouse = state.mouse,
                     .scroll_offset_y = scroll_offset_y,
+                    .scroll_fade = native_viewport.fadeBounds(self.size, raw_scrollbar, pixel_scroll and !state.native_input_terminal_requested),
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
@@ -1797,6 +1799,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.native_viewport = critical.native_viewport;
                 if (self.uniforms.scroll_offset_y != critical.scroll_offset_y) self.cells_rebuilt = true;
                 self.uniforms.scroll_offset_y = critical.scroll_offset_y;
+                if (!std.meta.eql(self.uniforms.scroll_fade, critical.scroll_fade)) self.cells_rebuilt = true;
+                self.uniforms.scroll_fade = critical.scroll_fade;
                 self.uniforms.native_clip_bottom = if (self.terminal_state.overscan.below > 0)
                     @floatFromInt(critical.native_viewport.contentBottom(self.size))
                 else if (critical.native_viewport.clip_bottom) |v| @floatFromInt(v) else -1;

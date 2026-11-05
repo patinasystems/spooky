@@ -30,6 +30,7 @@ layout(binding = 1, std140) uniform Globals {
     uniform float native_clip_bottom;
     uniform float command_padded_y;
     uniform float command_padded_separator_y;
+    uniform vec4 scroll_fade;
 };
 
 // Bools
@@ -161,3 +162,13 @@ vec4 load_color(
 }
 
 //----------------------------------------------------------------------------//
+
+// Premultiplied content fades directly in the existing fragment passes.
+float scroll_opacity(float y) {
+    float opacity = 1.0;
+    if (scroll_fade.z > 0.0)
+        opacity *= smoothstep(0.0, scroll_fade.z, y - scroll_fade.x);
+    if (scroll_fade.w > 0.0)
+        opacity *= smoothstep(0.0, scroll_fade.w, scroll_fade.y - y);
+    return opacity;
+}

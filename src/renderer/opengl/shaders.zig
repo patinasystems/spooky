@@ -203,6 +203,7 @@ pub const Uniforms = extern struct {
     native_clip_bottom: f32 align(4) = -1,
     command_padded_y: f32 align(4) = 0,
     command_padded_separator_y: f32 align(4) = 0,
+    scroll_fade: [4]f32 align(16) = @splat(0),
 
     const Bools = packed struct(u32) {
         /// Whether the cursor is 2 cells wide.

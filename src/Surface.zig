@@ -4998,7 +4998,7 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
     const viewport = self.renderer_state.nativeViewport(self.size);
     const y = @max(0, ypos + viewport.scroll_offset_y - @as(f64, @floatFromInt(self.size.padding.top))) /
         @as(f64, @floatFromInt(self.size.cell.height));
-    return .{ .x = grid.x, .y = @intFromFloat(@min(y, @as(f64, @floatFromInt(viewport.hitRows() -| 1)))) };
+    return .{ .x = grid.x, .y = @intFromFloat(@min(y, @as(f64, @floatFromInt(viewport.hitRows(self.size) -| 1)))) };
 }
 
 fn visibleRows(self: *Surface) usize {

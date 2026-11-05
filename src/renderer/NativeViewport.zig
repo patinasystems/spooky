@@ -16,8 +16,24 @@ pub const Resolved = struct {
     footer_top: ?u32 = null,
     scroll_offset_y: f32 = 0,
 
-    pub fn hitRows(self: Resolved) usize {
-        return self.rows + @intFromBool(self.scroll_offset_y > 0);
+    pub fn hitRows(self: Resolved, size: Size) usize {
+        if (size.cell.height == 0) return self.rows;
+        const pixels = @as(f32, @floatFromInt(self.contentBottom(size) -| size.padding.top)) + self.scroll_offset_y;
+        return @intFromFloat(@ceil(pixels / @as(f32, @floatFromInt(size.cell.height))));
+    }
+
+    /// Edge coordinates and fade lengths, in physical pixels. No history walk,
+    /// layer mask, intermediate texture, or independent animation clock.
+    pub fn fadeBounds(self: Resolved, size: Size, bar: terminal.Scrollbar, enabled: bool) [4]f32 {
+        if (!enabled or size.cell.height == 0) return @splat(0);
+        const top: f32 = @floatFromInt(size.padding.top);
+        const bottom: f32 = @floatFromInt(self.contentBottom(size));
+        const height: f32 = @floatFromInt(size.cell.height);
+        const maximum = bar.total -| bar.len;
+        const length = @min(height * 0.75, @max(0, (bottom - top) * 0.5));
+        const above = @as(f32, @floatFromInt(bar.offset)) * height + self.scroll_offset_y;
+        const below = @as(f32, @floatFromInt(maximum -| bar.offset)) * height - self.scroll_offset_y;
+        return .{ top, bottom, std.math.clamp(above, 0, length), std.math.clamp(below, 0, length) };
     }
 
     pub fn sameGeometry(self: Resolved, other: Resolved) bool {
@@ -47,7 +63,9 @@ pub fn resolve(self: NativeViewport, term: *const terminal.Terminal, size: Size)
     if (self.covered_rows == 0 and available < term.rows) return plain;
     const rows = @min(available, term.rows -| @as(usize, self.covered_rows));
     if (rows == 0) return plain;
-    return .{ .rows = rows, .clip_bottom = size.padding.top + @as(u32, @intCast(rows)) * size.cell.height, .footer_top = top };
+    // Row count controls scroll range; the pixel clip controls paint. Preserve
+    // the partial last row instead of leaving a row-rounded blank strip.
+    return .{ .rows = rows, .clip_bottom = top, .footer_top = top };
 }
 
 /// O(at most three prompt rows), independent of scrollback and viewport. The
@@ -91,7 +109,7 @@ test "native viewport pixel crop does not move the footer or change scroll range
     var fractional = plain;
     fractional.scroll_offset_y = 7;
     try t.expect(plain.sameGeometry(fractional));
-    try t.expectEqual(@as(usize, 11), fractional.hitRows());
+    try t.expectEqual(@as(usize, 11), fractional.hitRows(.{ .screen = .{ .width = 800, .height = 600 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{} }));
     const bar: terminal.Scrollbar = .{ .total = 100, .len = 12, .offset = 20 };
     try t.expectEqualDeep(plain.scrollbar(bar), fractional.scrollbar(bar));
 }
@@ -120,7 +138,7 @@ test "native viewport compact tail preserves scroll range at live end and histor
         try t.expectEqual(@as(u2, 2), promptTailRows(&term));
         const view = test_footer.resolve(&term, test_size);
         try t.expectEqual(@as(usize, 32), view.rows);
-        try t.expectEqual(@as(?u32, 546), view.clip_bottom);
+        try t.expectEqual(@as(?u32, 554), view.clip_bottom);
         try t.expectEqual(@as(?u32, 554), view.footer_top);
         const raw = term.screens.active.pages.scrollbar();
         const visible = view.scrollbar(raw);
@@ -183,7 +201,7 @@ test "native viewport background output without C revokes crop before fallback r
     try term.resize(t.allocator, .{ .cols = 80, .rows = 32, .preserve_prompt = state.preservesNativePrompt() });
     const settled = fallback.resolve(&term, test_size);
     try t.expectEqual(@as(usize, 32), settled.rows);
-    try t.expectEqual(@as(?u32, 546), settled.clip_bottom);
+    try t.expectEqual(@as(?u32, 554), settled.clip_bottom);
     const text = try term.plainString(t.allocator);
     defer t.allocator.free(text);
     try t.expect(std.mem.indexOf(u8, text, "background output") != null);
@@ -253,4 +271,33 @@ test "native viewport image output on blank prompt tail refuses compaction" {
     try t.expect(!Chrome.headerHasVisibleOutput(screen.cursor.page_pin.*));
     try t.expectEqual(@as(u2, 0), promptTailRows(&term));
     try t.expectEqual(null, test_footer.resolve(&term, test_size).clip_bottom);
+}
+
+test "native viewport fills the fractional row up to the sticky footer" {
+    const t = std.testing;
+    var term = try testPrompt();
+    defer term.deinit(t.allocator);
+    term.scrollViewport(.top);
+    var view = test_footer.resolve(&term, test_size);
+    try t.expectEqual(view.footer_top, view.clip_bottom);
+    try t.expectEqual(@as(usize, 33), view.hitRows(test_size));
+    view.scroll_offset_y = 16;
+    try t.expectEqual(@as(usize, 34), view.hitRows(test_size));
+    try t.expectEqual(@as(u32, 554), view.contentBottom(test_size));
+}
+
+test "native viewport fades only the edges with overflow and disables for programs" {
+    const t = std.testing;
+    var viewport: Resolved = .{ .rows = 32, .clip_bottom = 554 };
+    var bar: terminal.Scrollbar = .{ .total = 100, .len = 34, .offset = 0 };
+    try t.expectEqual([4]f32{ 2, 554, 0, 12.75 }, viewport.fadeBounds(test_size, bar, true));
+    bar.offset = 66;
+    try t.expectEqual([4]f32{ 2, 554, 12.75, 0 }, viewport.fadeBounds(test_size, bar, true));
+    bar.offset = 65;
+    viewport.scroll_offset_y = 16;
+    try t.expectEqual([4]f32{ 2, 554, 12.75, 1 }, viewport.fadeBounds(test_size, bar, true));
+    try t.expectEqual(@as([4]f32, @splat(0)), viewport.fadeBounds(test_size, bar, false));
+    bar = .{ .total = 34, .len = 34, .offset = 0 };
+    viewport.scroll_offset_y = 0;
+    try t.expectEqual([4]f32{ 2, 554, 0, 0 }, viewport.fadeBounds(test_size, bar, true));
 }

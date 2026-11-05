@@ -29,11 +29,13 @@ void main() {
         float bottom = grid_padding.x + float(unpack2u16(grid_size_packed_2u16).y) * cell_size.y;
         if (y < grid_padding.x || y >= bottom) discard;
     }
+    float fade = (in_data.chrome_flags & (8u | 64u)) != 0u
+        ? 1.0 : scroll_opacity(screen_size.y - gl_FragCoord.y);
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
 
     switch (in_data.atlas) {
-        case ATLAS_SOLID: out_FragColor = in_data.color; return;
+        case ATLAS_SOLID: out_FragColor = in_data.color * fade; return;
         default:
         case ATLAS_GRAYSCALE:
         {
@@ -83,7 +85,7 @@ void main() {
             // the correct way to apply the mask.
             color *= a;
 
-            out_FragColor = color;
+            out_FragColor = color * fade;
             return;
         }
 
@@ -95,7 +97,7 @@ void main() {
 
             // If we are doing linear blending, we can return this right away.
             if (use_linear_blending) {
-                out_FragColor = color;
+                out_FragColor = color * fade;
                 return;
             }
 
@@ -105,7 +107,7 @@ void main() {
             color = unlinearize(color);
             color.rgb *= vec3(color.a);
 
-            out_FragColor = color;
+            out_FragColor = color * fade;
             return;
         }
     }

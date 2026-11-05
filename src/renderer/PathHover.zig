@@ -282,7 +282,7 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
         y >= @as(f32, @floatFromInt(viewport.contentBottom(size)))) return null;
     const hover_x: u32 = @intFromFloat(px / @as(f32, @floatFromInt(size.cell.width)));
     const hover_y: u32 = @intFromFloat(py / @as(f32, @floatFromInt(size.cell.height)));
-    if (hover_x >= term.cols or hover_y >= viewport.hitRows()) return null;
+    if (hover_x >= term.cols or hover_y >= viewport.hitRows(size)) return null;
     var hovered = screen.pages.pin(.{ .viewport = .{ .x = @intCast(hover_x), .y = hover_y } }) orelse return null;
     if (hovered.rowAndCell().cell.wide == .spacer_tail and hovered.x > 0) hovered.x -= 1;
     if (hovered.rowAndCell().cell.semantic_content != .output) return null;
@@ -312,7 +312,7 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
     var row_y = first_y;
     var found_hover = false;
     rows = 0;
-    scan: while (row_y < viewport.hitRows() and rows < rect_capacity) : ({
+    scan: while (row_y < viewport.hitRows(size) and rows < rect_capacity) : ({
         row_y += 1;
         rows += 1;
     }) {
@@ -343,7 +343,7 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
         }
         if (!row.wrap) break;
         if (rows + 1 == rect_capacity) return null;
-        if (uri == null and row_y + 1 >= viewport.hitRows()) return null;
+        if (uri == null and row_y + 1 >= viewport.hitRows(size)) return null;
         row_pin = row_pin.down(1) orelse break;
     }
     while (result.probe.text_len > 0 and result.probe.text[result.probe.text_len - 1] == ' ') result.probe.text_len -= 1;
