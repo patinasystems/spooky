@@ -127,6 +127,55 @@ struct CommandTextViewTests {
         #expect(view.selectedRange().length == 0)
     }
 
+    @Test func nativeKeyboardInterpreterPreservesMultilineReplacementDeletionAndUndo() throws {
+        let original = "echo 👋\nprintf café\npwd"
+        let (view, window) = makeCompletionEditor(draft: original)
+        defer { window.close() }
+        let manager = try #require(view.undoManager)
+        // These synthetic keys share one test-runner event. Model separate
+        // editing events explicitly rather than inheriting its outer group.
+        manager.groupsByEvent = false
+        let selected = (original as NSString).range(of: "👋\nprintf café")
+        view.setSelectedRange(selected)
+
+        manager.beginUndoGrouping()
+        view.keyDown(with: try keyEvent(code: 0, characters: "a"))
+        manager.endUndoGrouping()
+        #expect(view.string == "echo a\npwd")
+        #expect(view.selectedRange() == NSRange(location: 6, length: 0))
+
+        view.breakUndoCoalescing()
+        manager.beginUndoGrouping()
+        view.keyDown(with: try keyEvent(code: 51, characters: "\u{7f}"))
+        manager.endUndoGrouping()
+        #expect(view.string == "echo \npwd")
+        manager.undo()
+        #expect(view.string == "echo a\npwd")
+        manager.undo()
+        #expect(view.string == original)
+    }
+
+    @Test func nativeKeyboardInterpreterKeepsModifiedArrowSelection() throws {
+        let (view, window) = makeCompletionEditor(draft: "abc\nxyz")
+        defer { window.close() }
+        view.setSelectedRange(NSRange(location: 3, length: 0))
+        view.keyDown(with: try keyEvent(code: 123, characters: "\u{f702}", modifiers: .shift))
+        #expect(view.selectedRange() == NSRange(location: 2, length: 1))
+        view.keyDown(with: try keyEvent(code: 12, characters: "q"))
+        #expect(view.string == "abq\nxyz")
+        #expect(view.selectedRange() == NSRange(location: 3, length: 0))
+    }
+
+    @Test func nativeKeyboardInterpreterDoesNotEditReadOnlyText() throws {
+        let (view, window) = makeCompletionEditor(draft: "preserve me")
+        defer { window.close() }
+        view.isEditable = false
+        view.setSelectedRange(NSRange(location: 0, length: 11))
+        view.keyDown(with: try keyEvent(code: 0, characters: "a"))
+        view.keyDown(with: try keyEvent(code: 51, characters: "\u{7f}"))
+        #expect(view.string == "preserve me")
+    }
+
     @Test func modifiedReturnInsertsNewlineWithoutSubmitting() throws {
         let view = CommandTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100), textContainer: nil)
         view.string = "echo firstecho second"

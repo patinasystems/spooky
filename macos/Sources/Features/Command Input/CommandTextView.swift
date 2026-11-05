@@ -135,7 +135,7 @@ final class CommandTextView: NSTextView {
         guard !hasMarkedText() else {
             history.reset()
             dismissCompletions()
-            super.keyDown(with: event)
+            interpretKeyEvents([event])
             return
         }
         // The `@` picker owns Command-Up and its list keys before native
@@ -149,13 +149,13 @@ final class CommandTextView: NSTextView {
         let modified = !event.modifierFlags.isDisjoint(with: [.shift, .control, .option, .command])
         if arrow {
             // Modified arrows belong entirely to native selection/navigation.
-            if modified { super.keyDown(with: event); return }
+            if modified { interpretKeyEvents([event]); return }
             if completions.listVisible {
                 _ = completions.handleKey(event)
                 return
             }
             if history.isBrowsing {
-                if !history.navigate(older: event.keyCode == 126) { super.keyDown(with: event) }
+                if !history.navigate(older: event.keyCode == 126) { interpretKeyEvents([event]) }
                 return
             }
         }
@@ -180,7 +180,11 @@ final class CommandTextView: NSTextView {
             if event.modifierFlags.contains(.option) { onUseTerminal() }
 
         default:
-            super.keyDown(with: event)
+            // Keep AppKit's input context, IME, and key bindings. NSTextView's
+            // keyDown wrapper also synchronously hides the mouse through
+            // WindowServer on every key. Pointer tracking owns our cursor;
+            // interpreting directly avoids that unrelated round trip.
+            interpretKeyEvents([event])
         }
     }
 
