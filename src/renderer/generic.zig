@@ -2904,7 +2904,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .bools = flags,
                     .grid_pos = .{ 0, header.row },
                     .color = .{ bg.r, bg.g, bg.b, 255 },
-                    .glyph_size = .{ 0, self.size.cell.height * @as(u32, header.rows) },
+                    // The pinned band's background starts at its separator,
+                    // not its layout origin. Otherwise it erases the exposed
+                    // content strip even when the VT clip reaches that edge.
+                    .glyph_size = .{ 0, self.size.cell.height * @as(u32, header.rows) -
+                        if (header.pinned) @as(u32, @intFromFloat(caption_layout.separator_y)) else 0 },
+                    .bearings = .{ 0, if (header.pinned) @intFromFloat(caption_layout.separator_y) else 0 },
                 });
                 try self.command_cells.append(self.alloc, .{
                     .atlas = .solid,

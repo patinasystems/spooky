@@ -63,9 +63,12 @@ pub fn resolve(self: NativeViewport, term: *const terminal.Terminal, size: Size)
     if (self.covered_rows == 0 and available < term.rows) return plain;
     const rows = @min(available, term.rows -| @as(usize, self.covered_rows));
     if (rows == 0) return plain;
-    // Row count controls scroll range; the pixel clip controls paint. Preserve
-    // the partial last row instead of leaving a row-rounded blank strip.
-    return .{ .rows = rows, .clip_bottom = top, .footer_top = top };
+    // The dock always paints a two-row caption. Its separator is inset from
+    // the layout origin: content must reach that painted edge, including the
+    // partial last row. Row count still owns the unchanged scroll range.
+    const caption = Chrome.captionLayout(term.cols, size.cell.height, size.command_padding, 2);
+    const edge = @min(size.screen.height, top + @as(u32, @intFromFloat(caption.separator_y)));
+    return .{ .rows = rows, .clip_bottom = edge, .footer_top = top };
 }
 
 /// O(at most three prompt rows), independent of scrollback and viewport. The
@@ -100,7 +103,7 @@ pub fn promptTailRows(term: *const terminal.Terminal) u2 {
     return if (legacy) 2 else 3;
 }
 
-const test_size: Size = .{ .screen = .{ .width = 800, .height = 600 }, .cell = .{ .width = 8, .height = 17 }, .padding = .{ .top = 2, .bottom = 20 } };
+const test_size: Size = .{ .screen = .{ .width = 800, .height = 600 }, .cell = .{ .width = 8, .height = 17 }, .padding = .{ .top = 2, .bottom = 20 }, .command_padding = 6 };
 const test_footer: NativeViewport = .{ .footer_height = 46, .covered_rows = 2 };
 
 test "native viewport pixel crop does not move the footer or change scroll range" {
@@ -138,7 +141,7 @@ test "native viewport compact tail preserves scroll range at live end and histor
         try t.expectEqual(@as(u2, 2), promptTailRows(&term));
         const view = test_footer.resolve(&term, test_size);
         try t.expectEqual(@as(usize, 32), view.rows);
-        try t.expectEqual(@as(?u32, 554), view.clip_bottom);
+        try t.expectEqual(@as(?u32, 558), view.clip_bottom);
         try t.expectEqual(@as(?u32, 554), view.footer_top);
         const raw = term.screens.active.pages.scrollbar();
         const visible = view.scrollbar(raw);
@@ -201,7 +204,7 @@ test "native viewport background output without C revokes crop before fallback r
     try term.resize(t.allocator, .{ .cols = 80, .rows = 32, .preserve_prompt = state.preservesNativePrompt() });
     const settled = fallback.resolve(&term, test_size);
     try t.expectEqual(@as(usize, 32), settled.rows);
-    try t.expectEqual(@as(?u32, 554), settled.clip_bottom);
+    try t.expectEqual(@as(?u32, 558), settled.clip_bottom);
     const text = try term.plainString(t.allocator);
     defer t.allocator.free(text);
     try t.expect(std.mem.indexOf(u8, text, "background output") != null);
@@ -279,11 +282,11 @@ test "native viewport fills the fractional row up to the sticky footer" {
     defer term.deinit(t.allocator);
     term.scrollViewport(.top);
     var view = test_footer.resolve(&term, test_size);
-    try t.expectEqual(view.footer_top, view.clip_bottom);
+    try t.expectEqual(view.footer_top.? + 4, view.clip_bottom.?);
     try t.expectEqual(@as(usize, 33), view.hitRows(test_size));
     view.scroll_offset_y = 16;
     try t.expectEqual(@as(usize, 34), view.hitRows(test_size));
-    try t.expectEqual(@as(u32, 554), view.contentBottom(test_size));
+    try t.expectEqual(@as(u32, 558), view.contentBottom(test_size));
 }
 
 test "native viewport fades only the edges with overflow and disables for programs" {
