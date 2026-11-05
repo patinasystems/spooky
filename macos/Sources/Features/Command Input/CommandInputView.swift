@@ -29,6 +29,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     private var configuredBackgroundColor: NSColor?
     private let topFade = CAGradientLayer()
     private let bottomFade = CAGradientLayer()
+    private var scrollObserver: NSObjectProtocol?
 
     static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat) -> CGFloat {
         min(max(line + padding * 2, content), max(1, terminal * 0.5))
@@ -55,7 +56,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.documentView = textView
         scrollView.verticalScrollElasticity = .none
         scrollView.horizontalScrollElasticity = .none
-        scrollView.onViewportChanged = { [weak self] in self?.updateScrollFades() }
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.updateScrollFades() } }
         addSubview(scrollView)
         for fade in [topFade, bottomFade] {
             fade.zPosition = 2
@@ -92,6 +96,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
             + "Return accepts after menu navigation; otherwise it runs the typed command. "
             + "Up on the first visual line recalls history; Down on the last restores your draft. "
             + "Option Tab inserts a tab. Shift Return adds a line. Type @ for files."
+    }
+
+    deinit {
+        if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
     }
 
     required init?(coder: NSCoder) {
@@ -268,7 +276,6 @@ final class CommandInputView: NSView, NSTextViewDelegate {
 final class CommandEditorScrollView: NSScrollView {
     var documentContentHeight: CGFloat = 0
     var onTerminalScroll: ((NSEvent) -> Void)?
-    var onViewportChanged: (() -> Void)?
     // AppKit may refine NSTextView's frame after a measured resize. The real
     // scroll extent, not the earlier text-height estimate, owns wheel routing
     // and fade visibility at the exact scroll limits.
@@ -277,11 +284,6 @@ final class CommandEditorScrollView: NSScrollView {
     override func scrollWheel(with event: NSEvent) {
         guard overflow > 0.5 else { onTerminalScroll?(event); return }
         super.scrollWheel(with: event)
-    }
-
-    override func reflectScrolledClipView(_ cView: NSClipView) {
-        super.reflectScrolledClipView(cView)
-        onViewportChanged?()
     }
 
     override func tile() {
@@ -298,6 +300,5 @@ final class CommandEditorScrollView: NSScrollView {
         }
         let constrained = contentView.constrainBoundsRect(contentView.bounds)
         if constrained.origin != contentView.bounds.origin { contentView.scroll(to: constrained.origin) }
-        onViewportChanged?()
     }
 }

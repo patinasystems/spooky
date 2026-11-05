@@ -343,6 +343,9 @@ struct CommandTextViewTests {
         #expect(editor.frame.height == 300)
         #expect(editor.scrollView.contentView.bounds.minY > 0)
         #expect(abs(editor.scrollView.overflow - editor.scrollView.contentView.bounds.minY) <= 0.5)
+        let fades = editor.layer?.sublayers?.compactMap { $0 as? CAGradientLayer } ?? []
+        #expect(fades.count == 2)
+        #expect(fades.filter { !$0.isHidden }.count == 1)
         #expect(CommandInputCaret.frame(textView: editor.textView, in: editor) != nil)
     }
 
