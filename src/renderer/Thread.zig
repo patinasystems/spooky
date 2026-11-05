@@ -465,7 +465,11 @@ fn drawFrame(self: *Thread, now: bool) void {
 
     // If the renderer is managing a vsync on its own, we only draw
     // when we're forced to via `now`.
-    if (!now and self.renderer.hasVsync()) return;
+    // Command/prompt ownership changes are latency-sensitive input responses.
+    // Encode them now; ordinary output and animations remain display paced.
+    // The existing layer callback still commits GPU and AppKit state together.
+    if (!now and self.renderer.hasVsync() and
+        !self.renderer.native_boundary_draw_pending.load(.acquire)) return;
 
     self.renderer.drawFrame(false) catch |err|
         log.warn("error drawing err={}", .{err});

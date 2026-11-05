@@ -192,6 +192,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Copied into the encoded Metal frame, never read from the live parser
         /// by a GPU-completion callback. Protected by draw_mutex.
         native_presentation: renderer.NativePresentation.Snapshot = .{},
+        // Set during a snapshot transition and cleared only after encoding it.
+        // Main-thread resize draws can consume the same pending boundary.
+        native_boundary_draw_pending: std.atomic.Value(bool) = .init(false),
         command_caption_cache: std.AutoArrayHashMapUnmanaged([65]u8, CommandCaption) = .{},
         command_scratch: ?terminal.Terminal = null,
         command_scratch_state: terminal.RenderState = .empty,
@@ -1875,6 +1878,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update custom shader uniforms that depend on terminal state.
                 self.updateCustomShaderUniformsFromState();
                 if (cells_valid) {
+                    const previous_presentation = self.native_presentation;
                     self.native_presentation.serial +%= 1;
                     self.native_presentation.block_id = critical.native_presented_id;
                     self.native_presentation.acknowledge = critical.native_presentation_valid;
@@ -1895,6 +1899,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             break;
                         };
                     }
+                    if (renderer.NativePresentation.needsImmediateDraw(previous_presentation, self.native_presentation))
+                        self.native_boundary_draw_pending.store(true, .release);
                 }
             }
 
@@ -1990,6 +1996,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.cells_rebuilt or
                 self.command_cells_rebuilt or
                 self.images_rebuilt or
+                self.native_boundary_draw_pending.load(.acquire) or
                 self.animationWake() != null or
                 sync;
 
@@ -2251,6 +2258,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             if (@hasDecl(GraphicsAPI.Frame, "setNativePresentation"))
                 frame_ctx.setNativePresentation(self.native_presentation);
+            self.native_boundary_draw_pending.store(false, .release);
             return false;
         }
 

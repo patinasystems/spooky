@@ -12,6 +12,17 @@ pub const Snapshot = extern struct {
     awaiting_native_layout: bool = false,
 };
 
+/// A newly presentable command or prompt is an input response. Submit its GPU
+/// work immediately instead of spending another refresh interval waiting for
+/// the display link. Layer admission still owns the atomic AppKit handoff.
+pub fn needsImmediateDraw(before: Snapshot, after: Snapshot) bool {
+    if (after.awaiting_native_layout or after.defer_prompt) return false;
+    return (after.acknowledge and after.block_id[0] != 0 and
+        (!before.acknowledge or !std.mem.eql(u8, &before.block_id, &after.block_id))) or
+        (after.generation[0] != 0 and
+            (before.awaiting_native_layout or !std.mem.eql(u8, &before.generation, &after.generation)));
+}
+
 pub const Tracker = struct {
     latest_serial: u64 = 0,
     notified_id: [65]u8 = @splat(0),
@@ -61,6 +72,30 @@ test "native presentation never exposes ready pixels built before native footer 
     const prepared = tracker.admit(ready, true);
     try t.expect(prepared.present and prepared.notify);
     try t.expect(!tracker.admit(ready, true).notify);
+}
+
+test "native presentation draws command and prepared prompt boundaries without a vsync wait" {
+    const t = std.testing;
+    var command: Snapshot = .{ .acknowledge = true };
+    @memcpy(command.block_id[0..3], "cmd");
+    try t.expect(needsImmediateDraw(.{}, command));
+    try t.expect(!needsImmediateDraw(command, command));
+    var unproven = command;
+    unproven.acknowledge = false;
+    try t.expect(needsImmediateDraw(unproven, command));
+
+    var ready = command;
+    @memcpy(ready.generation[0..3], "new");
+    ready.awaiting_native_layout = true;
+    try t.expect(!needsImmediateDraw(command, ready));
+    const unprepared = ready;
+    ready.awaiting_native_layout = false;
+    try t.expect(needsImmediateDraw(unprepared, ready));
+    try t.expect(!needsImmediateDraw(ready, ready));
+    var erased = command;
+    erased.defer_prompt = true;
+    try t.expect(!needsImmediateDraw(.{}, erased));
+    try t.expect(!needsImmediateDraw(ready, .{}));
 }
 
 test "native presentation acknowledges new IDs once and rejects older queued frames" {
