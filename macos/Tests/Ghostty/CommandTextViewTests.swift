@@ -1012,19 +1012,53 @@ struct CommandTextViewTests {
         #expect(view.completions.inlineSuggestion == nil)
     }
 
-    @Test func returnWithPassiveAutomaticMenuSubmitsOnlyTypedText() throws {
+    @Test func passiveMenuAndPreviewStayFrozenUntilSubmittedFrameCommits() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
         var request: CommandCompletionRequest?
         var submitted: String?
         view.onRequestCompletion = { request = $0 }
-        view.onSubmit = { submitted = $0; return true }
+        view.onSubmit = {
+            submitted = $0
+            view.completions.setSubmissionPresentationHeld(true)
+            view.acceptsCommandEdits = false
+            return true
+        }
         view.completions.requestAutomaticNow()
-        view.receiveCompletions(completionResponse(to: try #require(request)))
+        let original = try #require(request)
+        view.receiveCompletions(completionResponse(to: original))
+        let preview = view.completions.inlineSuggestion
+        let labels = view.completionItems.map(\.displayText)
         #expect(view.completions.listVisible)
+        // The completion UI is in this window's layer tree, not a child panel.
+        #expect(window.childWindows?.isEmpty ?? true)
         view.keyDown(with: try returnEvent())
         #expect(submitted == "git ch")
+        view.completions.selectionChanged()
+        view.completions.updatePosition()
+        view.receiveCompletions(.init(requestID: original.id, revision: original.revision, items: []))
+        #expect(view.completions.listVisible)
+        #expect(view.completionItems.map(\.displayText) == labels)
+        #expect(view.completions.inlineSuggestion == preview)
+        #expect(window.firstResponder === view)
+        view.completions.setSubmissionPresentationHeld(false)
         #expect(view.completionItems.isEmpty)
+        #expect(!view.completions.listVisible)
+        #expect(view.completions.inlineSuggestion == nil)
+    }
+
+    @Test func rejectedSubmissionKeepsThePassiveMenuAndTypedDraft() throws {
+        let (view, window) = makeCompletionEditor(draft: "git ch")
+        defer { window.close() }
+        var request: CommandCompletionRequest?
+        view.onRequestCompletion = { request = $0 }
+        view.onSubmit = { _ in false }
+        view.completions.requestAutomaticNow()
+        view.receiveCompletions(completionResponse(to: try #require(request)))
+        view.keyDown(with: try returnEvent())
+        #expect(view.string == "git ch")
+        #expect(view.completions.listVisible)
+        #expect(!view.completions.submissionPresentationHeld)
     }
 
     @Test func returnAfterAutomaticMenuNavigationAcceptsWithoutSubmitting() throws {

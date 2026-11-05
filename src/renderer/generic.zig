@@ -1659,13 +1659,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .native_layout_pending = native_generation[0] != 0 and
                         (!std.mem.eql(u8, &state.command_chrome.current_id, &state.terminal.native_input.block_id) or
                             (state.native_viewport.footer_height > 0 and native_viewport.footer_top == null)),
-                    // C with no output, and D/A before ready+B, can be separate
-                    // PTY reads of one fast command. Coalesce those transitions
-                    // for one frame; actual running output never waits.
+                    // Present C immediately: it is the atomic command/newline
+                    // commit, even before output exists. Only coalesce the
+                    // erased D/A tail while its next ready B is still pending.
                     .native_awaiting_prompt = state.native_input_enabled and !state.native_input_terminal_requested and
                         state.terminal.screens.active_key == .primary and
-                        (state.terminal.nativeCommandAtOutputStart() or
-                            (state.terminal.native_input.kind == .running and state.terminal.native_prompt_active) or
+                        ((state.terminal.native_input.kind == .running and state.terminal.native_prompt_active) or
                             (state.terminal.native_input.kind == .ready and
                                 !state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))),
                     .native_running = state.native_input_enabled and !state.native_input_terminal_requested and

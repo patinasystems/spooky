@@ -34,14 +34,14 @@ struct CommandCompletionResponse: Sendable {
     var message: String?
 }
 
-/// A child panel keeps the native text view as first responder. Shell results
-/// remain ordinary text; neither candidate labels nor descriptions are markup.
+/// The overlay shares the terminal window's layer transaction. Submission can
+/// dismiss it atomically with the committed Metal frame, without a separate
+/// WindowServer window-ordering RPC. The native editor retains first responder.
 @MainActor
 final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private let panel: CommandCompletionPanel
     private let table: NSTableView
     private let scrollView = NSScrollView()
-    private let surface = CommandOverlaySurface(blending: .behindWindow, castsShadow: false)
+    private let surface = CommandOverlaySurface(blending: .withinWindow, castsShadow: true)
     private let headerTitle = NSTextField(labelWithString: "")
     private let headerStatus = NSTextField(labelWithString: "")
     private var header: CommandCompletionHeader?
@@ -52,7 +52,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     private var contentWidth = CommandOverlayStyle.minimumPopupWidth
     private var anchorLocation: Int?
     var onAccept: (Int) -> Void = { _ in }
-    var isVisible: Bool { panel.isVisible }
+    var isVisible: Bool { surface.superview != nil && !surface.isHiddenOrHasHiddenAncestor }
 
     override convenience init() {
         self.init(table: CommandCompletionTable())
@@ -62,19 +62,9 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
     /// showing a window. Production uses the non-focusable completion table.
     init(table: NSTableView) {
         self.table = table
-        panel = CommandCompletionPanel(
-            contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered, defer: false
-        )
         super.init()
-        panel.isReleasedWhenClosed = false
-        panel.hasShadow = true
-        panel.hidesOnDeactivate = true
-        panel.level = .popUpMenu
-        panel.collectionBehavior = [.transient, .ignoresCycle]
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.animationBehavior = .none
+        surface.isHidden = true
+        surface.layer?.zPosition = 1_000
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("completion"))
         table.addTableColumn(column)
@@ -109,7 +99,6 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         headerTitle.lineBreakMode = .byTruncatingHead
         headerStatus.alignment = .right
         surface.contentView.addSubview(scrollView)
-        panel.contentView = surface
     }
 
     func applyTheme(_ theme: CommandUITheme) {
@@ -294,7 +283,7 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         defer { CommandInputDiagnostics.end(diagnostic) }
         guard let parent = textView.window, parent.isVisible, parent.isKeyWindow,
               !textView.isHiddenOrHasHiddenAncestor,
-              let screen = parent.screen ?? NSScreen.main else {
+              let root = parent.contentView, let screen = parent.screen ?? NSScreen.main else {
             dismiss()
             return
         }
@@ -305,24 +294,28 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
             return textView.firstRect(forCharacterRange: NSRange(location: location, length: 0), actualRange: nil).minX
         } ?? caret.minX
         let inset = CommandOverlayStyle.inset
-        let available = screen.visibleFrame.insetBy(dx: inset, dy: inset)
+        // Keep the overlay in the same drawable as the terminal. Convert via
+        // window/screen coordinates so flipped hosting views work identically.
+        let contentOnScreen = parent.convertToScreen(root.convert(root.bounds, to: nil))
+        let available = screen.visibleFrame.intersection(contentOnScreen).insetBy(dx: inset, dy: inset)
         let width = min(contentWidth, available.width)
         let headerExtra = header == nil ? 0 : CommandOverlayStyle.headerHeight
         let geometry = Self.panelGeometry(rows: numberOfRows(in: table), rowHeight: table.rowHeight,
                                           caret: caret, available: available, extra: headerExtra)
         // Panel inset plus label leading puts label glyphs under the token.
         let x = min(max(tokenX - inset * 2 - Self.labelPadding, available.minX), available.maxX - width)
-        if panel.appearance?.name != textView.effectiveAppearance.name { panel.appearance = textView.effectiveAppearance }
-        let frame = NSRect(x: x, y: geometry.y, width: width, height: geometry.height)
-        if panel.frame != frame {
-            let resized = panel.frame.size != frame.size
+        if surface.appearance?.name != textView.effectiveAppearance.name { surface.appearance = textView.effectiveAppearance }
+        let screenFrame = NSRect(x: x, y: geometry.y, width: width, height: geometry.height)
+        let frame = root.convert(parent.convertFromScreen(screenFrame), from: nil)
+        if surface.frame != frame {
+            let resized = surface.frame.size != frame.size
             CommandInputDiagnostics.record(resized ? .completionPopupResize : .completionPopupMove)
             let frameTiming = CommandInputDiagnostics.beginTimeline(
                 .completionSetFrame, id: diagnosticInputID,
                 begin: .completionSetFrameBegin, end: .completionSetFrameEnd)
-            panel.setFrame(frame, display: true, animate: false)
+            surface.frame = frame
+            surface.needsLayout = true
             CommandInputDiagnostics.end(frameTiming)
-            if resized { panel.invalidateShadow() }
         }
         let layoutTiming = CommandInputDiagnostics.beginTimeline(
             .completionPanelLayout, id: diagnosticInputID,
@@ -348,24 +341,19 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         if table.tableColumns.first?.width != tableSize.width { table.tableColumns.first?.width = tableSize.width }
         let orderTiming = CommandInputDiagnostics.beginTimeline(
             .completionOrder, id: diagnosticInputID, begin: .completionOrderBegin, end: .completionOrderEnd)
-        if panel.parent !== parent {
-            panel.parent?.removeChildWindow(panel)
-            parent.addChildWindow(panel, ordered: .above)
-        }
-        if !panel.isVisible { panel.orderFront(nil) }
+        if surface.superview !== root { root.addSubview(surface, positioned: .above, relativeTo: nil) }
+        surface.isHidden = false
         CommandInputDiagnostics.end(orderTiming)
     }
 
     func dismiss() {
-        // Host transitions may dismiss an already hidden, prepared popup more
-        // than once. Do not send WindowServer ordering RPCs for those no-ops.
-        guard panel.isVisible || panel.parent != nil else { return }
+        guard surface.superview != nil else { return }
         let timing = CommandInputDiagnostics.beginTimeline(
             .completionDismiss, id: CommandInputDiagnostics.currentInputID,
             begin: .completionDismissBegin, end: .completionDismissEnd)
         defer { CommandInputDiagnostics.end(timing) }
-        panel.parent?.removeChildWindow(panel)
-        if panel.isVisible { panel.orderOut(nil) }
+        surface.isHidden = true
+        surface.removeFromSuperview()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { max(items.count, message == nil ? 0 : 1) }
@@ -396,12 +384,6 @@ final class CommandCompletionView: NSObject, NSTableViewDataSource, NSTableViewD
         guard items.indices.contains(table.clickedRow) else { return }
         onAccept(table.clickedRow)
     }
-}
-
-@MainActor
-private final class CommandCompletionPanel: NSPanel {
-    override var canBecomeKey: Bool { false }
-    override var canBecomeMain: Bool { false }
 }
 
 @MainActor

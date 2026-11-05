@@ -2992,27 +2992,6 @@ pub fn semanticPrompt(
     }
 }
 
-/// A bounded presentation hint, not an output parser: the current command
-/// has not advanced from its C pin. At most two block identities are inspected.
-/// A renderer may coalesce this first transition for one frame, never await it.
-pub fn nativeCommandAtOutputStart(self: *const Terminal) bool {
-    if (self.screens.active_key != .primary or self.native_prompt_active or
-        self.native_input.kind != .running or self.native_input.program_cursor) return false;
-    const screen = self.screens.active;
-    if (screen.selection != null or screen.pages.viewport != .active or screen.cursor.pending_wrap) return false;
-    const blocks = screen.command_blocks.blocks.items;
-    var i = blocks.len;
-    while (i > blocks.len -| 2) {
-        i -= 1;
-        const block = blocks[i];
-        if (!std.mem.eql(u8, &block.id, &self.last_started_command_id)) continue;
-        const pin = block.output orelse return false;
-        const cursor = screen.cursor.page_pin;
-        return !pin.garbage and pin.node == cursor.node and pin.y == cursor.y and pin.x == cursor.x;
-    }
-    return false;
-}
-
 // OSC 133;L
 fn semanticPromptFreshLine(self: *Terminal) !void {
     const left_margin = if (self.screens.active.cursor.x < self.scrolling_region.left)
@@ -20077,22 +20056,6 @@ test "native cursor ownership distinguishes inherited shell and foreground reque
     try term.semanticPrompt(.{ .action = .fresh_line_new_prompt, .options_unvalidated = "aid=12-2" });
     try term.semanticPrompt(.{ .action = .end_input_start_output, .options_unvalidated = "aid=12-2" });
     try testing.expect(!term.native_input.program_cursor);
-}
-
-test "native first output hint releases when output advances or program claims cursor" {
-    const alloc = testing.allocator;
-    var term = try init(testing.io, alloc, .{ .cols = 20, .rows = 10 });
-    defer term.deinit(alloc);
-    var stream = term.vtStream();
-    defer stream.deinit();
-    stream.nextSlice("\x1b]133;A;aid=12-1\x07\x1b]133;P;spooky_state=ready;spooky_generation=12-1;spooky_context=start;aid=12-1\x07\r\nls\r\n\x1b]133;C;aid=12-1\x07");
-    try testing.expect(term.nativeCommandAtOutputStart());
-    term.setCursorStyle(.steady_block);
-    try testing.expect(!term.nativeCommandAtOutputStart());
-    term.setCursorStyle(.default);
-    try testing.expect(term.nativeCommandAtOutputStart());
-    stream.nextSlice("file.txt");
-    try testing.expect(!term.nativeCommandAtOutputStart());
 }
 
 test "native new A cannot reuse the previous ready generation and durable B" {

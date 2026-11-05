@@ -5,6 +5,21 @@ import AppKit
 @MainActor
 final class CommandCompletionController {
     private weak var textView: CommandTextView?
+    private(set) var submissionPresentationHeld = false
+
+    /// Freeze the existing menu/inline preview until the matching Metal frame
+    /// replaces the editor. Late provider responses cannot close or mutate it.
+    func setSubmissionPresentationHeld(_ held: Bool) {
+        guard held != submissionPresentationHeld else { return }
+        submissionPresentationHeld = held
+        if held {
+            cancelAutomatic()
+            popupPreparationTask?.cancel()
+            popupPreparationTask = nil
+            textView?.onCancelCompletion()
+        } else { dismiss() }
+    }
+
     private var revision: UInt64 = 0
     private var request: CommandCompletionRequest?
     private var awaitingResponse = false
@@ -53,8 +68,8 @@ final class CommandCompletionController {
         popup?.applyTheme(theme)
     }
 
-    /// Construct the one retained native panel after a quiet ready-prompt turn.
-    /// This does not order a window, assign focus, or request any candidates.
+    /// Construct the one retained in-window overlay after a quiet ready-prompt turn.
+    /// This does not show an overlay, assign focus, or request any candidates.
     func setPopupPreparationEnabled(_ enabled: Bool, after delay: Duration = .milliseconds(150)) {
         popupPreparationEnabled = enabled
         popupPreparationDelay = delay
@@ -146,7 +161,7 @@ final class CommandCompletionController {
     }
 
     func selectionChanged() {
-        guard !editing, !accepting else { return }
+        guard !submissionPresentationHeld, !editing, !accepting else { return }
         if filePicker.isActive {
             guard let textView, canSuggest,
                   filePicker.refresh(text: textView.string, cursor: textView.selectedRange().location) else {
@@ -182,7 +197,7 @@ final class CommandCompletionController {
 
     private var canSuggest: Bool {
         guard let textView else { return false }
-        return textView.isEditable && textView.acceptsCommandEdits && !textView.hasMarkedText()
+        return !submissionPresentationHeld && textView.isEditable && textView.acceptsCommandEdits && !textView.hasMarkedText()
             && textView.selectedRange().length == 0 && textView.selectedRange().location != NSNotFound
             && textView.window?.firstResponder === textView && textView.window?.isKeyWindow == true
             && !textView.isHiddenOrHasHiddenAncestor
@@ -236,6 +251,7 @@ final class CommandCompletionController {
     }
 
     func receive(_ response: CommandCompletionResponse) {
+        guard !submissionPresentationHeld else { return }
         let inputID = request?.id == response.requestID ? requestInputID : nil
         let diagnostic = CommandInputDiagnostics.beginTimeline(
             .completionResponse, id: inputID, begin: .completionResponseBegin, end: .completionResponseEnd)
@@ -316,8 +332,8 @@ final class CommandCompletionController {
                 if !items.isEmpty { accept(at: selectedIndex) }
                 return true
             }
-            // Passive predictions are not command text. Return runs the draft.
-            dismiss()
+            // Submission owns dismissal, in the same layer transaction as
+            // the committed command/newline frame. Rejected submits keep it.
             return false
         default:
             return false
@@ -411,7 +427,7 @@ final class CommandCompletionController {
     }
 
     func updatePosition() {
-        guard let textView else { return }
+        guard !submissionPresentationHeld, let textView else { return }
         if listVisible {
             popup?.updatePosition(for: textView, diagnosticInputID: CommandInputDiagnostics.currentInputID)
         }

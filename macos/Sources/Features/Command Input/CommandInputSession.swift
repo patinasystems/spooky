@@ -12,8 +12,6 @@ final class CommandInputSession {
     var onChange: (() -> Void)?
     var onCompletion: ((CommandCompletionResponse) -> Void)?
     var onHistory: ((CommandHistoryResponse) -> Void)?
-    var onRetainSubmittedEcho: (() -> Bool)?
-    var onReleaseSubmittedEcho: (() -> Void)?
     var onPromptPresented: (() -> Void)?
     var onFramePresented: (() -> Void)?
     var onReplayPromptKey: ((NSEvent, UInt64?) -> Void)?
@@ -25,7 +23,10 @@ final class CommandInputSession {
     private(set) var suppressesShellCursor = false
     private var keepsEmptyCaret = false
     private(set) var submittedEditorRetired = false
-    private var awaitingPresentedCommand: String?
+    private var awaitingPresentedCommand: String? { submissionPresentation.blockID }
+    var isHoldingSubmissionPresentation: Bool {
+        awaitingPresentedCommand != nil && !submittedEditorRetired && !failed && !terminalRequested
+    }
     private var promptKeys: [(event: NSEvent, inputID: UInt64?)] = []
 
     let directory: URL
@@ -182,7 +183,6 @@ final class CommandInputSession {
         geometryTask?.cancel()
         geometryTask = Task { [weak self] in
             while !Task.isCancelled {
-                self?.expireSubmittedEcho()
                 let active = self?.needsGeometryUpdates == true
                 if active { self?.refreshGeometry() }
                 do {
@@ -190,8 +190,7 @@ final class CommandInputSession {
                     // events drive geometry. This is missed-event recovery,
                     // not a second display clock scanning the transcript.
                     let maximum: Duration = .milliseconds(active ? 250 : 2_000)
-                    let delay = self?.submissionPresentation.nextCheckDelay(maximum: maximum, now: .now) ?? maximum
-                    try await Task.sleep(for: delay)
+                    try await Task.sleep(for: maximum)
                 } catch {
                     break
                 }
@@ -207,8 +206,6 @@ final class CommandInputSession {
 
     /// Visibility can change while recovery is in its longer inactive sleep.
     /// Restart only on these lifecycle events, never on each scroll/update.
-    /// The presentation deadline remains absolute; restarting its observer does
-    /// not extend the submitted echo's 100 ms lifetime.
     func terminalBecameVisible() {
         terminalGeometryChanged()
         startGeometryUpdates()
@@ -365,7 +362,7 @@ final class CommandInputSession {
         pending = request
         keepsEmptyCaret = text.isEmpty
         submittedEditorRetired = false
-        awaitingPresentedCommand = blockID
+        submissionPresentation.begin(blockID: blockID, empty: text.isEmpty)
         suppressesShellCursor = true
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
@@ -418,7 +415,7 @@ final class CommandInputSession {
                 guard let self, self.pending?.id == request.id else { return }
                 self.cancelSubmissionPresentation()
                 self.pending = nil
-                self.awaitingPresentedCommand = nil
+                self.submissionPresentation.cancel()
                 self.submissionTiming = nil
                 self.submissionInputID = nil
                 self.deadlineTask?.cancel()
@@ -437,7 +434,7 @@ final class CommandInputSession {
         completionTask?.cancel()
         historyTask?.cancel()
         terminalRequested = true
-        awaitingPresentedCommand = nil
+        submissionPresentation.cancel()
         recoveryVisible = false
         editorVisible = false
         focusRequest = 0
@@ -448,29 +445,29 @@ final class CommandInputSession {
     }
 
     private func cancelSubmissionPresentation() {
-        cancelSubmittedEcho()
+        cancelSubmissionVisualHold()
         if let surface = surfaceView?.surface { ghostty_surface_cancel_native_submission(surface) }
     }
 
     func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil) {
         defer { onFramePresented?() }
-        if submissionPresentation.presented(blockID: blockID, serial: serial) { onReleaseSubmittedEcho?() }
-        if let blockID, !blockID.isEmpty, !keepsEmptyCaret,
-           blockID == pending?.blockID || blockID == handoff?.blockID {
+        let released = submissionPresentation.presented(blockID: blockID, serial: serial,
+                                                        readyPromptID: generation == nil ? nil : promptID)
+        if released && !keepsEmptyCaret {
             // A matching C frame already contains the committed command. A
             // delayed receipt must not leave the old native draft over it.
             submittedEditorRetired = true
         }
-        if let blockID, blockID == awaitingPresentedCommand, !keepsEmptyCaret { awaitingPresentedCommand = nil }
         attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
         // IOSurface assignment and this native layout happen in the same main
         // transaction, outside the renderer lock. Never show a future prompt
         // over pixels from the previous command.
         terminalGeometryChanged()
         if generation != nil, promptID == currentBlockID { presentReadyPrompt() }
+        let nativeReady = generation != nil && isEditable && promptID == currentBlockID
+        if nativeReady { submissionPresentation.cancel() }
         changed()
-        if generation != nil, isEditable, promptID == currentBlockID {
-            awaitingPresentedCommand = nil
+        if nativeReady {
             onPromptPresented?()
             replayPromptKeys()
         } else if !ready, pending == nil, handoff == nil, awaitingPresentedCommand == nil {
@@ -512,12 +509,11 @@ final class CommandInputSession {
         changed()
     }
 
-    func cancelSubmittedEcho() {
-        if submissionPresentation.cancel() { onReleaseSubmittedEcho?() }
-    }
-
-    private func expireSubmittedEcho() {
-        if submissionPresentation.expire(now: .now) { onReleaseSubmittedEcho?() }
+    func cancelSubmissionVisualHold() {
+        if submissionPresentation.cancel() {
+            submittedEditorRetired = true
+            changed()
+        }
     }
 
     func useEditor() {
@@ -688,18 +684,6 @@ final class CommandInputSession {
             CommandInputDiagnostics.mark(.submissionCoreBoundaryObserved, id: submissionInputID)
         }
         CommandInputDiagnostics.mark(.submissionHandoffReleased, id: submissionInputID)
-        if layout.primary, layout.lastStartedBlockID == handoff.blockID, !draft.isEmpty {
-            cancelSubmittedEcho()
-            if submissionPresentation.begin(blockID: handoff.blockID, now: .now) {
-                if onRetainSubmittedEcho?() == true {
-                    // A new 100 ms presentation deadline must interrupt a
-                    // sleeping 250 ms geometry recovery check immediately.
-                    startGeometryUpdates()
-                } else {
-                    cancelSubmittedEcho()
-                }
-            }
-        }
         self.handoff = nil
         CommandInputDiagnostics.end(submissionTiming)
         submissionTiming = nil
@@ -803,7 +787,7 @@ final class CommandInputSession {
 
     /// Apply the same owned geometry value used by the real core and fixtures.
     func receiveLayout(_ updated: CommandTerminalLayout) {
-        if !updated.primary { cancelSubmittedEcho() }
+        if !updated.primary { cancelSubmissionVisualHold() }
         layout = updated
         if updated.nativeStateRevision > 0 {
             attachedPromptGeneration = updated.presentedNativeGeneration

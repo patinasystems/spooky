@@ -44,9 +44,6 @@ final class NativeCommandSurfaceHost: NSView {
     private var diagnosticLayout: [String: Double]?
     private let pathResolver = CommandPathResolver()
     private lazy var paths = makePathInteraction()
-    private var submittedEcho: CommandSubmittedEchoView?
-    private var echoPreparationTask: Task<Void, Never>?
-    private var echoContainerSize: NSSize?
     private let workspaceNotifications = NSWorkspace.shared.notificationCenter
 
     override var isFlipped: Bool { true }
@@ -120,15 +117,10 @@ final class NativeCommandSurfaceHost: NSView {
         session.onFramePresented = { [weak self] in
             guard let self else { return }
             // Executed inside the IOSurface's explicit transaction. AppKit
-            // must publish the retired echo/empty editor backing stores now,
+            // must publish the retired editor/empty prompt backing stores now,
             // not at a separate display pass after Metal has already changed.
             self.layoutSubtreeIfNeeded()
             self.displayIfNeeded()
-        }
-        session.onRetainSubmittedEcho = { [weak self] in self?.retainSubmittedEcho() ?? false }
-        session.onReleaseSubmittedEcho = { [weak self] in
-            self?.submittedEcho?.clear()
-            self?.echoContainerSize = nil
         }
         surfaceView.commandPathInteraction = paths
         NotificationCenter.default.addObserver(self, selector: #selector(pathViewportChanged),
@@ -137,9 +129,9 @@ final class NativeCommandSurfaceHost: NSView {
                                                name: .spookyCommandThemeDidChange, object: surfaceView)
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification, NSWindow.didResizeNotification,
                      NSWindow.didChangeScreenNotification, NSWindow.didChangeOcclusionStateNotification] {
-            NotificationCenter.default.addObserver(self, selector: #selector(echoWindowChanged(_:)), name: name, object: nil)
+            NotificationCenter.default.addObserver(self, selector: #selector(submissionWindowChanged(_:)), name: name, object: nil)
         }
-        workspaceNotifications.addObserver(self, selector: #selector(echoSpaceChanged),
+        workspaceNotifications.addObserver(self, selector: #selector(submissionSpaceChanged),
                                            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
         refreshAccent()
         synchronize()
@@ -148,14 +140,12 @@ final class NativeCommandSurfaceHost: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     deinit {
-        echoPreparationTask?.cancel()
         NotificationCenter.default.removeObserver(self)
         workspaceNotifications.removeObserver(self)
     }
 
     override func layout() {
         super.layout()
-        if let echoContainerSize, echoContainerSize != bounds.size { session.cancelSubmittedEcho() }
         let sizeChanged = observedLayoutSize != bounds.size
         observedLayoutSize = bounds.size
         synchronize()
@@ -164,9 +154,7 @@ final class NativeCommandSurfaceHost: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        echoPreparationTask?.cancel()
-        echoPreparationTask = nil
-        session.cancelSubmittedEcho()
+        session.cancelSubmissionVisualHold()
         paths.pointerExited()
         refreshAccent()
         synchronize()
@@ -192,41 +180,9 @@ final class NativeCommandSurfaceHost: NSView {
         synchronize()
     }
 
-    private func prepareSubmittedEcho() {
-        guard submittedEcho == nil, echoPreparationTask == nil, session.isEditable, window != nil else { return }
-        echoPreparationTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
-            guard let self else { return }
-            self.echoPreparationTask = nil
-            guard self.session.isEditable, self.window?.isVisible == true else { return }
-            _ = self.ensureSubmittedEcho()
-        }
-    }
-
-    private func ensureSubmittedEcho() -> CommandSubmittedEchoView {
-        if let submittedEcho { return submittedEcho }
-        let measurement = CommandInputDiagnostics.begin(.submissionEchoConstruction)
-        defer { CommandInputDiagnostics.end(measurement) }
-        let echo = CommandSubmittedEchoView()
-        // A newly editable prompt always wins if it occupies the same pixels.
-        addSubview(echo, positioned: .below, relativeTo: editor)
-        submittedEcho = echo
-        return echo
-    }
-
-    private func retainSubmittedEcho() -> Bool {
-        guard !editor.isHidden, !session.draft.isEmpty,
-              session.draft.utf8.count <= CommandSubmittedEchoView.maximumBytes, let window,
-              window.isKeyWindow, window.isOnActiveSpace, window.occlusionState.contains(.visible) else { return false }
-        let echo = ensureSubmittedEcho()
-        guard echo.retainPresentation(from: editor, background: background) else { return false }
-        echoContainerSize = bounds.size
-        return true
-    }
-
-    @objc private func echoWindowChanged(_ notification: Notification) {
+    @objc private func submissionWindowChanged(_ notification: Notification) {
         guard let changed = notification.object as? NSWindow, changed === window else { return }
-        session.cancelSubmittedEcho()
+        session.cancelSubmissionVisualHold()
         if notification.name == NSWindow.didResignKeyNotification {
             editor.requestFocus(token: 0)
         }
@@ -239,8 +195,8 @@ final class NativeCommandSurfaceHost: NSView {
         }
     }
 
-    @objc private func echoSpaceChanged() {
-        session.cancelSubmittedEcho()
+    @objc private func submissionSpaceChanged() {
+        session.cancelSubmissionVisualHold()
         if window?.isOnActiveSpace == true { session.terminalBecameVisible() }
     }
 
@@ -255,7 +211,7 @@ final class NativeCommandSurfaceHost: NSView {
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
-        session.cancelSubmittedEcho()
+        session.cancelSubmissionVisualHold()
         // Let the child surface publish its new core scale first. Logical
         // bounds may be unchanged when moving between 1x and 2x displays.
         DispatchQueue.main.async { [weak self] in
@@ -303,17 +259,19 @@ final class NativeCommandSurfaceHost: NSView {
         // Font and draft measurements update immediately; their callbacks stay
         // deferred. Never resize the PTY using a stale default-font height and
         // correct it one run-loop turn later across a terminal-row boundary.
-        editor.configureAppearance(font: session.editorFont,
-                                   textColor: session.isTransferringSubmission ? theme.accent : foreground,
+        let holdingPresentation = session.isHoldingSubmissionPresentation
+        editor.configureAppearance(font: session.editorFont, textColor: foreground,
                                    backgroundColor: background, minimumLineHeight: line)
-        editor.setDraft(session.draft)
+        if !holdingPresentation { editor.setDraft(session.draft) }
         let minimumHeight = line + padding * 2
-        let height = min(max(minimumHeight, editor.contentHeight),
+        let preparedHeight = session.canPrepareNativePrompt && holdingPresentation
+            ? minimumHeight : editor.contentHeight
+        let height = min(max(minimumHeight, preparedHeight),
                          max(minimumHeight, min(line * 12 + padding * 2, bounds.height * 0.45)))
         let recovering = session.editorVisible && session.isRecoveringDraft
-        let transferring = session.isTransferringSubmission
+        let transferring = session.isTransferringSubmission || holdingPresentation
         let preparing = session.canPrepareNativePrompt && !recovering
-        let editing = recovering || ((session.editorVisible || preparing) && geometry.primary && session.currentBlockID != nil)
+        let editing = recovering || holdingPresentation || ((session.editorVisible || preparing) && geometry.primary && session.currentBlockID != nil)
         // Evaluate the prospective inline grid, excluding the dock's own
         // reservation. Retained rows alone can come from an earlier resize.
         let inlineReservation = max(0, height - line) + padding
@@ -328,7 +286,7 @@ final class NativeCommandSurfaceHost: NSView {
                                            metrics: .init(editorHeight: height, containerHeight: bounds.height,
                                                           padding: padding, inlineRows: inlineRows,
                                                           geometryIsSettled: geometryIsSettled))
-        let shown = placement.shown && session.editorVisible
+        let shown = placement.shown && (session.editorVisible || holdingPresentation)
             && !(transferring && session.submittedEditorRetired)
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
@@ -421,9 +379,9 @@ final class NativeCommandSurfaceHost: NSView {
         }
         let editable = session.isEditable && shown && !recovering && !surfaceView.readonly
         editor.setEditable(editable, preserveCaret: transferring && session.draft.isEmpty
-                           && shown && !recovering && !surfaceView.readonly)
+                           && shown && !recovering && !surfaceView.readonly,
+                           preservePresentation: holdingPresentation && shown)
         editor.textView.completions.setPopupPreparationEnabled(editable)
-        prepareSubmittedEcho()
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
         // A geometry snapshot can recover a presentation acknowledgement

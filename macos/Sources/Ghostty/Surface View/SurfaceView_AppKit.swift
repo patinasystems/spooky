@@ -477,7 +477,7 @@ extension Ghostty {
             ghostty_surface_set_focus(surface, focused)
             if !focused {
                 ghostty_surface_cancel_native_submission(surface)
-                commandInputSession?.cancelSubmittedEcho()
+                commandInputSession?.cancelSubmissionVisualHold()
             }
 
             // Update our secure input state if we are a password input
