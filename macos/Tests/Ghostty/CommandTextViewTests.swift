@@ -303,10 +303,13 @@ struct CommandTextViewTests {
         #expect(scrollView.hitTest(point) === view)
     }
 
-    @Test func editorViewportCapsAtHalfTheTerminalAndShrinksAfterMultiline() {
-        #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600) == 300)
+    @Test func editorGrowsNaturallyWithViewportAndDockedLimits() {
+        #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600) == 600)
+        #expect(CommandInputView.viewportHeight(content: 2_000, line: 18, terminal: 600, pinned: true) == 540)
+        #expect(CommandInputView.viewportHeight(content: 350, line: 18, terminal: 600) == 350)
+        #expect(CommandInputView.viewportHeight(content: 350, line: 18, terminal: 600, pinned: true) == 350)
         #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 600) == 30)
-        #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 20) == 10)
+        #expect(CommandInputView.viewportHeight(content: 30, line: 18, terminal: 20) == 20)
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
                                    textColor: .white, backgroundColor: .black, minimumLineHeight: 18)
@@ -321,13 +324,17 @@ struct CommandTextViewTests {
         #expect(editor.scrollView.documentView?.frame.height == editor.scrollView.contentView.bounds.height)
         #expect(editor.scrollView.contentView.bounds.minY == 0)
         #expect(editor.scrollView.verticalScrollElasticity == .none)
+        #expect(!editor.scrollView.automaticallyAdjustsContentInsets)
+        #expect(editor.scrollView.contentInsets.top == 0 && editor.scrollView.contentInsets.bottom == 0)
     }
 
     @Test func cappedGrowthRevealsTheFinalCaretAfterHostResize() async {
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 30))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+                              styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         defer { window.close() }
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 600))
         window.contentView = host
         host.addSubview(editor)
@@ -340,7 +347,7 @@ struct CommandTextViewTests {
         window.makeFirstResponder(editor.textView)
         editor.setDraft(String(repeating: "line\n", count: 80))
         try? await Task.sleep(for: .milliseconds(30))
-        #expect(editor.frame.height == 300)
+        #expect(editor.frame.height == 600)
         #expect(editor.scrollView.contentView.bounds.minY > 0)
         #expect(abs(editor.scrollView.overflow - editor.scrollView.contentView.bounds.minY) <= 0.5)
         let fades = editor.layer?.sublayers?.compactMap { $0 as? CAGradientLayer } ?? []

@@ -9,7 +9,7 @@ enum CommandInputDiagnostics {
         case nativeKeyDown, completionDidEdit, completionResponse, completionFilter
         case completionConstruction, completionShow, completionMeasureWidth, completionPosition, completionSelection
         case overlayLayout, inlineSuggestionLayout
-        case editorLayout, editorDraw
+        case editorLayout, editorDraw, editorScrollFades
         case completionSetFrame, completionPanelLayout, completionOrder, completionDismiss
     }
 
@@ -23,7 +23,7 @@ enum CommandInputDiagnostics {
 
     /// CPU/application milestones, never evidence that pixels reached a display.
     enum Stage: String, Sendable {
-        case inputReceived, inputHandled, scrollInput, textDidChange
+        case inputReceived, inputHandled, scrollInput, textDidChange, editorScroll
         case selectionPress, selectionIntercept, selectionForward, selectionFocus
         case completionRequested, completionResponseReceived, completionPresentationUpdated
         case submissionBegin, submissionResizeReady, submissionRequestPublished

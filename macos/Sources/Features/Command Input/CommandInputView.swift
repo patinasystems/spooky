@@ -31,8 +31,8 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     private let bottomFade = CAGradientLayer()
     private var scrollObserver: NSObjectProtocol?
 
-    static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat) -> CGFloat {
-        min(max(line + padding * 2, content), max(1, terminal * 0.5))
+    static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat, pinned: Bool = false) -> CGFloat {
+        min(max(line + padding * 2, content), max(1, terminal * (pinned ? 0.9 : 1)))
     }
 
     /// Updated synchronously by TextKit; the notification stays deferred so a
@@ -52,6 +52,12 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
+        // This interior editor is not the window's titlebar-adjacent scroller.
+        // Automatic adjustment otherwise injects a 16-point inset, creating
+        // false one-line scroll range and a fade over the final caret line.
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsetsZero
+        scrollView.scrollerInsets = NSEdgeInsetsZero
         scrollView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
         scrollView.verticalScrollElasticity = .none
@@ -231,6 +237,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     }
 
     private func updateScrollFades() {
+        let timing = CommandInputDiagnostics.begin(.editorScrollFades)
         let clip = scrollView.contentView.bounds
         let overflow = scrollView.overflow
         let band = min(max(1, textView.minimumLineHeight) * 1.5, clip.height * 0.5)
@@ -243,6 +250,18 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         if bottomFade.frame != bottomFrame { bottomFade.frame = bottomFrame }
         if topFade.isHidden != (top <= 0.5) { topFade.isHidden = top <= 0.5 }
         if bottomFade.isHidden != (bottom <= 0.5) { bottomFade.isHidden = bottom <= 0.5 }
+        CommandInputDiagnostics.end(timing)
+        if CommandInputDiagnostics.isEnabled {
+            CommandInputDiagnostics.mark(.editorScroll, id: CommandInputDiagnostics.currentInputID, metrics: [
+                "clip_y": clip.minY, "clip_height": clip.height, "overflow": overflow,
+                "top_fade": top, "bottom_fade": bottom,
+                "top_y": topFade.frame.minY, "bottom_y": bottomFade.frame.minY,
+                "view_flipped": isFlipped ? 1 : 0, "layer_flipped": layer?.isGeometryFlipped == true ? 1 : 0,
+                "view_height": bounds.height, "document_height": scrollView.documentView?.frame.height ?? 0,
+                "inset_top": scrollView.contentInsets.top, "inset_bottom": scrollView.contentInsets.bottom,
+                "document_y": scrollView.documentView?.frame.minY ?? 0
+            ])
+        }
     }
 
     private func contentHeightChanged(_ height: CGFloat) {

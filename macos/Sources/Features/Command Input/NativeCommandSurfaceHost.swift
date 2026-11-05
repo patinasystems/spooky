@@ -269,25 +269,38 @@ final class NativeCommandSurfaceHost: NSView {
         let minimumHeight = line + padding * 2
         let preparedHeight = session.canPrepareNativePrompt && holdingPresentation
             ? minimumHeight : editor.contentHeight
-        let height = CommandInputView.viewportHeight(content: preparedHeight, line: line, terminal: bounds.height)
+        let inlineHeight = CommandInputView.viewportHeight(content: preparedHeight, line: line, terminal: bounds.height)
+        var height = inlineHeight
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission || holdingPresentation
         let preparing = session.canPrepareNativePrompt && !recovering
         let editing = recovering || holdingPresentation || ((session.editorVisible || preparing) && geometry.primary && session.currentBlockID != nil)
         // Evaluate the prospective inline grid, excluding the dock's own
         // reservation. Retained rows alone can come from an earlier resize.
-        let inlineReservation = max(0, height - line) + padding
+        let inlineReservation = max(0, inlineHeight - line) + padding
         let availableInset = max(0, geometry.unreservedGridHeight - line * 2)
         let inlineRows = UInt32(max(0, floor((geometry.unreservedGridHeight
             - min(inlineReservation, availableInset)) / line)))
         let requestedSize = surfaceView.surface.map { ghostty_surface_size($0) }
         let geometryIsSettled = terminalView.frame == bounds && !terminalView.needsLayout
             && (requestedSize.map { UInt32($0.rows) == geometry.rows && UInt32($0.columns) == geometry.columns } ?? false)
-        let placement = docking.placement(layout: geometry, editing: editing, recovering: recovering,
-                                           transferring: transferring && !preparing,
-                                           metrics: .init(editorHeight: height, containerHeight: bounds.height,
-                                                          padding: padding, inlineRows: inlineRows,
-                                                          geometryIsSettled: geometryIsSettled))
+        func place(editorHeight: CGFloat) -> CommandInputDocking.Placement {
+            docking.placement(layout: geometry, editing: editing, recovering: recovering,
+                              transferring: transferring && !preparing,
+                              metrics: .init(editorHeight: editorHeight, containerHeight: bounds.height,
+                                             padding: padding, inlineRows: inlineRows,
+                                             geometryIsSettled: geometryIsSettled))
+        }
+        var placement = place(editorHeight: inlineHeight)
+        // Decide docking against the same prospective inline grid in both
+        // modes. Only then apply the dock's 90% cap, before publishing any UI
+        // geometry. The different caps cannot feed back into the decision.
+        let resolvedHeight = CommandInputView.viewportHeight(content: preparedHeight, line: line,
+                                                             terminal: bounds.height, pinned: placement.pinned)
+        if resolvedHeight != height {
+            height = resolvedHeight
+            placement = place(editorHeight: height)
+        }
         let shown = placement.shown && (session.editorVisible || holdingPresentation)
             && !(transferring && session.submittedEditorRetired)
 
