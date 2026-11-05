@@ -356,6 +356,28 @@ struct CommandTextViewTests {
         #expect(CommandInputCaret.frame(textView: editor.textView, in: editor) != nil)
     }
 
+    @Test func editorFadesUseTheDocumentOriginAtBothScrollLimits() {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 18)
+        editor.setDraft(String(repeating: "line\n", count: 80))
+        editor.layout()
+        let clip = editor.scrollView.contentView
+        editor.textView.setFrameOrigin(NSPoint(x: 0, y: -16))
+        let fades = editor.layer?.sublayers?.compactMap { $0 as? CAGradientLayer } ?? []
+        clip.scroll(to: NSPoint(x: 0, y: -16))
+        editor.layout()
+        #expect(fades.filter { !$0.isHidden }.count == 1)
+        clip.scroll(to: NSPoint(x: 0, y: -16 + editor.scrollView.overflow))
+        editor.layout()
+        #expect(fades.filter { !$0.isHidden }.count == 1)
+        editor.setDraft("one line")
+        editor.setFrameSize(NSSize(width: 400, height: 30))
+        editor.layout()
+        #expect(editor.scrollView.overflow == 0)
+        #expect(fades.allSatisfy { $0.isHidden })
+    }
+
     @Test func emptyEditorMeasuresOneLineWithoutReservedBlankSpace() {
         let view = makeSizedEditor(width: 400)
         // A taller viewport must not become the content's desired height.

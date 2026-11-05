@@ -53,8 +53,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         // This interior editor is not the window's titlebar-adjacent scroller.
-        // Automatic adjustment otherwise injects a 16-point inset, creating
-        // false one-line scroll range and a fade over the final caret line.
+        // Its padding belongs to this view, not AppKit's window safe area.
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentInsets = NSEdgeInsetsZero
         scrollView.scrollerInsets = NSEdgeInsetsZero
@@ -240,9 +239,13 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         let timing = CommandInputDiagnostics.begin(.editorScrollFades)
         let clip = scrollView.contentView.bounds
         let overflow = scrollView.overflow
+        // NSTextView can retain a nonzero frame origin after AppKit tiles it.
+        // Both rectangles are in document-superview coordinates; zero is not
+        // necessarily the document's top edge.
+        let offset = clip.minY - (scrollView.documentView?.frame.minY ?? 0)
         let band = min(max(1, textView.minimumLineHeight) * 1.5, clip.height * 0.5)
-        let top = min(band, max(0, clip.minY))
-        let bottom = min(band, max(0, overflow - clip.minY))
+        let top = min(band, max(0, offset))
+        let bottom = min(band, max(0, overflow - offset))
         let viewport = convert(scrollView.contentView.bounds, from: scrollView.contentView)
         let topFrame = NSRect(x: viewport.minX, y: viewport.maxY - top, width: viewport.width, height: top)
         let bottomFrame = NSRect(x: viewport.minX, y: viewport.minY, width: viewport.width, height: bottom)
