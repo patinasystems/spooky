@@ -246,9 +246,13 @@ fn nativeInputPresented(context: ?*anyopaque, snapshot: rendererpkg.NativePresen
     const surface: *apprt.Surface = @ptrCast(@alignCast(context orelse return));
     surface.core_surface.native_presented_generation = snapshot.generation;
     const prompt: apprt.action.NativeInputPrompt = .{ .id = snapshot.prompt_id, .generation = snapshot.generation };
+    // A prompt-generation transition can notify without proving that C's
+    // glyphs are visible (for example a cropped footer during D/A). Such a
+    // notification must not retire the native editor or completion overlay.
+    const command_id: [65]u8 = if (snapshot.acknowledge) snapshot.block_id else @splat(0);
     _ = surface.app.performAction(.{ .surface = &surface.core_surface }, .native_input_presented, .{
         .serial = snapshot.serial,
-        .block_id = @ptrCast(&snapshot.block_id),
+        .block_id = @ptrCast(&command_id),
         .prompt = &prompt,
     }) catch |err| {
         log.warn("native input presentation callback failed err={}", .{err});
