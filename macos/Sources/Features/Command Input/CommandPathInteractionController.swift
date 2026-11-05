@@ -48,7 +48,6 @@ final class CommandPathInteractionController: NSObject {
     private var pendingProbe: CommandPathProbe?
     private var hover: Hover?
     private var click: Click?
-    private var consumedFirstPress = false
     private var point: NSPoint?
     private var modifiers: NSEvent.ModifierFlags = []
     private var modifierMonitor: Any?
@@ -199,7 +198,6 @@ final class CommandPathInteractionController: NSObject {
         }
         guard let probe = hover?.probe ?? pendingProbe else { return }
         tooltip?.dismiss()
-        consumedFirstPress = event.type == .leftMouseDown
         clickDeadline?.cancel()
         click = Click(event: event, point: point, id: probe.id, workingDirectory: probe.workingDirectory,
                       match: hover?.match,
@@ -214,15 +212,13 @@ final class CommandPathInteractionController: NSObject {
         }
     }
 
-    /// Only a path-owned sequence needs AppKit's count: ordinary terminal
-    /// clicks retain Ghostty's existing repeat timing and selection behavior.
+    /// AppKit owns repeated-click recognition. A first press may have moved
+    /// focus from the native editor, or been consumed by a path interaction,
+    /// before the terminal sees this sequence. Core arrival times cannot
+    /// reconstruct it reliably, especially under load.
     func selectionClickCount(for event: NSEvent) -> UInt32? {
-        guard event.type == .leftMouseDown else { return nil }
-        guard event.clickCount > 1 else {
-            consumedFirstPress = false
-            return nil
-        }
-        return consumedFirstPress ? UInt32(clamping: event.clickCount) : nil
+        guard event.type == .leftMouseDown, event.clickCount > 1 else { return nil }
+        return UInt32(clamping: min(event.clickCount, 3))
     }
 
     func mouseDragged(with event: NSEvent) {
@@ -324,7 +320,6 @@ final class CommandPathInteractionController: NSObject {
 
     @objc private func windowChanged(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window === view?.window else { return }
-        consumedFirstPress = false
         pointerExited()
     }
 }

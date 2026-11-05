@@ -771,8 +771,8 @@ extension Ghostty {
             // get forwarded to the terminal as a mouse click.
             if NSApp.isActive && window.isKeyWindow {
                 window.makeFirstResponder(self)
-                // A path's first press intentionally retained editor focus.
-                // Its real second/third press must still select terminal text.
+                // Repeated clicks must select text even when the first press
+                // only transferred focus from the native command editor.
                 if commandPathInteraction?.selectionClickCount(for: event) != nil { return event }
                 suppressNextLeftMouseUp = true
                 return nil
@@ -986,6 +986,12 @@ extension Ghostty {
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
+            if commandPathInteraction != nil {
+                // An intercepted first press may have skipped mouse movement.
+                // Select at this event's location, never a stale hover position.
+                let pos = convert(event.locationInWindow, from: nil)
+                ghostty_surface_mouse_pos(surface, pos.x, frame.height - pos.y, mods)
+            }
             if let count = commandPathInteraction?.selectionClickCount(for: event) {
                 ghostty_surface_mouse_button_with_click_count(surface, GHOSTTY_MOUSE_PRESS,
                                                              GHOSTTY_MOUSE_LEFT, mods, count)

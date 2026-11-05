@@ -71,6 +71,7 @@ final class NativeCommandSurfaceHost: NSView {
         editor.onTextChanged = { [weak session] in session?.setDraft($0) }
         editor.onSubmit = { [weak session] in session?.submit($0) ?? false }
         editor.onUseTerminal = { [weak session] in session?.useTerminal() }
+        editor.scrollView.onTerminalScroll = { [weak surfaceView] in surfaceView?.scrollWheel(with: $0) }
         editor.onFind = { [weak self] in
             guard let self, self.surfaceView.surface != nil else { return false }
             self.surfaceView.find(nil)
@@ -268,8 +269,7 @@ final class NativeCommandSurfaceHost: NSView {
         let minimumHeight = line + padding * 2
         let preparedHeight = session.canPrepareNativePrompt && holdingPresentation
             ? minimumHeight : editor.contentHeight
-        let height = min(max(minimumHeight, preparedHeight),
-                         max(minimumHeight, min(line * 12 + padding * 2, bounds.height * 0.45)))
+        let height = CommandInputView.viewportHeight(content: preparedHeight, line: line, terminal: bounds.height)
         let recovering = session.editorVisible && session.isRecoveringDraft
         let transferring = session.isTransferringSubmission || holdingPresentation
         let preparing = session.canPrepareNativePrompt && !recovering

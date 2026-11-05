@@ -2,7 +2,7 @@ import Foundation
 
 /// Docking follows the prompt's fit in the prospective inline grid. Retained
 /// history alone is not overflow: resizing can preserve history above a mostly
-/// empty active screen. Browsing history holds the dock until the live end.
+/// empty active screen. Browsing history retains a dock only while the live prompt actually overflows.
 struct CommandInputDocking {
     /// The shell reserves two real VT rows for readable caption text and the
     /// six-point margins. The following input row completes the compact tail.
@@ -36,13 +36,10 @@ struct CommandInputDocking {
         let padding = metrics.padding
         if editing && !recovering && !transferring && layout.primary && metrics.geometryIsSettled &&
             layout.rows > 0 && metrics.inlineRows > 0 && layout.activeCursorRow < layout.rows {
-            if layout.atBottom {
-                hasDocked = projectedPromptRow(layout: layout, inlineRows: metrics.inlineRows) >= metrics.inlineRows - 1
-            } else if layout.scrollbackRows > 0 {
-                // Keep input accessible while browsing even when the retained
-                // rows came from a past, smaller window. Recheck at live end.
-                hasDocked = true
-            }
+            // Viewport motion cannot create overflow. In particular, `clear`
+            // retains history above a short active screen; browsing that history
+            // must not promote its inline prompt into a permanent footer.
+            hasDocked = projectedPromptRow(layout: layout, inlineRows: metrics.inlineRows) >= metrics.inlineRows - 1
         }
         let pinned = recovering || hasDocked
         let line = max(1, layout.cellHeight)

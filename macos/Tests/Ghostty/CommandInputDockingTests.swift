@@ -67,14 +67,16 @@ struct CommandInputDockingTests {
         }
     }
 
-    @Test func browsingRetainedHistoryPinsTemporarilyThenReturnsInline() {
+    @Test func browsingRetainedHistoryDoesNotDockAShortPrompt() {
         var docking = CommandInputDocking()
         var layout = geometry()
         layout.scrollbackRows = 2
         layout.hasScrollback = true
         layout.atBottom = false
         layout.cursorValid = false
-        #expect(place(&docking, layout: layout).pinned)
+        let browsing = place(&docking, layout: layout)
+        #expect(!browsing.pinned && !browsing.shown)
+        #expect(!docking.hasDocked)
         layout.atBottom = true
         layout.cursorValid = true
         let restored = place(&docking, layout: layout)
@@ -128,6 +130,12 @@ struct CommandInputDockingTests {
         cleared.cursorY = 18
         #expect(!place(&docking, layout: cleared).pinned)
         #expect(!docking.hasDocked)
+        cleared.atBottom = false
+        cleared.cursorValid = true
+        cleared.cursorY = 72
+        let scrolled = place(&docking, layout: cleared)
+        #expect(!scrolled.pinned && scrolled.shown)
+        #expect(scrolled.origin.y == 66)
     }
 
     @Test func tallDraftMayDockButClearingItRestoresInlineWhenItFits() {

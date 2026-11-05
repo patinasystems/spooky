@@ -27,6 +27,12 @@ final class CommandInputView: NSView, NSTextViewDelegate {
     private var latestHeight: CGFloat = 0
     private var heightReportScheduled = false
     private var configuredBackgroundColor: NSColor?
+    private let topFade = CAGradientLayer()
+    private let bottomFade = CAGradientLayer()
+
+    static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat) -> CGFloat {
+        min(max(line + padding * 2, content), max(1, terminal * 0.5))
+    }
 
     /// Updated synchronously by TextKit; the notification stays deferred so a
     /// host can use current font metrics before publishing terminal padding.
@@ -47,7 +53,19 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         scrollView.drawsBackground = false
         scrollView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
+        scrollView.verticalScrollElasticity = .none
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.onViewportChanged = { [weak self] in self?.updateScrollFades() }
         addSubview(scrollView)
+        for fade in [topFade, bottomFade] {
+            fade.zPosition = 2
+            fade.isHidden = true
+            fade.actions = ["position": NSNull(), "bounds": NSNull(), "hidden": NSNull(),
+                            "colors": NSNull(), "locations": NSNull()]
+            fade.startPoint = CGPoint(x: 0.5, y: 0)
+            fade.endPoint = CGPoint(x: 0.5, y: 1)
+            layer?.addSublayer(fade)
+        }
 
         textView.managesInsertionPoint = true
         textView.setPromptIdentity(CommandPromptIdentity.local)
@@ -86,6 +104,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
                                   width: max(1, bounds.width - Self.padding * 2),
                                   height: max(1, bounds.height - Self.padding * 2))
         scrollView.tile()
+        updateScrollFades()
         textView.updateCompletionPosition()
         caret.update()
     }
@@ -158,6 +177,18 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         if configuredBackgroundColor != backgroundColor {
             configuredBackgroundColor = backgroundColor
             layer?.backgroundColor = backgroundColor.cgColor
+            // Nine retained stops approximate the terminal's C2 quintic ramp.
+            // These narrow overlays composite over the opaque editor; no text
+            // mask, offscreen rasterization, or scroll-time bitmap is needed.
+            let stops = (0...8).map { CGFloat($0) / 8 }
+            let colors = stops.map { t -> CGColor in
+                let opacity = t * t * t * (t * (t * 6 - 15) + 10)
+                return backgroundColor.withAlphaComponent(opacity).cgColor
+            }
+            topFade.colors = colors
+            bottomFade.colors = Array(colors.reversed())
+            topFade.locations = stops.map { NSNumber(value: Double($0)) }
+            bottomFade.locations = topFade.locations
             // The editor is a sibling of the terminal's scroll view, so it
             // does not inherit that view's background-matched appearance.
             // Native pointers, selections, and scrollers need the same match.
@@ -183,9 +214,27 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         caret.update(restart: true)
     }
 
+    private func updateScrollFades() {
+        let clip = scrollView.contentView.bounds
+        let overflow = scrollView.overflow
+        let band = min(max(1, textView.minimumLineHeight) * 1.5, clip.height * 0.5)
+        let top = min(band, max(0, clip.minY))
+        let bottom = min(band, max(0, overflow - clip.minY))
+        let viewport = convert(scrollView.contentView.bounds, from: scrollView.contentView)
+        let topFrame = NSRect(x: viewport.minX, y: viewport.maxY - top, width: viewport.width, height: top)
+        let bottomFrame = NSRect(x: viewport.minX, y: viewport.minY, width: viewport.width, height: bottom)
+        if topFade.frame != topFrame { topFade.frame = topFrame }
+        if bottomFade.frame != bottomFrame { bottomFade.frame = bottomFrame }
+        if topFade.isHidden != (top <= 0.5) { topFade.isHidden = top <= 0.5 }
+        if bottomFade.isHidden != (bottom <= 0.5) { bottomFade.isHidden = bottom <= 0.5 }
+    }
+
     private func contentHeightChanged(_ height: CGFloat) {
         guard latestHeight != height else { return }
         latestHeight = height
+        scrollView.documentContentHeight = height
+        scrollView.needsLayout = true
+        updateScrollFades()
         guard !heightReportScheduled else { return }
         heightReportScheduled = true
         // TextKit may be laying out while the host changes the editor frame.
@@ -202,6 +251,21 @@ final class CommandInputView: NSView, NSTextViewDelegate {
 /// string. Otherwise clicking below its only line hits NSClipView, not the editor.
 @MainActor
 final class CommandEditorScrollView: NSScrollView {
+    var documentContentHeight: CGFloat = 0
+    var onTerminalScroll: ((NSEvent) -> Void)?
+    var onViewportChanged: (() -> Void)?
+    var overflow: CGFloat { max(0, documentContentHeight - contentView.bounds.height) }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard overflow > 0.5 else { onTerminalScroll?(event); return }
+        super.scrollWheel(with: event)
+    }
+
+    override func reflectScrolledClipView(_ cView: NSClipView) {
+        super.reflectScrolledClipView(cView)
+        onViewportChanged?()
+    }
+
     override func tile() {
         super.tile()
         guard let textView = documentView as? CommandTextView else { return }
@@ -210,8 +274,12 @@ final class CommandEditorScrollView: NSScrollView {
         if textView.minSize.height != viewportHeight {
             textView.minSize = NSSize(width: 0, height: viewportHeight)
         }
-        if textView.frame.height < viewportHeight {
-            textView.setFrameSize(NSSize(width: textView.frame.width, height: viewportHeight))
+        let height = max(viewportHeight, documentContentHeight)
+        if textView.frame.height != height {
+            textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
         }
+        let constrained = contentView.constrainBoundsRect(contentView.bounds)
+        if constrained.origin != contentView.bounds.origin { contentView.scroll(to: constrained.origin) }
+        onViewportChanged?()
     }
 }

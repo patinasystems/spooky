@@ -169,12 +169,13 @@ struct CommandPathInteractionTests {
         #expect(fixture.copies.isEmpty && fixture.opens.isEmpty)
     }
 
-    @Test func consumedPathPressHandsRealRepeatedClickCountsToTerminalSelection() throws {
+    @Test func appKitRepeatedClickCountsSurviveEditorFocusAndPathInterception() throws {
         let fixture = PathInteractionFixture()
         defer { fixture.window.close() }
         let controller = fixture.controller()
         for count in 1...3 {
-            #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown, clickCount: count)) == nil)
+            #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown, clickCount: count))
+                == (count == 1 ? nil : UInt32(count)))
         }
 
         controller.mouseDown(with: try fixture.event(.leftMouseDown))
@@ -188,7 +189,9 @@ struct CommandPathInteractionTests {
         #expect(fixture.forwards.isEmpty) // The actual second/third event reaches SurfaceView directly.
         #expect(fixture.copies.count == 1)
         #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown)) == nil)
-        #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown, clickCount: 2)) == nil)
+        #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown, clickCount: 2)) == 2)
+        #expect(controller.selectionClickCount(for: try fixture.event(.leftMouseDown, clickCount: 4)) == 3)
+        #expect(controller.selectionClickCount(for: try fixture.event(.rightMouseDown, clickCount: 2)) == nil)
     }
 
     @Test func staleValidationCannotPublishAfterPointerMovesAndModifiersDoNotRepeatIO() async {
