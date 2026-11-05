@@ -60,7 +60,10 @@ enum CommandWindowCapture {
 
         func run() async {
             do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                recordStartup("starting")
                 guard let window, window.isVisible else {
+                    recordStartup("window_not_visible")
                     await stop()
                     return
                 }
@@ -68,6 +71,7 @@ enum CommandWindowCapture {
                 // and the final startup size. Retry only this app-owned window, and
                 // require its frame to settle before allocating the recording.
                 guard let captured = try await settledWindow(window) else {
+                    recordStartup("window_not_enumerated_or_unsettled")
                     await stop()
                     return
                 }
@@ -142,13 +146,29 @@ enum CommandWindowCapture {
                 try await stream.startCapture()
                 guard !stopped else { try? await stream.stopCapture(); return }
                 started = true
+                recordStartup("recording")
                 timer = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(self?.duration ?? 30))
                     guard !Task.isCancelled else { return }
                     await self?.stop()
                 }
             } catch {
+                recordStartup("failed", error: String(describing: error))
                 await stop()
+            }
+        }
+
+        private func recordStartup(_ state: String, error: String? = nil) {
+            var record: [String: Any] = ["state": state, "uptime_s": ProcessInfo.processInfo.systemUptime]
+            if let error { record["error"] = error }
+            if let window {
+                record["window_id"] = window.windowNumber
+                record["key"] = window.isKeyWindow
+                record["visible"] = window.isVisible
+                record["active_space"] = window.isOnActiveSpace
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
+                try? data.write(to: directory.appendingPathComponent("startup.json"), options: .atomic)
             }
         }
 
