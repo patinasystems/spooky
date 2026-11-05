@@ -342,6 +342,7 @@ struct CommandTextViewTests {
         try? await Task.sleep(for: .milliseconds(30))
         #expect(editor.frame.height == 300)
         #expect(editor.scrollView.contentView.bounds.minY > 0)
+        #expect(abs(editor.scrollView.overflow - editor.scrollView.contentView.bounds.minY) <= 0.5)
         #expect(CommandInputCaret.frame(textView: editor.textView, in: editor) != nil)
     }
 

@@ -269,7 +269,10 @@ final class CommandEditorScrollView: NSScrollView {
     var documentContentHeight: CGFloat = 0
     var onTerminalScroll: ((NSEvent) -> Void)?
     var onViewportChanged: (() -> Void)?
-    var overflow: CGFloat { max(0, documentContentHeight - contentView.bounds.height) }
+    // AppKit may refine NSTextView's frame after a measured resize. The real
+    // scroll extent, not the earlier text-height estimate, owns wheel routing
+    // and fade visibility at the exact scroll limits.
+    var overflow: CGFloat { max(0, (documentView?.frame.height ?? 0) - contentView.bounds.height) }
 
     override func scrollWheel(with event: NSEvent) {
         guard overflow > 0.5 else { onTerminalScroll?(event); return }
