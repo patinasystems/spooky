@@ -25,6 +25,7 @@ final class CommandInputSession {
     private(set) var suppressesShellCursor = false
     private var keepsEmptyCaret = false
     private(set) var submittedEditorRetired = false
+    private var awaitingPresentedCommand: String?
     private var promptKeys: [(event: NSEvent, inputID: UInt64?)] = []
 
     let directory: URL
@@ -364,6 +365,7 @@ final class CommandInputSession {
         pending = request
         keepsEmptyCaret = text.isEmpty
         submittedEditorRetired = false
+        awaitingPresentedCommand = blockID
         suppressesShellCursor = true
         scheduleDeadline(after: 5.05)
         status = "Submitting…"
@@ -416,6 +418,7 @@ final class CommandInputSession {
                 guard let self, self.pending?.id == request.id else { return }
                 self.cancelSubmissionPresentation()
                 self.pending = nil
+                self.awaitingPresentedCommand = nil
                 self.submissionTiming = nil
                 self.submissionInputID = nil
                 self.deadlineTask?.cancel()
@@ -434,6 +437,7 @@ final class CommandInputSession {
         completionTask?.cancel()
         historyTask?.cancel()
         terminalRequested = true
+        awaitingPresentedCommand = nil
         recoveryVisible = false
         editorVisible = false
         focusRequest = 0
@@ -457,19 +461,21 @@ final class CommandInputSession {
             // delayed receipt must not leave the old native draft over it.
             submittedEditorRetired = true
         }
+        if let blockID, blockID == awaitingPresentedCommand { awaitingPresentedCommand = nil }
         attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
         // IOSurface assignment and this native layout happen in the same main
         // transaction, outside the renderer lock. Never show a future prompt
         // over pixels from the previous command.
         terminalGeometryChanged()
-        if generation != nil {
-            if promptID == currentBlockID { presentReadyPrompt() }
-            if isEditable && promptID == currentBlockID {
-                onPromptPresented?()
-                replayPromptKeys()
-            }
-        }
+        if generation != nil, promptID == currentBlockID { presentReadyPrompt() }
         changed()
+        if generation != nil, isEditable, promptID == currentBlockID {
+            awaitingPresentedCommand = nil
+            onPromptPresented?()
+            replayPromptKeys()
+        } else if !ready, pending == nil, handoff == nil, awaitingPresentedCommand == nil {
+            replayPromptKeys()
+        }
         CommandInputDiagnostics.mark(.terminalFrameAttached, id: submissionInputID ?? lastSubmissionInputID,
                                      metrics: ["ready": generation == nil ? 0 : 1, "serial": Double(serial)])
     }
@@ -491,7 +497,8 @@ final class CommandInputSession {
             return false
         }
         guard layout.nativeStateRevision > 0, !failed, !terminalRequested,
-              pending != nil || handoff != nil || (ready && attachedPromptGeneration != generation),
+              pending != nil || handoff != nil || awaitingPresentedCommand != nil
+                || (ready && attachedPromptGeneration != generation),
               CommandInputShortcut.routesToEditor(event, promptIsEditable: true, windowIsKey: true,
                                                    terminalOwnsKeyboard: true, hasMarkedText: false) else { return false }
         guard promptKeys.count < 256 else { NSSound.beep(); return true }
@@ -712,7 +719,10 @@ final class CommandInputSession {
         } else { focusRequest = 0 }
         // Acceptance and a parsed C authorize foreground type-ahead. A fast
         // next prompt instead keeps it queued until that prompt is presented.
-        if !ready { replayPromptKeys() }
+        // Parser C can precede the actual running-program frame. Keep queued
+        // typing until presentation decides whether this is that program or
+        // an already-completed command's next native prompt.
+        if !ready && awaitingPresentedCommand == nil { replayPromptKeys() }
     }
 
     private func presentReadyPrompt() {
