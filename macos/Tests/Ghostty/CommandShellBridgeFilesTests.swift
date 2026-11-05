@@ -16,6 +16,22 @@ struct CommandShellBridgeFilesTests {
         #expect(!CommandShellBridgeFiles.isReady("ready\tbad\nvalue\tstart\tid\n", generation: "bad\nvalue"))
     }
 
+    @Test(arguments: ["running\t123-1\tstart\tblock-1\n", "ready\t123-1\tstart\tblock-1\n", ""])
+    func submissionUsesParsedGenerationWhileStateFileLags(_ state: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        if !state.isEmpty { try Data(state.utf8).write(to: directory.appendingPathComponent("state")) }
+        let bridge = CommandInputBridge(directory: directory)
+        let identifier = UUID().uuidString
+        try await bridge.submit(text: "printf 'next\\n'", generation: "123-2", id: identifier)
+        let request = try String(contentsOf: directory.appendingPathComponent("request"), encoding: .utf8)
+        #expect(request == "123-2\n\(identifier)\nprintf 'next\\n'")
+        if !state.isEmpty {
+            #expect(try String(contentsOf: directory.appendingPathComponent("state"), encoding: .utf8) == state)
+        }
+    }
+
     @Test func boundedReadPreservesExactUTF8AndRejectsOversizeOrInvalidBytes() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }

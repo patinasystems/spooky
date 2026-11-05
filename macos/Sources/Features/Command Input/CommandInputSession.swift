@@ -461,7 +461,7 @@ final class CommandInputSession {
             // delayed receipt must not leave the old native draft over it.
             submittedEditorRetired = true
         }
-        if let blockID, blockID == awaitingPresentedCommand { awaitingPresentedCommand = nil }
+        if let blockID, blockID == awaitingPresentedCommand, !keepsEmptyCaret { awaitingPresentedCommand = nil }
         attachedPromptGeneration = promptID == layout.nativeBlockID ? generation : nil
         // IOSurface assignment and this native layout happen in the same main
         // transaction, outside the renderer lock. Never show a future prompt
@@ -959,10 +959,10 @@ actor CommandInputBridge {
     }
 
     func submit(text: String, generation: String, id: String) throws {
-        let state = fields("state")
-        guard state.count == 4, Array(state.prefix(3)) == ["ready", generation, "start"] else {
-            throw BridgeError.unavailable("The shell is no longer at the same empty prompt.")
-        }
+        // Parsed PTY readiness is authoritative. Its OSC precedes the state
+        // file rename, so rereading that file can reject a valid fast submit.
+        // The ZLE widget validates generation, context, UUID and empty BUFFER
+        // immediately before acceptance; a stale request still cannot execute.
         let payload = Data("\(generation)\n\(id)\n\(text)".utf8)
         try payload.write(to: directory.appendingPathComponent("request"), options: .atomic)
     }
