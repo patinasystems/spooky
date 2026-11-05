@@ -251,6 +251,13 @@ final class CommandInputView: NSView, NSTextViewDelegate {
             guard let self else { return }
             self.heightReportScheduled = false
             self.onContentHeightChanged(self.contentHeight)
+            // Paste/newline selection settles after the synchronous TextKit
+            // measurement. Reveal it after the host applies the capped size,
+            // once per height change, without fighting ordinary wheel scrolls.
+            if self.window?.firstResponder === self.textView {
+                self.layoutSubtreeIfNeeded()
+                self.textView.scrollRangeToVisible(self.textView.selectedRange())
+            }
         }
     }
 }

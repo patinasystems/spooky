@@ -323,6 +323,28 @@ struct CommandTextViewTests {
         #expect(editor.scrollView.verticalScrollElasticity == .none)
     }
 
+    @Test func cappedGrowthRevealsTheFinalCaretAfterHostResize() async {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 30))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        defer { window.close() }
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 600))
+        window.contentView = host
+        host.addSubview(editor)
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 18)
+        editor.onContentHeightChanged = { [weak editor] height in
+            editor?.setFrameSize(NSSize(width: 400,
+                                       height: CommandInputView.viewportHeight(content: height, line: 18, terminal: 600)))
+        }
+        window.makeFirstResponder(editor.textView)
+        editor.setDraft(String(repeating: "line\n", count: 80))
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(editor.frame.height == 300)
+        #expect(editor.scrollView.contentView.bounds.minY > 0)
+        #expect(CommandInputCaret.frame(textView: editor.textView, in: editor) != nil)
+    }
+
     @Test func emptyEditorMeasuresOneLineWithoutReservedBlankSpace() {
         let view = makeSizedEditor(width: 400)
         // A taller viewport must not become the content's desired height.
