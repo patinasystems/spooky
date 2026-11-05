@@ -708,8 +708,10 @@ final class CommandInputSession {
         keepsEmptyCaret = false
         suppressesShellCursor = false
         status = "Native input · zsh"
-        if shouldFocus, let view = surfaceView, view.window?.isKeyWindow == true,
-           view.window?.firstResponder === view { requestEditorFocus() }
+        // AppKit may relinquish a disabled NSTextView to the window itself.
+        // The host gates this token against the selected pane and responder;
+        // requiring the terminal view here strands those fallback responders.
+        if shouldFocus, surfaceView?.window?.isKeyWindow == true { requestEditorFocus() }
     }
 
     /// Timeouts do not wait for the slower recovery watchdog. Keep the existing

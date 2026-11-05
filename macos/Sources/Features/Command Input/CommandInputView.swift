@@ -90,10 +90,10 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         caret.attach(to: window)
     }
 
-    func completePresentedInput() {
+    func completePresentedInput(restartCaret: Bool = true) {
         textView.completePresentedFocusRequest()
-        caret.update(restart: true)
         displayIfNeeded()
+        caret.update(restart: restartCaret)
     }
 
     /// Acknowledgement and history loading are explicit external edits. Normal

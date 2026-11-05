@@ -4,6 +4,32 @@ import Testing
 
 @MainActor
 struct CommandInputCaretTests {
+    @Test func presentedPromptRecoversWindowResponderInTheSameTurn() throws {
+        // Simulate AppKit's fallback after disabling the old text view without
+        // ordering a window or taking the user's actual keyboard focus.
+        let window = CaretKeyWindow(contentRect: NSRect(x: 100, y: 100, width: 400, height: 200),
+                                    styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        window.contentView = editor
+        #expect(window.makeFirstResponder(window))
+        editor.requestFocus(token: 1)
+        editor.layoutSubtreeIfNeeded()
+        editor.completePresentedInput()
+        #expect(window.firstResponder === editor.textView)
+        #expect(CommandInputCaret.frame(textView: editor.textView, in: editor) != nil)
+
+        // A search field or another pane still owns its own responder.
+        let search = NSTextView()
+        editor.addSubview(search)
+        #expect(window.makeFirstResponder(search))
+        editor.canRequestFocus = { false }
+        editor.requestFocus(token: 2)
+        editor.completePresentedInput()
+        #expect(window.firstResponder === search)
+    }
+
     @Test func managedCaretDisablesOnlyTheSystemIndicator() {
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 640, height: 200))
         #expect(editor.textView.managesInsertionPoint)
@@ -40,4 +66,9 @@ struct CommandInputCaretTests {
         text.setSelectedRange(NSRange(location: 0, length: 3))
         #expect(CommandInputCaret.frame(textView: text, in: editor) == nil)
     }
+}
+
+@MainActor
+private final class CaretKeyWindow: NSWindow {
+    override var isKeyWindow: Bool { true }
 }

@@ -415,6 +415,10 @@ final class NativeCommandSurfaceHost: NSView {
         prepareSubmittedEcho()
         editor.requestFocus(token: shown && canFocusEditor ? session.focusRequest : 0)
         editor.layoutSubtreeIfNeeded()
+        // A geometry snapshot can recover a presentation acknowledgement
+        // before its callback arrives. Finish the same owned focus request
+        // here too, rather than waiting for another key or layout turn.
+        if editable { editor.completePresentedInput(restartCaret: false) }
         layoutNotice(foreground: foreground)
         paths.refresh()
         if CommandInputDiagnostics.isEnabled {
