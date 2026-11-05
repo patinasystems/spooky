@@ -100,6 +100,7 @@ pub fn canPixelScroll(self: *const State) bool {
 /// Input and native path overlays use the same rounded physical-pixel crop as
 /// Metal, including the interval before a queued renderer snapshot catches up.
 pub fn viewportScrollOffset(self: *const State, size: renderer.Size) f32 {
+    if (self.viewport_scroll.offset == 0 or !self.canPixelScroll()) return 0;
     return self.viewport_scroll.currentOffset(self.terminal.screens.active.pages.scrollbar(), size.cell.height, self.canPixelScroll());
 }
 
