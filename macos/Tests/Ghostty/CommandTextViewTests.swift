@@ -1015,6 +1015,7 @@ struct CommandTextViewTests {
     @Test func passiveMenuAndPreviewStayFrozenUntilSubmittedFrameCommits() throws {
         let (view, window) = makeCompletionEditor(draft: "git ch")
         defer { window.close() }
+        window.simulatedVisible = true
         var request: CommandCompletionRequest?
         var submitted: String?
         view.onRequestCompletion = { request = $0 }
@@ -1032,6 +1033,7 @@ struct CommandTextViewTests {
         #expect(view.completions.listVisible)
         // The completion UI is in this window's layer tree, not a child panel.
         #expect(window.childWindows?.isEmpty ?? true)
+        #expect(view.completions.popup?.isVisible == true)
         view.keyDown(with: try returnEvent())
         #expect(submitted == "git ch")
         view.completions.selectionChanged()
@@ -1395,6 +1397,8 @@ struct CommandTextViewTests {
 @MainActor
 private final class CommandFocusTestWindow: NSWindow {
     var simulatedKey = true
+    var simulatedVisible = false
+    override var isVisible: Bool { simulatedVisible || super.isVisible }
     override var isKeyWindow: Bool { simulatedKey }
 }
 
