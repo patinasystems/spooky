@@ -164,11 +164,16 @@ vec4 load_color(
 //----------------------------------------------------------------------------//
 
 // Premultiplied content fades directly in the existing fragment passes.
+float scroll_edge_opacity(float distance, float length) {
+    float t = clamp(distance / length, 0.0, 1.0);
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
 float scroll_opacity(float y) {
     float opacity = 1.0;
     if (scroll_fade.z > 0.0)
-        opacity *= smoothstep(0.0, scroll_fade.z, y - scroll_fade.x);
+        opacity *= scroll_edge_opacity(y - scroll_fade.x, scroll_fade.z);
     if (scroll_fade.w > 0.0)
-        opacity *= smoothstep(0.0, scroll_fade.w, scroll_fade.y - y);
+        opacity *= scroll_edge_opacity(scroll_fade.y - y, scroll_fade.w);
     return opacity;
 }

@@ -36,12 +36,19 @@ struct Uniforms {
 
 // Fade scrolling content into the existing surface background. All colors
 // are premultiplied; pinned input and screen-space overlays stay untouched.
+// Quintic easing has zero first and second derivatives at both ends, so
+// neither the beginning nor the end of the fade introduces a visible band.
+float scroll_edge_opacity(float distance, float length) {
+  const float t = saturate(distance / length);
+  return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
 float scroll_opacity(float y, constant Uniforms& uniforms) {
   float opacity = 1.0;
   if (uniforms.scroll_fade.z > 0)
-    opacity *= smoothstep(0.0, uniforms.scroll_fade.z, y - uniforms.scroll_fade.x);
+    opacity *= scroll_edge_opacity(y - uniforms.scroll_fade.x, uniforms.scroll_fade.z);
   if (uniforms.scroll_fade.w > 0)
-    opacity *= smoothstep(0.0, uniforms.scroll_fade.w, uniforms.scroll_fade.y - y);
+    opacity *= scroll_edge_opacity(uniforms.scroll_fade.y - y, uniforms.scroll_fade.w);
   return opacity;
 }
 

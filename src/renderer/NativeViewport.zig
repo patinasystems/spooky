@@ -30,7 +30,7 @@ pub const Resolved = struct {
         const bottom: f32 = @floatFromInt(self.contentBottom(size));
         const height: f32 = @floatFromInt(size.cell.height);
         const maximum = bar.total -| bar.len;
-        const length = @min(height * 0.75, @max(0, (bottom - top) * 0.5));
+        const length = @min(height * 1.5, @max(0, (bottom - top) * 0.5));
         const above = @as(f32, @floatFromInt(bar.offset)) * height + self.scroll_offset_y;
         const below = @as(f32, @floatFromInt(maximum -| bar.offset)) * height - self.scroll_offset_y;
         return .{ top, bottom, std.math.clamp(above, 0, length), std.math.clamp(below, 0, length) };
@@ -293,12 +293,12 @@ test "native viewport fades only the edges with overflow and disables for progra
     const t = std.testing;
     var viewport: Resolved = .{ .rows = 32, .clip_bottom = 554 };
     var bar: terminal.Scrollbar = .{ .total = 100, .len = 34, .offset = 0 };
-    try t.expectEqual([4]f32{ 2, 554, 0, 12.75 }, viewport.fadeBounds(test_size, bar, true));
+    try t.expectEqual([4]f32{ 2, 554, 0, 25.5 }, viewport.fadeBounds(test_size, bar, true));
     bar.offset = 66;
-    try t.expectEqual([4]f32{ 2, 554, 12.75, 0 }, viewport.fadeBounds(test_size, bar, true));
+    try t.expectEqual([4]f32{ 2, 554, 25.5, 0 }, viewport.fadeBounds(test_size, bar, true));
     bar.offset = 65;
     viewport.scroll_offset_y = 16;
-    try t.expectEqual([4]f32{ 2, 554, 12.75, 1 }, viewport.fadeBounds(test_size, bar, true));
+    try t.expectEqual([4]f32{ 2, 554, 25.5, 1 }, viewport.fadeBounds(test_size, bar, true));
     try t.expectEqual(@as([4]f32, @splat(0)), viewport.fadeBounds(test_size, bar, false));
     bar = .{ .total = 34, .len = 34, .offset = 0 };
     viewport.scroll_offset_y = 0;
