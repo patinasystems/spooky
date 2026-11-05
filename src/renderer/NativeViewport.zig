@@ -14,6 +14,19 @@ pub const Resolved = struct {
     rows: usize,
     clip_bottom: ?u32 = null,
     footer_top: ?u32 = null,
+    scroll_offset_y: f32 = 0,
+
+    pub fn hitRows(self: Resolved) usize {
+        return self.rows + @intFromBool(self.scroll_offset_y > 0);
+    }
+
+    pub fn sameGeometry(self: Resolved, other: Resolved) bool {
+        return self.rows == other.rows and self.clip_bottom == other.clip_bottom and self.footer_top == other.footer_top;
+    }
+
+    pub fn contentBottom(self: Resolved, size: Size) u32 {
+        return self.clip_bottom orelse @intCast(@min(size.screen.height, @as(u64, size.padding.top) + @as(u64, self.rows) * size.cell.height));
+    }
 
     pub fn scrollbar(self: Resolved, value: terminal.Scrollbar) terminal.Scrollbar {
         const hidden = value.len -| self.rows;
@@ -71,6 +84,17 @@ pub fn promptTailRows(term: *const terminal.Terminal) u2 {
 
 const test_size: Size = .{ .screen = .{ .width = 800, .height = 600 }, .cell = .{ .width = 8, .height = 17 }, .padding = .{ .top = 2, .bottom = 20 } };
 const test_footer: NativeViewport = .{ .footer_height = 46, .covered_rows = 2 };
+
+test "native viewport pixel crop does not move the footer or change scroll range" {
+    const t = std.testing;
+    const plain: Resolved = .{ .rows = 10, .clip_bottom = 160, .footer_top = 166 };
+    var fractional = plain;
+    fractional.scroll_offset_y = 7;
+    try t.expect(plain.sameGeometry(fractional));
+    try t.expectEqual(@as(usize, 11), fractional.hitRows());
+    const bar: terminal.Scrollbar = .{ .total = 100, .len = 12, .offset = 20 };
+    try t.expectEqualDeep(plain.scrollbar(bar), fractional.scrollbar(bar));
+}
 
 fn testPrompt() !terminal.Terminal {
     return testPromptRows(1);

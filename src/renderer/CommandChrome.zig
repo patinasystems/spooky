@@ -406,15 +406,13 @@ const Text = struct {
 
 pub const CaptionLayout = struct { gap: u32, scale: f32, columns: u16, caption_y: f32, separator_y: f32 };
 
-/// New two-row bands keep captions at 87.5% font size, with the requested inset
-/// above and below. The residual row space is the preceding block's margin;
-/// its final physical pixel holds the separator. At tiny fonts only the inset
-/// adapts, never the readable caption. Legacy one-row history keeps its original
-/// layout and cannot paint over the following input/output row.
+/// Draw atlas glyphs at their rasterized size on physical pixel boundaries.
+/// Shrinking terminal glyphs in the vertex shader blurs their coverage. Two-row
+/// bands keep the requested insets; old one-row history uses the complete row.
 pub fn captionLayout(columns: u16, cell_height: u32, requested_gap: u32, rows: u2) CaptionLayout {
     const height: f32 = @floatFromInt(cell_height);
-    const gap = @min(requested_gap, if (rows == 2) cell_height / 8 * 3 + cell_height % 8 * 3 / 8 else cell_height / 8);
-    const scale: f32 = if (cell_height == 0) 1 else if (rows == 2) 0.875 else @as(f32, @floatFromInt(cell_height - gap)) / height;
+    const gap = if (rows == 2) @min(requested_gap, cell_height / 2) else 0;
+    const scale: f32 = 1;
     const inset: f32 = @floatFromInt(gap);
     const margin = height * 2 - height * scale - inset * 2;
     const virtual_columns: u16 = @intFromFloat(@min(
@@ -572,6 +570,12 @@ fn pathHeaderForIndex(self: *const CommandChrome, term: *terminal.Terminal, size
     const metadata = self.entries.get(block.id) orelse return null;
     const header: Header = .{ .id = block.id, .row = @intCast(row), .rows = rows, .above_viewport = visible_row == null, .metadata = metadata };
     var rect = pathRect(header, size, term.cols, term.rows, -1) orelse return null;
+    if (viewport) |vp| {
+        rect.y -= vp.scroll_offset_y;
+        const top_px: f32 = @floatFromInt(size.padding.top);
+        rect.height -= @min(rect.height, @max(0, top_px - rect.y));
+        rect.y = @max(top_px, rect.y);
+    }
     if (viewport) |vp| if (vp.clip_bottom) |bottom| {
         rect.height = @max(0, @min(rect.height, @as(f32, @floatFromInt(bottom)) - rect.y));
     };
@@ -729,13 +733,13 @@ test "command chrome keeps space-padded headers but preserves visible output" {
     }
 }
 
-test "command chrome padding scales captions within the existing header row" {
+test "command chrome captions retain native atlas pixels at every backing scale" {
     const t = std.testing;
     const normal = captionLayout(80, 16, 6, 1);
     const retina = captionLayout(80, 32, 12, 1);
-    try t.expectEqual(@as(u32, 2), normal.gap);
-    try t.expectEqual(@as(u32, 4), retina.gap);
-    try t.expectEqual(@as(f32, 0.875), normal.scale);
+    try t.expectEqual(@as(u32, 0), normal.gap);
+    try t.expectEqual(@as(u32, 0), retina.gap);
+    try t.expectEqual(@as(f32, 1), normal.scale);
     try t.expectEqual(normal.scale, retina.scale);
     try t.expectEqual(normal.columns, retina.columns);
     try t.expectEqual(@as(f32, 16), @as(f32, @floatFromInt(normal.gap)) + 16 * normal.scale);
@@ -799,11 +803,11 @@ test "command chrome two-row band has six point caption insets at normal and Ret
             const height: f32 = @floatFromInt(points * scale);
             const inset: f32 = @floatFromInt(6 * scale);
             const layout = captionLayout(80, points * scale, 6 * scale, 2);
-            try t.expectEqual(@as(f32, 0.875), layout.scale);
+            try t.expectEqual(@as(f32, 1), layout.scale);
             try t.expectEqual(6 * scale, layout.gap);
             try t.expectEqual(inset, layout.caption_y - (layout.separator_y + 1));
             try t.expectEqual(inset, height * 2 - layout.caption_y - height * layout.scale);
-            try t.expect(layout.separator_y + 1 >= inset);
+            try t.expect(layout.separator_y >= 0);
             try t.expect(layout.caption_y + height * layout.scale <= height * 2);
         }
     }
@@ -814,7 +818,7 @@ test "command chrome tiny two-row bands reduce only insets and legacy remains in
     for ([_]u32{ 1, 3, 8, 16, 17, 32, 34 }) |height| {
         const h: f32 = @floatFromInt(height);
         const layout = captionLayout(80, height, 96, 2);
-        try t.expectEqual(@as(f32, 0.875), layout.scale);
+        try t.expectEqual(@as(f32, 1), layout.scale);
         try t.expect(layout.caption_y >= 0);
         try t.expect(layout.caption_y + h * layout.scale <= h * 2);
         const legacy = captionLayout(80, height, 96, 1);
@@ -879,11 +883,11 @@ test "command chrome path hits exclude branch status gaps and overwritten rows" 
     const hit = (try chrome.pathAt(t.allocator, &term, size, 5, 15)).?;
     try t.expectEqualStrings("a", std.mem.sliceTo(&hit.id, 0));
     try t.expectEqual(@as(f32, 4), hit.x);
-    try t.expectEqual(@as(f32, 14), hit.y);
-    try t.expectEqual(@as(f32, 28), hit.width);
-    try t.expectEqual(@as(f32, 14), hit.height);
+    try t.expectEqual(@as(f32, 12), hit.y);
+    try t.expectEqual(@as(f32, 32), hit.width);
+    try t.expectEqual(@as(f32, 16), hit.height);
     try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 5, 2)); // Separator/top gap.
-    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 33, 15)); // After path, before branch.
+    try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 37, 15)); // After path, before branch.
     try t.expectEqual(null, try chrome.pathAt(t.allocator, &term, size, 150, 15)); // Status cells.
     term.setCursorPos(2, 1);
     try term.print('x');
@@ -918,7 +922,7 @@ test "command chrome path bounds preserve unicode truncation scale and partial c
     try t.expectEqual(@as(f32, 24), clipped.height);
     header.pinned = true;
     const pinned = pathRect(header, size, 20, 6, 80).?;
-    try t.expectEqual(@as(f32, 148), pinned.y);
+    try t.expectEqual(@as(f32, 144), pinned.y);
 }
 
 test "command chrome pinned current header replaces only its visible grid copy" {
@@ -1040,6 +1044,6 @@ test "command chrome path hit uses resolved footer position during resize" {
     const size: Size = .{ .screen = .{ .width = 160, .height = 160 }, .cell = .{ .width = 8, .height = 16 }, .padding = .{} };
     const viewport: @import("NativeViewport.zig").Resolved = .{ .rows = 6, .clip_bottom = 96, .footer_top = 112 };
     const hit = (try chrome.pathAtViewport(t.allocator, &term, size, 1, 131, viewport)).?;
-    try t.expectEqual(@as(f32, 130), hit.y);
+    try t.expectEqual(@as(f32, 128), hit.y);
     try t.expectEqual(null, try chrome.pathAtViewport(t.allocator, &term, size, 1, 81, viewport));
 }

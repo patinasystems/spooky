@@ -27,6 +27,7 @@ struct Uniforms {
   float command_pinned_y;
   float command_gap;
   float command_caption_scale;
+  float scroll_offset_y;
   float native_clip_bottom;
   float command_padded_y;
   float command_padded_separator_y;
@@ -460,7 +461,8 @@ fragment float4 cell_bg_fragment(
   constant uchar4 *cells [[buffer(2)]]
 ) {
   if (uniforms.native_clip_bottom >= 0 && in.position.y >= uniforms.native_clip_bottom) discard_fragment();
-  int2 grid_pos = int2(floor((in.position.xy - uniforms.grid_padding.wx) / uniforms.cell_size));
+  float2 sample_pos = in.position.xy + float2(0, uniforms.scroll_offset_y);
+  int2 grid_pos = int2(floor((sample_pos - uniforms.grid_padding.wx) / uniforms.cell_size));
 
   float4 bg = float4(0.0);
 
@@ -608,6 +610,7 @@ vertex CellTextVertexOut cell_text_vertex(
     float2 position = float2(-uniforms.grid_padding.w + uniforms.screen_size.x * corner.x,
                             cell_pos.y + float(in.bearings.y) + float(in.glyph_size.y) * corner.y);
     if ((in.bools & IS_PATH_OVERLAY) != 0) position = cell_pos + float2(in.glyph_size) * corner;
+    if ((in.bools & (IS_PINNED_COMMAND | IS_PATH_OVERLAY)) == 0) position.y -= uniforms.scroll_offset_y;
     out.position = uniforms.projection_matrix * float4(position, 0.0, 1.0);
     out.color = load_color(in.color, uniforms.use_display_p3, uniforms.use_linear_blending);
     out.bg_color = float4(0.0);
@@ -647,7 +650,7 @@ vertex CellTextVertexOut cell_text_vertex(
   offset.y = uniforms.cell_size.y - offset.y;
   if ((in.bools & IS_COMMAND_CHROME) != 0 && (in.bools & IS_PATH_OVERLAY) == 0) {
     bool padded = (in.bools & COMMAND_TOP_GAP) != 0;
-    float scale = padded ? 0.875 : uniforms.command_caption_scale;
+    float scale = uniforms.command_caption_scale;
     cell_pos.x *= scale;
     cell_pos.y += padded ? uniforms.command_padded_y : uniforms.command_gap;
     size *= scale;
@@ -657,6 +660,7 @@ vertex CellTextVertexOut cell_text_vertex(
   // Calculate the final position of the cell which uses our glyph size
   // and glyph offset to create the correct bounding box for the glyph.
   cell_pos = cell_pos + size * corner + offset;
+  if ((in.bools & (IS_PINNED_COMMAND | IS_PATH_OVERLAY)) == 0) cell_pos.y -= uniforms.scroll_offset_y;
   out.position =
       uniforms.projection_matrix * float4(cell_pos.x, cell_pos.y, 0.0f, 1.0f);
 
@@ -718,6 +722,8 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if ((in.chrome_flags & IS_PINNED_COMMAND) == 0 && uniforms.scroll_offset_y > 0 &&
+      in.position.y < uniforms.grid_padding.x) discard_fragment();
   if ((in.chrome_flags & IS_PINNED_COMMAND) == 0 && uniforms.native_clip_bottom >= 0 &&
       in.position.y >= uniforms.native_clip_bottom) discard_fragment();
   if ((in.chrome_flags & IS_COMMAND_CHROME) != 0 &&
@@ -868,6 +874,7 @@ vertex ImageVertexOut image_vertex(
   // adds the source rect width/height components.
   float2 image_pos = (uniforms.cell_size * in.grid_pos) + in.cell_offset;
   image_pos += in.dest_size * corner;
+  image_pos.y -= uniforms.scroll_offset_y;
 
   out.position =
       uniforms.projection_matrix * float4(image_pos.x, image_pos.y, 0.0f, 1.0f);

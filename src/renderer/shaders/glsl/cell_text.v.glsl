@@ -89,6 +89,7 @@ void main() {
         vec2 position = vec2(-grid_padding.w + screen_size.x * corner.x,
                              cell_pos.y + float(bearings.y) + float(glyph_size.y) * corner.y);
         if ((glyph_bools & IS_PATH_OVERLAY) != 0) position = cell_pos + vec2(glyph_size) * corner;
+        if ((glyph_bools & (IS_PINNED_COMMAND | IS_PATH_OVERLAY)) == 0) position.y -= scroll_offset_y;
         gl_Position = projection_matrix * vec4(position, 0.0, 1.0);
         out_data.color = load_color(color, use_linear_blending);
         out_data.bg_color = vec4(0.0);
@@ -128,7 +129,7 @@ void main() {
     offset.y = cell_size.y - offset.y;
     if ((glyph_bools & IS_COMMAND_CHROME) != 0 && (glyph_bools & IS_PATH_OVERLAY) == 0) {
         bool padded = (glyph_bools & COMMAND_TOP_GAP) != 0;
-        float scale = padded ? 0.875 : command_caption_scale;
+        float scale = command_caption_scale;
         cell_pos.x *= scale;
         cell_pos.y += padded ? command_padded_y : command_gap;
         size *= scale;
@@ -138,6 +139,7 @@ void main() {
     // Calculate the final position of the cell which uses our glyph size
     // and glyph offset to create the correct bounding box for the glyph.
     cell_pos = cell_pos + size * corner + offset;
+    if ((glyph_bools & (IS_PINNED_COMMAND | IS_PATH_OVERLAY)) == 0) cell_pos.y -= scroll_offset_y;
     gl_Position = projection_matrix * vec4(cell_pos.x, cell_pos.y, 0.0f, 1.0f);
 
     // Calculate the texture coordinate in pixels. This is NOT normalized

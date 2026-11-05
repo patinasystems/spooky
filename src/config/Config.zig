@@ -2294,10 +2294,12 @@ keybind: Keybinds = .{},
 /// running, the previous window state will not be restored because Ghostty only
 /// saves state on exit if this is enabled.
 ///
-/// The default value is `default`.
+/// Spooky defaults to `always`, restoring native windows, tabs and their
+/// working directories through macOS state restoration. Terminal output and
+/// unfinished commands are not replayed. Set `never` to disable restoration.
 ///
 /// This is currently only supported on macOS. This has no effect on Linux.
-@"window-save-state": WindowSaveState = .default,
+@"window-save-state": WindowSaveState = .always,
 
 /// Resize the window in discrete increments of the focused surface's cell size.
 /// If this is disabled, surfaces are resized in pixel increments. Currently

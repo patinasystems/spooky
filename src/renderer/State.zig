@@ -46,6 +46,8 @@ command_chrome: renderer.CommandChrome = .{},
 native_viewport: renderer.NativeViewport = .{},
 /// One host-validated local path, copied and bounded; never owns filesystem I/O.
 path_hover: renderer.PathHover = .{},
+/// Primary-screen pixel crop; protected by the same mutex as terminal pins.
+viewport_scroll: @import("ViewportScroll.zig") = .{},
 /// Only suppresses intermediate blank redraws for an empty native submission.
 /// Parsing, PTY writes, shell hooks, and DEC2026 remain independent.
 native_submission: renderer.NativeSubmissionGate = .{},
@@ -81,9 +83,24 @@ pub fn preservesNativePrompt(self: *const State) bool {
 
 /// Caller holds mutex. The same bounds govern paint, input, and scrollbars.
 pub fn nativeViewport(self: *const State, size: renderer.Size) renderer.NativeViewport.Resolved {
-    if (!self.native_input_enabled or self.native_input_terminal_requested)
-        return .{ .rows = self.terminal.rows };
-    return self.native_viewport.resolve(self.terminal, size);
+    var viewport: renderer.NativeViewport.Resolved = if (!self.native_input_enabled or self.native_input_terminal_requested)
+        .{ .rows = self.terminal.rows }
+    else
+        self.native_viewport.resolve(self.terminal, size);
+    viewport.scroll_offset_y = self.viewportScrollOffset(size);
+    return viewport;
+}
+
+pub fn canPixelScroll(self: *const State) bool {
+    return self.native_input_enabled and self.terminal.screens.active_key == .primary and
+        self.terminal.flags.mouse_event == .none and
+        self.terminal.rows < std.math.maxInt(terminalpkg.size.CellCountInt);
+}
+
+/// Input and native path overlays use the same rounded physical-pixel crop as
+/// Metal, including the interval before a queued renderer snapshot catches up.
+pub fn viewportScrollOffset(self: *const State, size: renderer.Size) f32 {
+    return self.viewport_scroll.currentOffset(self.terminal.screens.active.pages.scrollbar(), size.cell.height, self.canPixelScroll());
 }
 
 /// Acquire `mutex` while signaling demand for it. Use this instead of
@@ -290,4 +307,21 @@ test "native viewport prompt preservation yields to raw secondary and alternate 
     term.native_prompt_active = true;
     _ = try term.switchScreen(.alternate);
     try t.expect(!state.preservesNativePrompt());
+}
+
+test "pixel viewport preserves application mouse reporting and alternate screens" {
+    const t = std.testing;
+    var term = try terminalpkg.Terminal.init(t.io, t.allocator, .{ .cols = 20, .rows = 4 });
+    defer term.deinit(t.allocator);
+    var mutex: std.Io.Mutex = .init;
+    var state: State = .{ .mutex = &mutex, .terminal = &term, .native_input_enabled = true };
+    try t.expect(state.canPixelScroll());
+    term.flags.mouse_event = .normal;
+    try t.expect(!state.canPixelScroll());
+    term.flags.mouse_event = .none;
+    _ = try term.switchScreen(.alternate);
+    try t.expect(!state.canPixelScroll());
+    _ = try term.switchScreen(.primary);
+    state.native_input_enabled = false;
+    try t.expect(!state.canPixelScroll());
 }

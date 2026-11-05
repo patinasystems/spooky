@@ -5,6 +5,11 @@ import GhosttyKit
 
 @Suite
 struct ConfigTests {
+    @Test func spookyRestoresWindowDirectoriesByDefaultAndHonorsOptOut() throws {
+        #expect(try TemporaryConfig("").windowSaveState == "always")
+        #expect(try TemporaryConfig("window-save-state = never").windowSaveState == "never")
+        #expect(try TemporaryConfig("window-save-state = default").windowSaveState == "default")
+    }
     // MARK: - Boolean Properties
 
     @Test func initialWindowDefaultsToTrue() throws {

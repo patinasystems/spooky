@@ -200,13 +200,14 @@ fn rectangles(self: *const PathHover, term: *terminal.Terminal, size: Size, view
     var index: usize = self.start;
     while (index < end) {
         const cell = capture.cells[index];
-        const y: f32 = @floatFromInt(size.padding.top + @as(u32, cell.y) * size.cell.height);
-        const bottom: f32 = @floatFromInt(viewport.clip_bottom orelse size.screen.height);
+        const raw_y = @as(f32, @floatFromInt(size.padding.top + @as(u32, cell.y) * size.cell.height)) - viewport.scroll_offset_y;
+        const y = @max(@as(f32, @floatFromInt(size.padding.top)), raw_y);
+        const bottom: f32 = @floatFromInt(viewport.contentBottom(size));
         const rect: Rect = .{
             .x = @floatFromInt(size.padding.left + @as(u32, cell.x) * size.cell.width),
             .y = y,
             .width = @floatFromInt(@as(u32, cell.width) * size.cell.width),
-            .height = @max(0, @min(@as(f32, @floatFromInt(size.cell.height)), bottom - y)),
+            .height = @max(0, @min(raw_y + @as(f32, @floatFromInt(size.cell.height)), bottom) - y),
         };
         if (rect.height <= 0) return null;
         if (result.count > 0 and result.rects[result.count - 1].y == y) {
@@ -276,12 +277,12 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
         return if (result.probe.text_len > 0) result else null;
     }
     const px = x - @as(f32, @floatFromInt(size.padding.left));
-    const py = y - @as(f32, @floatFromInt(size.padding.top));
+    const py = y - @as(f32, @floatFromInt(size.padding.top)) + viewport.scroll_offset_y;
     if (px < 0 or py < 0 or x >= @as(f32, @floatFromInt(size.screen.width)) or
-        y >= @as(f32, @floatFromInt(viewport.clip_bottom orelse size.screen.height))) return null;
+        y >= @as(f32, @floatFromInt(viewport.contentBottom(size)))) return null;
     const hover_x: u32 = @intFromFloat(px / @as(f32, @floatFromInt(size.cell.width)));
     const hover_y: u32 = @intFromFloat(py / @as(f32, @floatFromInt(size.cell.height)));
-    if (hover_x >= term.cols or hover_y >= viewport.rows) return null;
+    if (hover_x >= term.cols or hover_y >= viewport.hitRows()) return null;
     var hovered = screen.pages.pin(.{ .viewport = .{ .x = @intCast(hover_x), .y = hover_y } }) orelse return null;
     if (hovered.rowAndCell().cell.wide == .spacer_tail and hovered.x > 0) hovered.x -= 1;
     if (hovered.rowAndCell().cell.semantic_content != .output) return null;
@@ -311,7 +312,7 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
     var row_y = first_y;
     var found_hover = false;
     rows = 0;
-    scan: while (row_y < viewport.rows and rows < rect_capacity) : ({
+    scan: while (row_y < viewport.hitRows() and rows < rect_capacity) : ({
         row_y += 1;
         rows += 1;
     }) {
@@ -342,7 +343,7 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
         }
         if (!row.wrap) break;
         if (rows + 1 == rect_capacity) return null;
-        if (uri == null and row_y + 1 >= viewport.rows) return null;
+        if (uri == null and row_y + 1 >= viewport.hitRows()) return null;
         row_pin = row_pin.down(1) orelse break;
     }
     while (result.probe.text_len > 0 and result.probe.text[result.probe.text_len - 1] == ' ') result.probe.text_len -= 1;
@@ -489,6 +490,25 @@ test "path hover requires publication and reuses one same-line identity" {
     _ = hover.probeAt(&term, &chrome, size, viewport, 6 + 13 * 8, 37).?;
     try t.expectEqual(@as(u8, 0), hover.snapshot(&term, &chrome, size, viewport).count);
     try t.expect(hover.publish(&term, &chrome, size, viewport, moved.hit_id, 0, 9, false) == null);
+}
+
+test "path hover pixel crop resolves and clips the partially visible bottom row" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 40, .rows = 8 });
+    defer term.deinit(t.allocator);
+    try testOutput(&term, "README.md");
+    const size = testSize(40, 8);
+    const chrome: Chrome = .{};
+    var hover: PathHover = .{};
+    const viewport: Viewport = .{ .rows = 2, .clip_bottom = 36, .footer_top = 40, .scroll_offset_y = 5 };
+    const probe = hover.probeAt(&term, &chrome, size, viewport, 10, 32).?;
+    try t.expectEqualStrings("README.md", probe.text[0..probe.text_len]);
+    const selected = hover.publish(&term, &chrome, size, viewport, probe.hit_id, 0, 9, false).?;
+    try t.expectEqual(@as(f32, 31), selected.rects[0].y);
+    try t.expectEqual(@as(f32, 5), selected.rects[0].height);
+    var moved = viewport;
+    moved.scroll_offset_y = 6;
+    try t.expectEqual(@as(u8, 0), hover.snapshot(&term, &chrome, size, moved).count);
 }
 
 test "path hover maps UTF8 graphemes wide cells and soft wraps without byte splits" {

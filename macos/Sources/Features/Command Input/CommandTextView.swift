@@ -35,6 +35,9 @@ final class CommandTextView: NSTextView {
     // for editors whose caller did not supply an existing text container.
     private let ownedTextStorage: NSTextStorage?
     private(set) var minimumLineHeight: CGFloat = 0
+    private var promptPrefix = ""
+    private var promptPrefixAttributes: [NSAttributedString.Key: Any] = [:]
+    private(set) var promptPrefixWidth: CGFloat = 0
     private(set) lazy var completions = CommandCompletionController(textView: self)
     private(set) lazy var history = CommandHistoryController(textView: self)
     var completionItems: [CommandCompletionCandidate] { completions.items }
@@ -252,8 +255,46 @@ final class CommandTextView: NSTextView {
                 )
             }
         }
+        if metricsChanged || foregroundChanged { updatePromptPrefix() }
         if metricsChanged { reportContentHeight() }
         if metricsChanged || foregroundChanged { completions.updatePosition() }
+    }
+
+    /// Presentation only: shell/history/clipboard/completion ranges contain
+    /// only the command. TextKit's first-line exclusion keeps the native caret,
+    /// selection, wrapping and input method aware of the prompt's geometry.
+    func setPromptIdentity(_ identity: CommandPromptIdentity?) {
+        let prefix = identity.map { $0.label + " % " } ?? ""
+        guard promptPrefix != prefix else { return }
+        promptPrefix = prefix
+        updatePromptPrefix()
+    }
+
+    private func updatePromptPrefix() {
+        guard let textContainer, let font else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingMiddle
+        promptPrefixAttributes = [.font: font, .foregroundColor: (textColor ?? .textColor).withAlphaComponent(0.65),
+                                  .paragraphStyle: paragraph]
+        let naturalWidth = (promptPrefix as NSString).size(withAttributes: promptPrefixAttributes).width
+        // Preserve room to type even in narrow splits; a long hostname must
+        // never force an empty command to occupy a second line.
+        let width = promptPrefix.isEmpty ? 0 : min(ceil(naturalWidth), floor(bounds.width * 0.55))
+        let height = max(minimumLineHeight, layoutManager?.defaultLineHeight(for: font) ?? 1)
+        promptPrefixWidth = width
+        textContainer.exclusionPaths = width > 0
+            ? [NSBezierPath(rect: NSRect(x: 0, y: 0, width: width, height: height - 0.5))] : []
+        needsDisplay = true
+    }
+
+    private func drawPromptPrefix() {
+        guard promptPrefixWidth > 0, let font else { return }
+        let origin = textContainerOrigin
+        (promptPrefix as NSString).draw(
+            in: NSRect(x: origin.x, y: origin.y, width: promptPrefixWidth,
+                       height: max(minimumLineHeight, layoutManager?.defaultLineHeight(for: font) ?? 1)),
+            withAttributes: promptPrefixAttributes
+        )
     }
 
     override func updateTrackingAreas() {
@@ -398,6 +439,7 @@ final class CommandTextView: NSTextView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        defer { drawPromptPrefix() }
         guard let editorTrace else { super.draw(dirtyRect); return }
         let draw = editorTrace.beginDraw(dirtyRect, in: self)
         let timing = CommandInputDiagnostics.begin(.editorDraw)
@@ -411,6 +453,7 @@ final class CommandTextView: NSTextView {
     override func setFrameSize(_ newSize: NSSize) {
         let widthChanged = newSize.width != frame.width
         super.setFrameSize(newSize)
+        if widthChanged { updatePromptPrefix() }
         // TextKit can resize its view while laying out. Avoid entering its
         // layout manager recursively from that frame change.
         guard widthChanged, !heightReportScheduled else { return }

@@ -199,6 +199,7 @@ pub const Uniforms = extern struct {
     command_pinned_y: f32 align(4) = 0,
     command_gap: f32 align(4) = 0,
     command_caption_scale: f32 align(4) = 1,
+    scroll_offset_y: f32 align(4) = 0,
     native_clip_bottom: f32 align(4) = -1,
     command_padded_y: f32 align(4) = 0,
     command_padded_separator_y: f32 align(4) = 0,

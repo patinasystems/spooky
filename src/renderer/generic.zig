@@ -1467,6 +1467,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 native_presentation_valid: bool,
                 native_viewport: renderer.NativeViewport.Resolved,
                 path_hover: renderer.PathHover.Snapshot,
+                scroll_offset_y: f32,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1557,6 +1558,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // denormalization) is deferred to the endUpdate call
                 // outside of this critical section, keeping our lock
                 // hold time as short as possible.
+                const raw_scrollbar = state.terminal.screens.active.pages.scrollbar();
+                const pixel_scroll = state.canPixelScroll();
+                const scroll_offset_y = state.viewport_scroll.synchronize(raw_scrollbar, self.size.cell.height, pixel_scroll);
+                // The terminal already supports bounded overscan. Only one
+                // extra row is needed because the crop stays within one row.
+                self.terminal_state.overscan_request = .{ .below = if (pixel_scroll and
+                    raw_scrollbar.offset < raw_scrollbar.total -| raw_scrollbar.len) 1 else 0 };
                 try self.terminal_state.beginUpdate(
                     self.alloc,
                     state.terminal,
@@ -1647,6 +1655,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :critical .{
                     .links = links,
                     .mouse = state.mouse,
+                    .scroll_offset_y = scroll_offset_y,
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
@@ -1677,7 +1686,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                                 !state.terminal.native_input.isReady(&state.terminal.last_primary_input_id))),
                     .native_input_accent = renderer.CommandInputAccent.snapshot(state.terminal, if (state.native_input_enabled) state.native_input_accent else null),
                     .path_hover = state.path_hover.snapshot(state.terminal, &state.command_chrome, self.size, native_viewport),
-                    .command_chrome = if (!std.meta.eql(self.native_viewport, native_viewport) or self.command_chrome_dirty or
+                    .command_chrome = if (!self.native_viewport.sameGeometry(native_viewport) or self.command_chrome_dirty or
                         state.command_chrome.revision != self.command_chrome_revision or
                         state.terminal.screens.active.command_blocks.revision != self.command_chrome_anchors_revision or
                         self.terminal_state.dirty != .false)
@@ -1786,7 +1795,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.terminal_state.dirty = .full;
                 }
                 self.native_viewport = critical.native_viewport;
-                self.uniforms.native_clip_bottom = if (critical.native_viewport.clip_bottom) |v| @floatFromInt(v) else -1;
+                if (self.uniforms.scroll_offset_y != critical.scroll_offset_y) self.cells_rebuilt = true;
+                self.uniforms.scroll_offset_y = critical.scroll_offset_y;
+                self.uniforms.native_clip_bottom = if (self.terminal_state.overscan.below > 0)
+                    @floatFromInt(critical.native_viewport.contentBottom(self.size))
+                else if (critical.native_viewport.clip_bottom) |v| @floatFromInt(v) else -1;
                 // Clear before any fallible row rebuild: an allocation failure
                 // must never leave a cached hollow terminal caret over NSTextView.
                 if (critical.native_input_cursor_suppressed) {
@@ -2499,7 +2512,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.size.padding,
                 .{
                     .columns = self.cells.size.columns,
-                    .rows = self.cells.size.rows,
+                    .rows = self.terminal_state.rows,
                 },
                 .{
                     .width = self.grid_metrics.cell_width,
@@ -3049,12 +3062,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             const state: *terminal.RenderState = &self.terminal_state;
 
             const grid_size_diff =
-                self.cells.size.rows != state.rows or
+                self.cells.size.rows != state.rows + state.overscan.below or
                 self.cells.size.columns != state.cols;
 
             if (grid_size_diff) {
                 var new_size = self.cells.size;
-                new_size.rows = state.rows;
+                new_size.rows = state.rows + state.overscan.below;
                 new_size.columns = state.cols;
                 try self.cells.resize(self.alloc, new_size);
 
@@ -3102,7 +3115,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // the viewport is shorter than the cell contents buffer, we align
             // the top of the viewport with the top of the contents buffer.
             const row_len: usize = @min(
-                state.rows,
+                state.rows + state.overscan.below,
                 self.cells.size.rows,
             );
 

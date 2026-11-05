@@ -50,6 +50,7 @@ final class CommandInputView: NSView, NSTextViewDelegate {
         addSubview(scrollView)
 
         textView.managesInsertionPoint = true
+        textView.setPromptIdentity(CommandPromptIdentity.local)
         // The editor owns an opaque, theme-matched viewport. Transparent
         // TextKit drawing can retain its old backing pixels across hide/show
         // until an ancestor display pass, after the terminal has presented.

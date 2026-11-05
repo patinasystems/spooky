@@ -4,6 +4,42 @@ import Testing
 
 @MainActor
 struct CommandTextViewTests {
+    @Test func promptPrefixReservesTheEmptyCaretAndNeverEntersTheCommand() throws {
+        let (view, window) = makeCompletionEditor(draft: "")
+        defer { window.close() }
+        let original = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        view.setPromptIdentity(CommandPromptIdentity(username: "tyler", hostname: "MacBook.local"))
+        let prefixed = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        #expect(view.promptPrefixWidth > 0)
+        #expect(prefixed.minX - original.minX >= view.promptPrefixWidth - 1)
+        #expect(view.string.isEmpty)
+        view.insertText("pwd", replacementRange: view.selectedRange())
+        let request = try requestCompletion(from: view)
+        #expect(request.text == "pwd")
+        #expect(request.cursorUTF16 == 3)
+        view.dismissCompletions()
+        var submitted: String?
+        view.onSubmit = { submitted = $0; return true }
+        view.keyDown(with: try keyEvent(code: 36, characters: "\r"))
+        #expect(submitted == "pwd")
+        view.selectAll(nil)
+        #expect(view.selectedRange() == NSRange(location: 0, length: 3))
+    }
+
+    @Test func promptPrefixOnlyOccupiesFirstLineAndLeavesNarrowSplitsEditable() throws {
+        let (view, window) = makeCompletionEditor(draft: "a\nb")
+        defer { window.close() }
+        view.setPromptIdentity(CommandPromptIdentity(username: "tyler", hostname: "very-long-machine-name.local"))
+        let first = view.firstRect(forCharacterRange: NSRange(location: 0, length: 0), actualRange: nil)
+        let second = view.firstRect(forCharacterRange: NSRange(location: 2, length: 0), actualRange: nil)
+        #expect(first.minX - second.minX >= view.promptPrefixWidth - 1)
+        view.setFrameSize(NSSize(width: 80, height: 100))
+        #expect(view.promptPrefixWidth <= 44)
+        view.setPromptIdentity(nil)
+        #expect(view.promptPrefixWidth == 0)
+        #expect(view.textContainer?.exclusionPaths.isEmpty == true)
+    }
+
     @Test func blockedNativeInputRetainsTypeAheadAndForwardsTerminalInterrupts() throws {
         let view = CommandTextView(frame: .zero, textContainer: nil)
         view.acceptsCommandEdits = false

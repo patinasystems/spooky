@@ -19,7 +19,6 @@ struct CommandPromptIdentityTests {
     }
 
     @Test func editingIdentityPreservesClickablePathAndOtherBlockStatuses() throws {
-        let identity = try #require(CommandPromptIdentity(username: "tyler", hostname: "MacBook-Pro-5.local"))
         let cwd = FileManager.default.homeDirectoryForCurrentUser.path + "/界\nproject"
         let metadata = [
             "current": CommandBlockMetadata(id: "current", workingDirectory: cwd, branch: "main",
@@ -32,17 +31,14 @@ struct CommandPromptIdentityTests {
                                outputY: 2, endY: 3, complete: true)]
         func presentation(recovering: Bool = false) -> CommandChromePresentation {
             CommandChromePresentation(layout: layout, metadata: metadata, currentID: "current", pinnedOffset: -1,
-                                      recovering: recovering, promptIdentity: identity)
+                                      recovering: recovering)
         }
         let rows = presentation().rows
         let current = try #require(rows.first { $0.id == "current" })
-        #expect(current.suffix == "tyler@MacBook-Pro-5")
+        #expect(current.suffix.isEmpty)
         #expect(current.label == "~/界↵project  ⎇ main")
         #expect(String(bytes: current.label.utf8.prefix(current.pathByteCount), encoding: .utf8) == "~/界↵project")
         #expect(try #require(rows.first { $0.id == "previous" }).suffix == "exit 2  0.125s")
         #expect(try #require(presentation(recovering: true).rows.first { $0.id == "current" }).suffix.isEmpty)
-        let withoutIdentity = CommandChromePresentation(layout: layout, metadata: metadata, currentID: "current",
-                                                        pinnedOffset: -1, recovering: false, promptIdentity: nil)
-        #expect(try #require(withoutIdentity.rows.first { $0.id == "current" }).suffix.isEmpty)
     }
 }

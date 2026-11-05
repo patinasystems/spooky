@@ -141,8 +141,7 @@ struct CommandChromePresentation: Equatable {
     let rows: [Row]
 
     init(layout: CommandTerminalLayout, metadata: [String: CommandBlockMetadata], currentID: String?,
-         pinnedOffset: CGFloat, recovering: Bool, backingScale: CGFloat = 1,
-         promptIdentity: CommandPromptIdentity? = CommandPromptIdentity.local) {
+         pinnedOffset: CGFloat, recovering: Bool, backingScale: CGFloat = 1) {
         enabled = layout.primary
         self.pinnedOffset = pinnedOffset
         self.backingScale = backingScale
@@ -158,9 +157,7 @@ struct CommandChromePresentation: Equatable {
             let pathByteCount = cwd.hasPrefix("/") && !(recovering && current) ? label.utf8.count : 0
             if !block.branch.isEmpty { label += "  ⎇ \(block.branch)" }
             if recovering && current { label = "Retained draft (read only)" }
-            // Reuse the renderer's bounded, right-aligned text run. The cwd
-            // remains the label prefix so its existing path hit range is exact.
-            var suffix = current && block.status == "editing" && !recovering ? promptIdentity?.label ?? "" : ""
+            var suffix = ""
             if let status = block.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
             if let elapsed = block.elapsed {
                 suffix += String(format: "  %.3fs", elapsed)

@@ -3828,7 +3828,15 @@ pub fn scrollCallback(
             return;
         }
 
-        if (y.delta != 0) {
+        if (scroll_mods.precision and self.renderer_state.canPixelScroll()) {
+            const pixels = yoff * self.config.mouse_scroll_multiplier.precision;
+            const delta = self.renderer_state.viewport_scroll.scroll(self.io.terminal.screens.active.pages.scrollbar(), self.size.cell.height, pixels);
+            // Mouse-reporting programs keep their separate whole-cell
+            // accumulator. A viewport gesture must not leave residue in it.
+            self.mouse.pending_scroll_y = 0;
+            if (delta != 0) self.io.terminal.scrollViewport(.{ .delta = delta });
+        } else if (y.delta != 0) {
+            self.renderer_state.viewport_scroll.reset();
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
@@ -4985,10 +4993,12 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 /// Requires the renderer mutex. Occluded prompt rows are never selectable.
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = 0 } };
     const grid = coord.convert(.grid, self.size).grid;
     const viewport = self.renderer_state.nativeViewport(self.size);
-    return .{ .x = grid.x, .y = @intCast(@min(grid.y, viewport.rows -| 1)) };
+    const y = @max(0, ypos + viewport.scroll_offset_y - @as(f64, @floatFromInt(self.size.padding.top))) /
+        @as(f64, @floatFromInt(self.size.cell.height));
+    return .{ .x = grid.x, .y = @intFromFloat(@min(y, @as(f64, @floatFromInt(viewport.hitRows() -| 1)))) };
 }
 
 fn visibleRows(self: *Surface) usize {
@@ -5001,6 +5011,7 @@ fn visibleRows(self: *Surface) usize {
 ///
 /// Precondition: the render_state mutex must be held.
 fn scrollToBottom(self: *Surface) !void {
+    self.renderer_state.viewport_scroll.reset();
     self.io.terminal.scrollViewport(.{ .bottom = {} });
     try self.queueRender();
 }

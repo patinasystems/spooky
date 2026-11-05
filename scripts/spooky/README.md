@@ -123,6 +123,12 @@ uv run scripts/spooky/package.py \
 
 ## Publish
 
+Pushing Git commits does not publish a download. For each public release, build
+the exact commit, give the app a new `CFBundleShortVersionString` and strictly
+increasing `CFBundleVersion` **before signing**, run `package.py`, then run
+`publish.py` on its manifest. The stable download URL is updated only by that
+last step. Do not edit an already signed or notarized app's plist.
+
 Lipboard's existing `lipboard-downloads` R2 bucket is served through
 `downloads.patinasystems.com`. Spooky owns only its `spooky/` prefix. This DMG is
 small enough for direct Wrangler uploads; no Worker or DNS deployment is needed.
@@ -161,6 +167,54 @@ with different bytes. It uploads versioned DMG/manifest objects before updating
 stable links use `no-store` because the shared host can extend short browser TTLs
 to four hours. Fresh anonymous downloads verify all five uploaded SHA-256 hashes,
 using unique query strings to avoid stale/negative cache entries.
+
+## Automatic updates
+
+The upstream Sparkle 2 client, update UI, automatic-check/download settings and
+install-on-quit flow are already in this fork. They are deliberately disabled
+for previews so Spooky cannot install Ghostty over itself. Enabling a working
+Spooky updater still requires all of the following:
+
+1. Create Spooky's own Sparkle EdDSA key pair with Sparkle's `generate_keys`.
+   Keep the private key in the release machine's Keychain (or protected CI secret
+   storage); embed only its public key as `SUPublicEDKey`. This is separate from
+   Apple's Developer ID certificate and notarization credentials.
+2. Publish a Spooky-only HTTPS appcast, for example
+   `https://downloads.patinasystems.com/spooky/appcast.xml`. Change
+   `UpdateDelegate.feedURLString` to that feed, enable the updater/menu in
+   `AppBranding` and `UpdateController`, and remove the automatic-checks override.
+   Never fall through to either upstream `files.ghostty.org` feed.
+3. Extend the packaging/publishing admission checks, which currently reject any
+   enabled updater or feed. Verify the exact Spooky feed/public key and release
+   metadata rather than simply deleting those safety checks.
+4. After Developer ID signing and notarization, use Sparkle's `generate_appcast`
+   (or `sign_update` plus appcast generation) to sign the **final** immutable DMG.
+   Every appcast item needs that artifact's URL, byte length, EdDSA signature,
+   increasing build number and minimum macOS version. Upload the immutable DMG
+   first; update the appcast last. Keep the ordinary DMG download in parallel.
+5. Test upgrading a real older Spooky install, including Check for Updates,
+   automatic download, install on quit, relaunch, directory restoration, and
+   rejection of a tampered archive. Developer ID notarization is not an EdDSA
+   update signature; both are required for the intended release flow.
+
+The existing Ghostty release workflows are a reference for these stages, not a
+ready-to-run Spooky pipeline: they are restricted to `ghostty-org/ghostty` and
+depend on its secrets, artifact names, hosting and update keys. Existing Spooky
+previews have no enabled feed, so users must manually install the first
+update-enabled release once. Subsequent updates can use Sparkle normally.
+
+See [Sparkle's publishing guide](https://sparkle-project.org/documentation/publishing/).
+
+## Directory restoration
+
+Spooky defaults to `window-save-state = always`. AppKit restores each open
+window/tab and the shell's last reported working directory after normal quit
+and relaunch; the existing Ghostty restorable-state encoder already stores it.
+No directory polling, per-keystroke persistence, extra database or shell command
+replay is needed. It does not restore terminal output or rerun commands. An
+explicit `window-save-state = never` disables it; `default` returns control to
+the macOS system preference. Closing every window before quitting leaves no
+open window to restore.
 
 ## Verification and limits
 

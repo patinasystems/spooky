@@ -20,6 +20,8 @@ const uint ATLAS_SOLID = 2u;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
+    if ((in_data.chrome_flags & 8u) == 0 && scroll_offset_y > 0 &&
+        screen_size.y - gl_FragCoord.y < grid_padding.x) discard;
     if ((in_data.chrome_flags & 8u) == 0 && native_clip_bottom >= 0 &&
         screen_size.y - gl_FragCoord.y >= native_clip_bottom) discard;
     if ((in_data.chrome_flags & 4u) != 0 && (in_data.chrome_flags & 8u) == 0) {
