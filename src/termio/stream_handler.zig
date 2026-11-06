@@ -286,6 +286,7 @@ pub const StreamHandler = struct {
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => {
+                self.renderer_state.classic_tui_recovery.erasedDisplay();
                 self.terminal.scrollViewport(.{ .bottom = {} });
                 self.terminal.eraseDisplay(.complete, value);
             },
@@ -881,6 +882,8 @@ pub const StreamHandler = struct {
         if (!enabled) {
             if (self.renderer_state.classic_tui_recovery.finishFrame(self.terminal, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds())) |request|
                 self.messageWriter(.{ .classic_tui_redraw = request });
+            if (self.renderer_state.classic_tui_recovery.flushRequest()) |epoch|
+                self.messageWriter(.{ .classic_tui_flush = epoch });
         }
     }
 
@@ -2286,6 +2289,7 @@ test "classic TUI recovery parses fragmented synchronized dialog erasure and que
     defer mailbox.deinit(t.allocator);
     var mutex: std.Io.Mutex = .init;
     var state: renderer.State = .{ .mutex = &mutex, .terminal = &term, .native_input_enabled = true };
+    term.modes.set(.cursor_visible, false);
     state.classic_tui_recovery.arm(&term, 42, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
     var handler: StreamHandler = .{
         .alloc = t.allocator,
@@ -2313,6 +2317,7 @@ test "classic TUI recovery parses fragmented synchronized dialog erasure and que
             switch (action) {
                 .cursor_pos, .cursor_up, .erase_line_complete => self.delegate.vt(action, value),
                 .set_mode, .reset_mode => {
+                    if (value.mode == .cursor_visible) self.delegate.terminal.modes.set(.cursor_visible, action == .set_mode);
                     if (value.mode == .synchronized_output) {
                         self.delegate.terminal.modes.set(.synchronized_output, action == .set_mode);
                         self.delegate.synchronizedOutput(action == .set_mode);
@@ -2331,7 +2336,7 @@ test "classic TUI recovery parses fragmented synchronized dialog erasure and que
     for ("\x1b[?2026h\x1b[34;1H") |byte| stream.next(byte);
     for (0..24) |_| for ("\x1b[2K\x1b[1A") |byte| stream.next(byte);
     try t.expectEqual(.armed, state.classic_tui_recovery.phase);
-    for ("\x1b[7;3H\x1b[?2026l") |byte| stream.next(byte);
+    for ("\x1b[7;3H\x1b[?25h\x1b[?2026l") |byte| stream.next(byte);
     const start = mailbox.spsc.queue.pop(global.io()).?;
     try t.expect(start == .start_synchronized_output);
     const request = mailbox.spsc.queue.pop(global.io()).?.classic_tui_redraw;

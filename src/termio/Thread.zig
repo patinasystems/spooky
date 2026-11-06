@@ -72,6 +72,10 @@ coalesce_data: Coalesce = .{},
 sync_reset: xev.Timer,
 sync_reset_c: xev.Completion = .{},
 sync_reset_cancel_c: xev.Completion = .{},
+classic_tui: xev.Timer,
+classic_tui_c: xev.Completion = .{},
+classic_tui_cancel_c: xev.Completion = .{},
+classic_tui_epoch: u64 = 0,
 
 flags: packed struct {
     /// This is set to true only when an abnormal exit is detected. It
@@ -111,6 +115,8 @@ pub fn init(
     // This timer is used to reset synchronized output modes.
     var sync_reset_h = try xev.Timer.init();
     errdefer sync_reset_h.deinit();
+    var classic_tui_h = try xev.Timer.init();
+    errdefer classic_tui_h.deinit();
 
     return Thread{
         .alloc = alloc,
@@ -119,6 +125,7 @@ pub fn init(
         .scroll = scroll_h,
         .coalesce = coalesce_h,
         .sync_reset = sync_reset_h,
+        .classic_tui = classic_tui_h,
     };
 }
 
@@ -128,6 +135,7 @@ pub fn deinit(self: *Thread) void {
     self.scroll.deinit();
     self.coalesce.deinit();
     self.sync_reset.deinit();
+    self.classic_tui.deinit();
     self.stop.deinit();
     self.loop.deinit();
 }
@@ -345,6 +353,11 @@ fn drainMailbox(
             },
             .start_synchronized_output => self.startSynchronizedOutput(cb),
             .classic_tui_redraw => |v| try io.redrawClassicTui(data, v),
+            .classic_tui_flush => |v| try io.flushClassicTuiInput(data, v),
+            .classic_tui_watch => |v| {
+                self.classic_tui_epoch = v;
+                self.classic_tui.reset(&self.loop, &self.classic_tui_c, &self.classic_tui_cancel_c, 500, CallbackData, cb, classicTuiTimeout);
+            },
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
             .write_small => |v| try io.queueWrite(
@@ -385,6 +398,17 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
         cb,
         syncResetCallback,
     );
+}
+
+fn classicTuiTimeout(cb_: ?*CallbackData, _: *xev.Loop, _: *xev.Completion, result: xev.Timer.RunError!void) xev.CallbackAction {
+    result catch |err| switch (err) {
+        error.Canceled => return .disarm,
+        else => log.warn("classic TUI deadline failed, releasing input err={}", .{err}),
+    };
+    const cb = cb_ orelse return .disarm;
+    cb.io.flushClassicTuiInput(&cb.data, cb.self.classic_tui_epoch) catch |err|
+        log.warn("error releasing classic TUI input err={}", .{err});
+    return .disarm;
 }
 
 fn handleResize(self: *Thread, cb: *CallbackData, resize: renderer.Size) void {

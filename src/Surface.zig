@@ -2650,9 +2650,29 @@ fn cancelNativeSubmission(self: *Surface) void {
 fn cancelClassicTuiRecovery(self: *Surface) void {
     const recovery = &self.renderer_state.classic_tui_recovery;
     if (!recovery.active.load(.acquire)) return;
+    var bytes: [@import("termio/ClassicTuiRecovery.zig").input_capacity]u8 = undefined;
     self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
+    const len = recovery.drain(&bytes);
     recovery.cancel();
+    self.renderer_state.mutex.unlock(global.io());
+    // Queue saved keys before the control action which canceled the handoff.
+    // Small chunks keep this exceptional path allocation-free, too.
+    var offset: usize = 0;
+    while (offset < len) {
+        const end = @min(len, offset + termio.Message.WriteReq.Small.Max);
+        self.queueIo(termio.Message.writeReq(self.alloc, bytes[offset..end]) catch unreachable, .unlocked);
+        offset = end;
+    }
+}
+
+fn bufferClassicTuiKey(self: *Surface, event: input.KeyEvent, request: *const termio.Message.WriteReq) bool {
+    const recovery = &self.renderer_state.classic_tui_recovery;
+    if (!recovery.active.load(.acquire) or @import("termio/ClassicTuiRecovery.zig").cancelsOnKey(event)) return false;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    const buffered = recovery.bufferInput(request.slice());
+    self.renderer_state.mutex.unlock(global.io());
+    if (!buffered) self.cancelClassicTuiRecovery(); // overflow fails open, in order
+    return buffered;
 }
 
 fn armClassicTuiRecovery(self: *Surface, event: input.KeyEvent) void {
@@ -2665,6 +2685,8 @@ fn armClassicTuiRecovery(self: *Surface, event: input.KeyEvent) void {
     defer self.renderer_state.mutex.unlock(global.io());
     if (!self.renderer_state.native_input_enabled or self.renderer_state.native_input_terminal_requested) return;
     self.renderer_state.classic_tui_recovery.arm(&self.io.terminal, pid, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
+    if (self.renderer_state.classic_tui_recovery.active.load(.acquire))
+        self.queueIo(.{ .classic_tui_watch = self.renderer_state.classic_tui_recovery.epoch }, .locked);
 }
 
 /// Called by the apprt when the surface's display is realized.
@@ -3078,6 +3100,10 @@ pub fn keyCallback(
         }
 
         self.armClassicTuiRecovery(event);
+        if (self.bufferClassicTuiKey(event, &write_req)) {
+            write_req.deinit();
+            return .consumed;
+        }
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },
             .stable => |v| .{ .write_stable = v },

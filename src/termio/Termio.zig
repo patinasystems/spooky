@@ -537,7 +537,7 @@ pub fn resize(
         // Resizing the pty can immediately wake the shell with SIGWINCH.
         // Hold the same lock used by processOutput before notifying it, so
         // its redraw cannot be parsed against the old terminal dimensions.
-        self.renderer_state.classic_tui_recovery.cancel();
+        try self.flushClassicTuiInputLocked(td, self.renderer_state.classic_tui_recovery.epoch);
         try self.backend.resize(grid_size, size.terminal());
 
         // Update the size of our terminal state
@@ -884,6 +884,22 @@ pub fn redrawClassicTui(self: *Termio, td: *ThreadData, request: @import("Classi
     // native ownership, dimensions, expiry and intervening control input again.
     if (admitted) {
         try self.queueWrite(td, "\x0c", false);
-        log.info("recovered Claude Code classic dialog layout", .{});
-    }
+        log.info("requested Claude Code classic dialog redraw", .{});
+    } else try self.flushClassicTuiInput(td, request.epoch);
+}
+
+pub fn flushClassicTuiInput(self: *Termio, td: *ThreadData, epoch: u64) !void {
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    try self.flushClassicTuiInputLocked(td, epoch);
+}
+
+fn flushClassicTuiInputLocked(self: *Termio, td: *ThreadData, epoch: u64) !void {
+    const recovery = &self.renderer_state.classic_tui_recovery;
+    if (recovery.epoch != epoch) return;
+    var bytes: [@import("ClassicTuiRecovery.zig").input_capacity]u8 = undefined;
+    const len = recovery.drain(&bytes);
+    // Enqueue before unlocking: a new key must never overtake saved input.
+    if (len > 0) try self.queueWrite(td, bytes[0..len], false);
+    recovery.cancel();
 }

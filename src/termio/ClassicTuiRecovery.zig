@@ -5,10 +5,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const terminal = @import("../terminal/main.zig");
 const CellCount = terminal.size.CellCountInt;
+pub const input_capacity = 512;
 
 /// Hint for input-side cancellation; every other field requires the terminal mutex.
 active: std.atomic.Value(bool) = .init(false),
-phase: enum { idle, armed, requested } = .idle,
+phase: enum { idle, armed, requested, redrawing, flushing } = .idle,
 epoch: u64 = 0,
 pid: u64 = 0,
 deadline_ms: i64 = 0,
@@ -17,6 +18,9 @@ columns: CellCount = 0,
 initial_tail: CellCount = 0,
 erase_min: CellCount = std.math.maxInt(CellCount),
 erase_max: CellCount = 0,
+flush_queued: bool = false,
+input: [input_capacity]u8 = undefined,
+input_len: u16 = 0,
 
 pub const Request = struct { epoch: u64, pid: u64 };
 
@@ -41,7 +45,33 @@ pub fn cancelsForText(bytes: []const u8) bool {
 }
 
 test "classic TUI recovery has bounded per-surface state" {
-    try std.testing.expect(@sizeOf(Self) <= 48);
+    try std.testing.expect(@sizeOf(Self) <= input_capacity + 64);
+}
+
+pub fn bufferInput(self: *Self, bytes: []const u8) bool {
+    if (self.phase == .idle or bytes.len > self.input.len - self.input_len) return false;
+    @memcpy(self.input[self.input_len..][0..bytes.len], bytes);
+    self.input_len += @intCast(bytes.len);
+    return true;
+}
+
+pub fn drain(self: *Self, output: *[input_capacity]u8) usize {
+    const len = self.input_len;
+    @memcpy(output[0..len], self.input[0..len]);
+    self.input_len = 0;
+    return len;
+}
+
+pub fn flushRequest(self: *Self) ?u64 {
+    if (self.phase != .flushing or self.flush_queued) return null;
+    self.flush_queued = true;
+    return self.epoch;
+}
+
+pub fn erasedDisplay(self: *Self) void {
+    if (self.phase != .redrawing) return;
+    self.erase_min = 0;
+    self.erase_max = self.rows - 1;
 }
 
 test "classic TUI recovery preserves immediate draft edits but cancels submission and navigation" {
@@ -66,6 +96,58 @@ test "classic TUI recovery preserves immediate draft edits but cancels submissio
     try t.expect(recovery.take(request, &term, 42, 130));
 }
 
+test "classic TUI recovery queues input until the full redraw and drains exactly once" {
+    const t = std.testing;
+    var term = try fixture();
+    defer term.deinit(t.allocator);
+    var recovery: Self = .{};
+    recovery.arm(&term, 42, 100);
+    try t.expect(recovery.bufferInput("draft-"));
+    collapse(&recovery, &term);
+    const request = recovery.finishFrame(&term, 110).?;
+    try t.expect(recovery.take(request, &term, 42, 120));
+    try t.expect(recovery.bufferInput("check"));
+    // An unrelated synchronized caret/progress update is not the redraw reply.
+    try t.expect(recovery.finishFrame(&term, 125) == null);
+    try t.expect(recovery.flushRequest() == null);
+    recovery.erasedDisplay();
+    try t.expect(recovery.finishFrame(&term, 130) == null);
+    try t.expectEqual(request.epoch, recovery.flushRequest().?);
+    var bytes: [input_capacity]u8 = undefined;
+    const count = recovery.drain(&bytes);
+    try t.expectEqualStrings("draft-check", bytes[0..count]);
+    try t.expectEqual(@as(usize, 0), recovery.drain(&bytes));
+    recovery.cancel();
+    try t.expect(!recovery.bufferInput("late"));
+}
+
+test "classic TUI recovery preserves saved bytes on cancellation timeout and overflow" {
+    const t = std.testing;
+    var term = try fixture();
+    defer term.deinit(t.allocator);
+    for (0..3) |case| {
+        var recovery: Self = .{};
+        term.modes.set(.cursor_visible, false);
+        recovery.arm(&term, 42, 100);
+        try t.expect(recovery.bufferInput("prefix"));
+        switch (case) {
+            0 => recovery.cancel(),
+            1 => {
+                _ = recovery.finishFrame(&term, 601);
+            },
+            2 => try t.expect(!recovery.bufferInput(&@as([input_capacity]u8, @splat('x')))),
+            else => unreachable,
+        }
+        var bytes: [input_capacity]u8 = undefined;
+        const count = recovery.drain(&bytes);
+        try t.expectEqualStrings("prefix", bytes[0..count]);
+    }
+    term.modes.set(.cursor_visible, true); // ordinary chat Escape never gates typing
+    var recovery: Self = .{};
+    recovery.arm(&term, 42, 100);
+    try t.expect(!recovery.bufferInput("ordinary typing"));
+}
+
 pub fn cancel(self: *Self) void {
     self.phase = .idle;
     self.active.store(false, .release);
@@ -74,7 +156,8 @@ pub fn cancel(self: *Self) void {
 /// The caller has verified the actual foreground executable, not its OSC title.
 pub fn arm(self: *Self, term: *const terminal.Terminal, pid: u64, now_ms: i64) void {
     self.cancel();
-    if (pid == 0 or !eligible(term)) return;
+    if (pid == 0 or !eligible(term) or term.modes.get(.cursor_visible) or
+        term.modes.get(.synchronized_output)) return;
     const tail = blankTail(term);
     // A short initial conversation naturally has unused space. Only repair a
     // dialog which occupied the bottom before the user's Escape.
@@ -87,12 +170,13 @@ pub fn arm(self: *Self, term: *const terminal.Terminal, pid: u64, now_ms: i64) v
     self.initial_tail = @intCast(tail);
     self.erase_min = std.math.maxInt(CellCount);
     self.erase_max = 0;
+    self.flush_queued = false;
     self.phase = .armed;
     self.active.store(true, .release);
 }
 
 pub fn erasedLine(self: *Self, term: *const terminal.Terminal) void {
-    if (self.phase != .armed or !term.modes.get(.synchronized_output)) return;
+    if ((self.phase != .armed and self.phase != .redrawing) or !term.modes.get(.synchronized_output)) return;
     const row = term.screens.active.cursor.y;
     self.erase_min = @min(self.erase_min, row);
     self.erase_max = @max(self.erase_max, row);
@@ -100,15 +184,28 @@ pub fn erasedLine(self: *Self, term: *const terminal.Terminal) void {
 
 /// Called only at ESU, never while a synchronized frame is half parsed.
 pub fn finishFrame(self: *Self, term: *const terminal.Terminal, now_ms: i64) ?Request {
-    if (self.phase != .armed) return null;
+    if (self.phase != .armed and self.phase != .redrawing) return null;
     if (!self.valid(term, now_ms)) {
-        self.cancel();
+        self.phase = .flushing;
         return null;
     }
-    if (!term.modes.get(.cursor_visible) or self.erase_min == std.math.maxInt(CellCount) or
-        self.erase_max - self.erase_min < 3) return null;
+    if (self.phase == .redrawing) {
+        // A normal progress/caret frame cannot acknowledge Ctrl-L. Its reply
+        // clears the entire viewport before rebuilding the visible transcript.
+        if (term.modes.get(.cursor_visible) and self.erase_min == 0 and self.erase_max >= self.rows - 2)
+            self.phase = .flushing;
+        return null;
+    }
+    // Background usage refreshes still have a hidden cursor. They are not
+    // acknowledgement that Escape returned keyboard ownership to the chat.
+    if (!term.modes.get(.cursor_visible)) return null;
     const tail = blankTail(term);
-    if (tail < self.initial_tail + 4) return null;
+    if (self.erase_min == std.math.maxInt(CellCount) or
+        self.erase_max - self.erase_min < 3 or tail < self.initial_tail + 4)
+    {
+        self.phase = .flushing;
+        return null;
+    }
     // Consume the attempt before queuing a redraw. Its response cannot recurse.
     self.phase = .requested;
     return .{ .epoch = self.epoch, .pid = self.pid };
@@ -118,8 +215,11 @@ pub fn finishFrame(self: *Self, term: *const terminal.Terminal, now_ms: i64) ?Re
 /// screen or foreground job change invalidates the queued request.
 pub fn take(self: *Self, request: Request, term: *const terminal.Terminal, pid: u64, now_ms: i64) bool {
     if (self.phase != .requested or self.epoch != request.epoch) return false;
-    defer self.cancel();
-    return request.pid == self.pid and pid == self.pid and self.valid(term, now_ms);
+    const admitted = request.pid == self.pid and pid == self.pid and self.valid(term, now_ms);
+    self.phase = if (admitted) .redrawing else .flushing;
+    self.erase_min = std.math.maxInt(CellCount);
+    self.erase_max = 0;
+    return admitted;
 }
 
 fn valid(self: *const Self, term: *const terminal.Terminal, now_ms: i64) bool {
@@ -259,6 +359,7 @@ fn fixture() !terminal.Terminal {
         term.setCursorPos(@intCast(row + 1), 1);
         try term.printString("dialog row");
     }
+    term.modes.set(.cursor_visible, false);
     return term;
 }
 
@@ -270,6 +371,7 @@ fn collapse(recovery: *Self, term: *terminal.Terminal) void {
         term.eraseLine(.complete, false);
     }
     term.setCursorPos(7, 3);
+    term.modes.set(.cursor_visible, true);
     term.modes.set(.synchronized_output, false);
 }
 
@@ -286,7 +388,12 @@ test "classic TUI recovery requests one redraw after synchronized dialog contrac
     try t.expect(recovery.finishFrame(&term, 121) == null);
     try t.expect(recovery.take(request, &term, 42, 122));
     try t.expect(!recovery.take(request, &term, 42, 123));
-    try t.expect(!recovery.active.load(.acquire));
+    try t.expect(recovery.active.load(.acquire));
+    recovery.erasedDisplay();
+    try t.expect(recovery.finishFrame(&term, 124) == null);
+    try t.expectEqual(request.epoch, recovery.flushRequest().?);
+    try t.expect(recovery.flushRequest() == null);
+    recovery.cancel();
 }
 
 test "classic TUI recovery cancels for input expiry resize prompt alternate screen and job changes" {
@@ -324,6 +431,7 @@ test "classic TUI recovery ignores normal input short conversations and unsynchr
     var recovery: Self = .{};
     recovery.arm(&term, 42, 100);
     try t.expect(recovery.finishFrame(&term, 110) == null);
+    recovery.arm(&term, 42, 111);
     for (10..34) |row| {
         term.setCursorPos(@intCast(row + 1), 1);
         recovery.erasedLine(&term);

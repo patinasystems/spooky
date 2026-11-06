@@ -78,6 +78,8 @@ pub const Message = union(enum) {
 
     /// One revalidated Claude classic-screen redraw, never a terminal resize.
     classic_tui_redraw: @import("ClassicTuiRecovery.zig").Request,
+    classic_tui_flush: u64,
+    classic_tui_watch: u64,
 
     /// Enable or disable linefeed mode (mode 20).
     linefeed_mode: bool,
