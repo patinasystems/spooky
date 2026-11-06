@@ -68,4 +68,24 @@ struct CommandShellBridgeFilesTests {
         CommandShellBridgeFiles.removeRequest(url, matching: current, maximum: 512)
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
+
+    @Test func completedBlockRetainsItsShellFinishTimeAcrossSnapshots() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let block = directory.appendingPathComponent("blocks/123-1")
+        try FileManager.default.createDirectory(at: block, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ["cwd": "/fixture", "status": "completed", "exit-status": "0",
+                     "started-wall": "1794000000.105", "finished-wall": "1794000000.123"]
+        for (name, value) in files { try Data(value.utf8).write(to: block.appendingPathComponent(name)) }
+        let bridge = CommandInputBridge(directory: directory)
+        let first = await bridge.snapshot(visibleBlockIDs: ["123-1"])
+        let metadata = try #require(first.metadata["123-1"])
+        #expect(metadata.completionTime == CommandBlockMetadata.localizedCompletionTime(1_794_000_000.123))
+        #expect(abs(try #require(metadata.elapsed) - 0.018) < 0.000001)
+        // Completed metadata is immutable. A later read must not substitute
+        // the current time or reformat the caption while browsing history.
+        try Data("0".utf8).write(to: block.appendingPathComponent("finished-wall"))
+        let next = await bridge.snapshot(visibleBlockIDs: ["123-1"])
+        #expect(next.metadata["123-1"] == metadata)
+    }
 }

@@ -926,13 +926,16 @@ actor CommandInputBridge {
                 .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let start = text(at: block.appendingPathComponent("started-wall"))
                 .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                .flatMap { $0.isFinite ? $0 : nil }
             let end = text(at: block.appendingPathComponent("finished-wall"))
                 .flatMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                .flatMap { $0.isFinite ? $0 : nil }
             let elapsed: Double? = if let start, let end { max(0, end - start) } else { nil }
             let metadata = CommandBlockMetadata(
                 id: id, workingDirectory: cwd,
                 branch: text(at: block.appendingPathComponent("branch"))?.trimmingCharacters(in: .newlines) ?? "",
-                status: status, exitStatus: exitStatus, elapsed: elapsed)
+                status: status, exitStatus: exitStatus, elapsed: elapsed,
+                completionTime: status == "completed" ? end.flatMap { CommandBlockMetadata.localizedCompletionTime($0) } : nil)
             metadataCache[id] = metadata
             visibleMetadata[id] = metadata
         }

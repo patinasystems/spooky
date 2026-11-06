@@ -119,8 +119,30 @@ struct CommandBlockMetadata: Equatable, Sendable {
     let exitStatus: Int?
     /// Prototype wall-clock interval; not a performance measurement.
     let elapsed: Double?
+    /// Localized on the bridge actor when completion metadata is first read.
+    /// Retain display text so scrolling never formats dates on the UI thread.
+    let completionTime: String?
+
+    init(id: String, workingDirectory: String, branch: String, status: String,
+         exitStatus: Int?, elapsed: Double?, completionTime: String? = nil) {
+        self.id = id
+        self.workingDirectory = workingDirectory
+        self.branch = branch
+        self.status = status
+        self.exitStatus = exitStatus
+        self.elapsed = elapsed
+        self.completionTime = completionTime
+    }
 
     var completed: Bool { status == "completed" }
+
+    static func localizedCompletionTime(_ wallTime: Double, locale: Locale = .autoupdatingCurrent,
+                                        timeZone: TimeZone = .autoupdatingCurrent) -> String? {
+        guard wallTime.isFinite else { return nil }
+        let format = Date.FormatStyle(locale: locale, timeZone: timeZone)
+            .hour().minute().second().secondFraction(.fractional(3))
+        return Date(timeIntervalSince1970: wallTime).formatted(format)
+    }
 }
 
 /// Captions cross into Ghostty only when their contents change. The renderer
@@ -162,6 +184,7 @@ struct CommandChromePresentation: Equatable {
             if let elapsed = block.elapsed {
                 suffix += String(format: "  %.3fs", elapsed)
             } else if block.status == "running" { suffix = "running" }
+            if block.completed, let time = block.completionTime { suffix += "  ·  \(time)" }
             return Row(id: id, label: label, pathByteCount: pathByteCount, suffix: suffix, current: current,
                        pinned: current && pinnedOffset >= 0)
         }
