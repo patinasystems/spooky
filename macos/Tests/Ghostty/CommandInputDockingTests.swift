@@ -183,6 +183,38 @@ struct CommandInputDockingTests {
         #expect(place(&docking, layout: dockedGrid(history: 3)) == docked)
     }
 
+    @MainActor @Test func emptyPromptAfterForegroundProgramUsesOnlyOneLine() {
+        let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 300))
+        editor.configureAppearance(font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+                                   textColor: .white, backgroundColor: .black, minimumLineHeight: 18)
+        editor.setDraft("claude")
+        editor.layout()
+        var docking = CommandInputDocking()
+        _ = place(&docking, layout: fullInlineGrid())
+        var program = fullInlineGrid()
+        program.primary = false
+        _ = docking.placement(layout: program, editing: false, recovering: false,
+                              transferring: false, metrics: metrics)
+        editor.setDraft("")
+        editor.layout()
+        // Cover both a short restored primary screen and a genuinely full one.
+        // Neither may turn the previous editor frame into content height.
+        for layout in [geometry(), fullInlineGrid()] {
+            let provisional = place(&docking, layout: layout)
+            let height = CommandInputView.viewportHeight(content: editor.contentHeight, line: 18,
+                                                         terminal: 600, pinned: provisional.pinned)
+            #expect(height == 30)
+            let values = CommandInputDocking.Metrics(editorHeight: height, containerHeight: 600,
+                                                     padding: 6, inlineRows: 32, geometryIsSettled: true)
+            let placement = place(&docking, layout: layout, metrics: values)
+            #expect(placement.reservedHeight == 12)
+            editor.setFrameSize(NSSize(width: 400, height: height))
+            editor.layout()
+            #expect(editor.frame.height == 30)
+            #expect(editor.scrollView.overflow == 0)
+        }
+    }
+
     @Test func transferPreservesPTYSpaceAndPinnedHeaderWithoutReevaluatingTheDock() {
         var docking = CommandInputDocking()
         let before = place(&docking, layout: fullInlineGrid())

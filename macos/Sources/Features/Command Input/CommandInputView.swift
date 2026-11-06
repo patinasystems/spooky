@@ -33,7 +33,9 @@ final class CommandInputView: NSView, NSTextViewDelegate {
 
     static func viewportHeight(content: CGFloat, line: CGFloat, terminal: CGFloat, pinned: Bool = false) -> CGFloat {
         let available = max(1, terminal)
-        let minimum = pinned ? max(200, line + padding * 2) : line + padding * 2
+        // 200 points is a floor for the dock's scroll limit, not blank space
+        // to reserve below an empty or short draft.
+        let minimum = line + padding * 2
         let maximum = pinned ? min(available, max(200, available * 0.5)) : available
         return min(max(minimum, content), maximum)
     }
