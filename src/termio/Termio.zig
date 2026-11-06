@@ -881,7 +881,7 @@ pub fn redrawClassicTui(self: *Termio, td: *ThreadData, request: @import("Classi
     self.renderer_state.mutex.unlock(global.io());
     // Claude accepts the normal Ctrl-L byte with both legacy and Kitty input.
     // This never reaches a shell/new job: take() checks the original process,
-    // native ownership, dimensions, expiry and intervening user input again.
+    // native ownership, dimensions, expiry and intervening control input again.
     if (admitted) {
         try self.queueWrite(td, "\x0c", false);
         log.info("recovered Claude Code classic dialog layout", .{});

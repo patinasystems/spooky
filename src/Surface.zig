@@ -2915,7 +2915,8 @@ pub fn keyCallback(
     event_orig: input.KeyEvent,
 ) !InputEffect {
     self.cancelNativeSubmission();
-    if (event_orig.action != .release and !event_orig.key.modifier()) self.cancelClassicTuiRecovery();
+    if (self.renderer_state.classic_tui_recovery.active.load(.acquire) and
+        @import("termio/ClassicTuiRecovery.zig").cancelsOnKey(event_orig)) self.cancelClassicTuiRecovery();
     // log.warn("text keyCallback event={}", .{event_orig});
 
     // Apply key remappings to transform modifiers before any processing.
@@ -2960,7 +2961,10 @@ pub fn keyCallback(
     if (try self.maybeHandleBinding(
         event,
         if (insp_ev) |*ev| ev else null,
-    )) |v| return v;
+    )) |v| {
+        if (event.action != .release) self.cancelClassicTuiRecovery();
+        return v;
+    }
     // If we allow KAM and KAM is enabled then we do nothing.
     if (self.config.vt_kam_allowed) {
         self.renderer_state.mutex.lockUncancelable(global.io());
@@ -3549,7 +3553,6 @@ fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
 /// this will filter newlines to '\r'.
 pub fn textCallback(self: *Surface, text: []const u8) !void {
     self.cancelNativeSubmission();
-    self.cancelClassicTuiRecovery();
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -6411,7 +6414,7 @@ fn completeClipboardPaste(
     allow_unsafe: bool,
 ) !void {
     if (data.len == 0) return;
-    self.cancelClassicTuiRecovery();
+    if (@import("termio/ClassicTuiRecovery.zig").cancelsForText(data)) self.cancelClassicTuiRecovery();
 
     const encode_opts: input.paste.Options = encode_opts: {
         self.renderer_state.mutex.lockUncancelable(global.io());

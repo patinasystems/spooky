@@ -20,8 +20,50 @@ erase_max: CellCount = 0,
 
 pub const Request = struct { epoch: u64, pid: u64 };
 
+/// Ctrl-L preserves Claude's draft. Do not lose recovery when the next
+/// printable key overtakes its dismissal frame; submission/navigation/control
+/// actions still cancel before they can change the meaning of the request.
+pub fn cancelsOnKey(event: @import("../input.zig").KeyEvent) bool {
+    if (event.action == .release or event.key.modifier()) return false;
+    const mods = event.effectiveMods();
+    if (mods.ctrl or mods.alt or mods.super) return true;
+    switch (event.key) {
+        .enter, .numpad_enter, .tab, .escape => return true,
+        .backspace, .delete, .numpad_backspace, .numpad_delete => return false,
+        else => {},
+    }
+    return !(event.key.printable() or (event.utf8.len > 0 and !cancelsForText(event.utf8)));
+}
+
+pub fn cancelsForText(bytes: []const u8) bool {
+    for (bytes) |byte| if (byte < 0x20 or byte == 0x7f) return true;
+    return false;
+}
+
 test "classic TUI recovery has bounded per-surface state" {
     try std.testing.expect(@sizeOf(Self) <= 48);
+}
+
+test "classic TUI recovery preserves immediate draft edits but cancels submission and navigation" {
+    const t = std.testing;
+    try t.expect(!cancelsOnKey(.{ .key = .key_a, .utf8 = "a" }));
+    try t.expect(!cancelsOnKey(.{ .key = .key_a, .utf8 = "A", .mods = .{ .shift = true } }));
+    try t.expect(!cancelsOnKey(.{ .utf8 = "文" }));
+    try t.expect(!cancelsOnKey(.{ .key = .backspace }));
+    try t.expect(!cancelsOnKey(.{ .key = .escape, .action = .release }));
+    try t.expect(cancelsOnKey(.{ .key = .enter, .utf8 = "\r" }));
+    try t.expect(cancelsOnKey(.{ .key = .arrow_down }));
+    try t.expect(cancelsOnKey(.{ .key = .key_c, .mods = .{ .ctrl = true } }));
+    try t.expect(cancelsForText("pasted\ncommand"));
+    try t.expect(!cancelsForText("pasted draft 文"));
+    var term = try fixture();
+    defer term.deinit(t.allocator);
+    var recovery: Self = .{};
+    recovery.arm(&term, 42, 100);
+    collapse(&recovery, &term);
+    const request = recovery.finishFrame(&term, 120).?;
+    try term.printString("draft-check");
+    try t.expect(recovery.take(request, &term, 42, 130));
 }
 
 pub fn cancel(self: *Self) void {
@@ -72,7 +114,7 @@ pub fn finishFrame(self: *Self, term: *const terminal.Terminal, now_ms: i64) ?Re
     return .{ .epoch = self.epoch, .pid = self.pid };
 }
 
-/// Revalidate on the writing thread. A new key, resize, program exit, alternate
+/// Revalidate on the writing thread. Control input, resize, program exit, alternate
 /// screen or foreground job change invalidates the queued request.
 pub fn take(self: *Self, request: Request, term: *const terminal.Terminal, pid: u64, now_ms: i64) bool {
     if (self.phase != .requested or self.epoch != request.epoch) return false;
