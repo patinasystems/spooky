@@ -132,6 +132,76 @@ pub fn isClaudeProcess(pid: u64) bool {
 
 extern "c" fn proc_pidpath(c_int, *anyopaque, u32) c_int;
 
+/// Check the foreground process's own config directory, including cuse and
+/// CLAUDE_CONFIG_DIR. Only those two environment fields are interpreted; the
+/// temporary buffer is wiped and never logged. No credential file is opened.
+/// A custom keymap could rebind Ctrl-L to
+/// another action, so the conservative compatibility path opts out entirely.
+/// This runs on the writing thread only after a detected contraction.
+pub fn canRedrawProcess(pid: u64) bool {
+    if (comptime !builtin.target.os.tag.isDarwin()) return false;
+    if (!isClaudeProcess(pid)) return false;
+    // macOS sys/sysctl.h: CTL_KERN / KERN_PROCARGS2. An unusually large or
+    // unreadable environment fails closed, without heap allocation.
+    var mib = [_]c_int{ 1, 49, @intCast(pid) };
+    var args: [65_536]u8 = undefined;
+    defer std.crypto.secureZero(u8, &args);
+    var len: usize = args.len;
+    if (sysctl(&mib, mib.len, &args, &len, null, 0) != 0 or len > args.len) return false;
+    var path: [4096]u8 = undefined;
+    const keymap = keymapPath(args[0..len], &path) orelse return false;
+    return std.posix.errno(access(keymap, 0)) == .NOENT;
+}
+
+fn keymapPath(args: []const u8, output: []u8) ?[:0]const u8 {
+    if (args.len < 4) return null;
+    const argc = std.mem.readInt(i32, args[0..4], builtin.target.cpu.arch.endian());
+    if (argc <= 0 or argc > 4096) return null;
+    var offset: usize = 4;
+    _ = cString(args, &offset) orelse return null; // executable path
+    while (offset < args.len and args[offset] == 0) : (offset += 1) {}
+    for (0..@intCast(argc)) |_| _ = cString(args, &offset) orelse return null;
+    var home: ?[]const u8 = null;
+    var config: ?[]const u8 = null;
+    while (cString(args, &offset)) |entry| {
+        if (entry.len == 0) break;
+        if (std.mem.startsWith(u8, entry, "CLAUDE_CONFIG_DIR=")) config = entry[18..];
+        if (std.mem.startsWith(u8, entry, "HOME=")) home = entry[5..];
+    }
+    const directory = config orelse home orelse return null;
+    if (directory.len == 0 or directory[0] != '/') return null;
+    if (output.len == 0) return null;
+    const written = std.fmt.bufPrint(output[0 .. output.len - 1], "{s}{s}/keybindings.json", .{
+        directory, if (config == null) "/.claude" else "",
+    }) catch return null;
+    output[written.len] = 0;
+    return output[0..written.len :0];
+}
+
+fn cString(bytes: []const u8, offset: *usize) ?[]const u8 {
+    if (offset.* >= bytes.len) return null;
+    const end = std.mem.indexOfScalarPos(u8, bytes, offset.*, 0) orelse return null;
+    const result = bytes[offset.*..end];
+    offset.* = end + 1;
+    return result;
+}
+
+extern "c" fn sysctl([*]c_int, c_uint, ?*anyopaque, *usize, ?*anyopaque, usize) c_int;
+extern "c" fn access([*:0]const u8, c_int) c_int;
+
+test "classic TUI recovery locates native Claude keymaps and fails closed on unknown config" {
+    const t = std.testing;
+    try t.expect(!canRedrawProcess(0));
+    var output: [4096]u8 = undefined;
+    const prefix = "\x02\x00\x00\x00/usr/bin/claude\x00\x00claude\x00--safe-mode\x00";
+    try t.expectEqualStrings("/Users/test/.claude/keybindings.json", keymapPath(prefix ++ "HOME=/Users/test\x00OTHER=ignored\x00\x00", &output).?);
+    try t.expectEqualStrings("/tmp/account/keybindings.json", keymapPath(prefix ++ "HOME=/Users/test\x00CLAUDE_CONFIG_DIR=/tmp/account\x00\x00", &output).?);
+    try t.expect(keymapPath(prefix ++ "CLAUDE_CONFIG_DIR=relative\x00\x00", &output) == null);
+    try t.expect(keymapPath(prefix ++ "CLAUDE_CONFIG_DIR=\x00\x00", &output) == null);
+    try t.expect(keymapPath(prefix ++ "OTHER=ignored\x00\x00", &output) == null);
+    try t.expect(keymapPath("incomplete", &output) == null);
+}
+
 test "classic TUI recovery trusts native executable paths rather than titles or node" {
     const t = std.testing;
     try t.expect(isClaudeExecutable("/opt/homebrew/bin/claude"));

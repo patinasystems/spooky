@@ -873,7 +873,7 @@ pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Ty
 pub fn redrawClassicTui(self: *Termio, td: *ThreadData, request: @import("ClassicTuiRecovery.zig").Request) !void {
     const Recovery = @import("ClassicTuiRecovery.zig");
     const foreground = self.backend.getProcessInfo(.foreground_pid) orelse 0;
-    const pid = if (foreground == request.pid and Recovery.isClaudeProcess(foreground)) foreground else 0;
+    const pid = if (foreground == request.pid and Recovery.canRedrawProcess(foreground)) foreground else 0;
     self.renderer_state.mutex.lockUncancelable(global.io());
     const requested = self.renderer_state.classic_tui_recovery.take(request, &self.terminal, pid, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
     const admitted = requested and self.renderer_state.native_input_enabled and
