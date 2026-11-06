@@ -2984,6 +2984,7 @@ pub fn keyCallback(
         event,
         if (insp_ev) |*ev| ev else null,
     )) |v| {
+        if (v == .closed) return v;
         if (event.action != .release) self.cancelClassicTuiRecovery();
         return v;
     }
