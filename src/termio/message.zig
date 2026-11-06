@@ -76,6 +76,9 @@ pub const Message = union(enum) {
     /// period of time so that a bad actor can't hang the terminal.
     start_synchronized_output: void,
 
+    /// One revalidated Claude classic-screen redraw, never a terminal resize.
+    classic_tui_redraw: @import("ClassicTuiRecovery.zig").Request,
+
     /// Enable or disable linefeed mode (mode 20).
     linefeed_mode: bool,
 

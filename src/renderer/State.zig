@@ -51,6 +51,8 @@ viewport_scroll: @import("ViewportScroll.zig") = .{},
 /// Only suppresses intermediate blank redraws for an empty native submission.
 /// Parsing, PTY writes, shell hooks, and DEC2026 remain independent.
 native_submission: renderer.NativeSubmissionGate = .{},
+/// One-shot native Claude classic-screen repair; no work on normal frames.
+classic_tui_recovery: @import("../termio/ClassicTuiRecovery.zig") = .{},
 
 /// Mouse state. This only contains state relevant to what renderers
 /// need about the mouse.

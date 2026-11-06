@@ -537,6 +537,7 @@ pub fn resize(
         // Resizing the pty can immediately wake the shell with SIGWINCH.
         // Hold the same lock used by processOutput before notifying it, so
         // its redraw cannot be parsed against the old terminal dimensions.
+        self.renderer_state.classic_tui_recovery.cancel();
         try self.backend.resize(grid_size, size.terminal());
 
         // Update the size of our terminal state
@@ -867,4 +868,22 @@ pub const ThreadData = struct {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Termio, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.backend.getProcessInfo(info);
+}
+
+pub fn redrawClassicTui(self: *Termio, td: *ThreadData, request: @import("ClassicTuiRecovery.zig").Request) !void {
+    const Recovery = @import("ClassicTuiRecovery.zig");
+    const foreground = self.backend.getProcessInfo(.foreground_pid) orelse 0;
+    const pid = if (foreground == request.pid and Recovery.isClaudeProcess(foreground)) foreground else 0;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    const requested = self.renderer_state.classic_tui_recovery.take(request, &self.terminal, pid, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
+    const admitted = requested and self.renderer_state.native_input_enabled and
+        !self.renderer_state.native_input_terminal_requested;
+    self.renderer_state.mutex.unlock(global.io());
+    // Claude accepts the normal Ctrl-L byte with both legacy and Kitty input.
+    // This never reaches a shell/new job: take() checks the original process,
+    // native ownership, dimensions, expiry and intervening user input again.
+    if (admitted) {
+        try self.queueWrite(td, "\x0c", false);
+        log.info("recovered Claude Code classic dialog layout", .{});
+    }
 }

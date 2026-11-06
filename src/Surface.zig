@@ -2647,6 +2647,26 @@ fn cancelNativeSubmission(self: *Surface) void {
         self.queueRender() catch {};
 }
 
+fn cancelClassicTuiRecovery(self: *Surface) void {
+    const recovery = &self.renderer_state.classic_tui_recovery;
+    if (!recovery.active.load(.acquire)) return;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    recovery.cancel();
+}
+
+fn armClassicTuiRecovery(self: *Surface, event: input.KeyEvent) void {
+    if (comptime !builtin.target.os.tag.isDarwin()) return;
+    if (self.readonly or event.action != .press or event.key != .escape or !event.mods.binding().empty()) return;
+    const Recovery = @import("termio/ClassicTuiRecovery.zig");
+    const pid = self.getProcessInfo(.foreground_pid) orelse return;
+    if (!Recovery.isClaudeProcess(pid)) return;
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+    if (!self.renderer_state.native_input_enabled or self.renderer_state.native_input_terminal_requested) return;
+    self.renderer_state.classic_tui_recovery.arm(&self.io.terminal, pid, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
+}
+
 /// Called by the apprt when the surface's display is realized.
 /// Notifies the renderer so it can begin rendering.
 /// Safe to call from the main thread.
@@ -2895,6 +2915,7 @@ pub fn keyCallback(
     event_orig: input.KeyEvent,
 ) !InputEffect {
     self.cancelNativeSubmission();
+    if (event_orig.action != .release and !event_orig.key.modifier()) self.cancelClassicTuiRecovery();
     // log.warn("text keyCallback event={}", .{event_orig});
 
     // Apply key remappings to transform modifiers before any processing.
@@ -3052,6 +3073,7 @@ pub fn keyCallback(
             return .closed;
         }
 
+        self.armClassicTuiRecovery(event);
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },
             .stable => |v| .{ .write_stable = v },
@@ -3527,6 +3549,7 @@ fn encodeKeyOpts(self: *const Surface) input.key_encode.Options {
 /// this will filter newlines to '\r'.
 pub fn textCallback(self: *Surface, text: []const u8) !void {
     self.cancelNativeSubmission();
+    self.cancelClassicTuiRecovery();
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -3700,6 +3723,7 @@ pub fn scrollCallback(
     scroll_mods: input.ScrollMods,
 ) !void {
     self.cancelNativeSubmission();
+    self.cancelClassicTuiRecovery();
     // log.info("SCROLL: xoff={} yoff={} mods={}", .{ xoff, yoff, scroll_mods });
 
     // Crash metadata in case we crash in here
@@ -4020,6 +4044,7 @@ pub fn mouseButtonCallbackWithClickCount(
     click_count: ?u2,
 ) !bool {
     self.cancelNativeSubmission();
+    self.cancelClassicTuiRecovery();
     // Crash metadata in case we crash in here
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
@@ -6386,6 +6411,7 @@ fn completeClipboardPaste(
     allow_unsafe: bool,
 ) !void {
     if (data.len == 0) return;
+    self.cancelClassicTuiRecovery();
 
     const encode_opts: input.paste.Options = encode_opts: {
         self.renderer_state.mutex.lockUncancelable(global.io());

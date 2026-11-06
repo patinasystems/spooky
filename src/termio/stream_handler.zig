@@ -293,7 +293,10 @@ pub const StreamHandler = struct {
             .erase_display_scroll_complete => self.terminal.eraseDisplay(.scroll_complete, value),
             .erase_line_right => self.terminal.eraseLine(.right, value),
             .erase_line_left => self.terminal.eraseLine(.left, value),
-            .erase_line_complete => self.terminal.eraseLine(.complete, value),
+            .erase_line_complete => {
+                self.renderer_state.classic_tui_recovery.erasedLine(self.terminal);
+                self.terminal.eraseLine(.complete, value);
+            },
             .erase_line_right_unless_pending_wrap => self.terminal.eraseLine(.right_unless_pending_wrap, value),
             .delete_chars => self.terminal.deleteChars(value),
             .erase_chars => self.terminal.eraseChars(value),
@@ -772,9 +775,7 @@ pub const StreamHandler = struct {
 
             // We need to start a timer to prevent the emulator being hung
             // forever.
-            .synchronized_output => {
-                if (enabled) self.messageWriter(.{ .start_synchronized_output = {} });
-            },
+            .synchronized_output => self.synchronizedOutput(enabled),
 
             .linefeed => {
                 self.messageWriter(.{ .linefeed_mode = enabled });
@@ -871,6 +872,15 @@ pub const StreamHandler = struct {
             }),
 
             else => log.warn("unimplemented device attributes req: {}", .{req}),
+        }
+    }
+
+    /// Raw mode state has already been applied by setMode.
+    fn synchronizedOutput(self: *StreamHandler, enabled: bool) void {
+        if (enabled) self.messageWriter(.{ .start_synchronized_output = {} });
+        if (!enabled) {
+            if (self.renderer_state.classic_tui_recovery.finishFrame(self.terminal, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds())) |request|
+                self.messageWriter(.{ .classic_tui_redraw = request });
         }
     }
 
@@ -2262,4 +2272,71 @@ test "native input boundary notifications wake for an empty command without C" {
     const second = StreamHandler.NativeInputBoundary.capture(&term);
     stream.nextSlice("\x1b]133;B;aid=second\x07");
     try testing.expect(!second.changed(&term));
+}
+
+test "classic TUI recovery parses fragmented synchronized dialog erasure and queues one redraw" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 80, .rows = 34 });
+    defer term.deinit(t.allocator);
+    for (0..34) |row| {
+        term.setCursorPos(@intCast(row + 1), 1);
+        try term.printString("dialog row");
+    }
+    var mailbox = try termio.Mailbox.initSPSC(t.allocator);
+    defer mailbox.deinit(t.allocator);
+    var mutex: std.Io.Mutex = .init;
+    var state: renderer.State = .{ .mutex = &mutex, .terminal = &term, .native_input_enabled = true };
+    state.classic_tui_recovery.arm(&term, 42, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds());
+    var handler: StreamHandler = .{
+        .alloc = t.allocator,
+        .terminal = &term,
+        .renderer_state = &state,
+        .termio_mailbox = &mailbox,
+        // This fixture uses only cursor movement, EL and DEC2026. None of
+        // these actions accesses frontend, clipboard, or size-report fields.
+        .size = undefined,
+        .surface_mailbox = undefined,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .enquiry_response = "",
+        .osc_color_report_format = undefined,
+        .clipboard_write = .deny,
+        .clipboard_write_limit = 0,
+        .xt_checksum_report = false,
+    };
+    const FixtureHandler = struct {
+        delegate: *StreamHandler,
+        pub fn deinit(_: *@This()) void {}
+        pub fn vt(self: *@This(), comptime action: terminal.Stream(@This()).Action.Tag, value: terminal.Stream(@This()).Action.Value(action)) void {
+            // The headless runtime has no app loop for unrelated frontend
+            // actions (bell, title, etc.). Compile only this fixture's actions.
+            switch (action) {
+                .cursor_pos, .cursor_up, .erase_line_complete => self.delegate.vt(action, value),
+                .set_mode, .reset_mode => {
+                    if (value.mode == .synchronized_output) {
+                        self.delegate.terminal.modes.set(.synchronized_output, action == .set_mode);
+                        self.delegate.synchronizedOutput(action == .set_mode);
+                    }
+                },
+                else => {},
+            }
+        }
+    };
+    var stream: terminal.Stream(FixtureHandler) = .init(.{ .handler = .{ .delegate = &handler } });
+    defer stream.deinit();
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+    // Same EL/CUU contraction as the recorded classic renderer. Deliberately
+    // feed every escape sequence one byte at a time, across PTY batch bounds.
+    for ("\x1b[?2026h\x1b[34;1H") |byte| stream.next(byte);
+    for (0..24) |_| for ("\x1b[2K\x1b[1A") |byte| stream.next(byte);
+    try t.expectEqual(.armed, state.classic_tui_recovery.phase);
+    for ("\x1b[7;3H\x1b[?2026l") |byte| stream.next(byte);
+    const start = mailbox.spsc.queue.pop(global.io()).?;
+    try t.expect(start == .start_synchronized_output);
+    const request = mailbox.spsc.queue.pop(global.io()).?.classic_tui_redraw;
+    try t.expectEqual(@as(u64, 42), request.pid);
+    for ("\x1b[?2026l") |byte| stream.next(byte);
+    try t.expect(mailbox.spsc.queue.pop(global.io()) == null);
+    try t.expect(state.classic_tui_recovery.take(request, &term, 42, std.Io.Timestamp.now(global.io(), .awake).toMilliseconds()));
 }

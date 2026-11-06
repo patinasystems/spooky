@@ -344,6 +344,7 @@ fn drainMailbox(
                 try io.kittyClipboardGrant(v.pw, .write);
             },
             .start_synchronized_output => self.startSynchronizedOutput(cb),
+            .classic_tui_redraw => |v| try io.redrawClassicTui(data, v),
             .linefeed_mode => |v| self.flags.linefeed_mode = v,
             .focused => |v| try io.focusGained(data, v),
             .write_small => |v| try io.queueWrite(
