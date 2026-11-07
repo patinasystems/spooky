@@ -45,21 +45,66 @@ actor CommandPathResolver {
                   let path = resolve(token: cwd, workingDirectory: nil, trustedDirectory: true) else { return nil }
             return CommandPathMatch(path: path, start: 0, length: probe.text.utf8.count)
         }
+        var candidates = CommandPathCandidates.around(probe.text, byte: probe.hoverByte)
         if probe.kind == .localLink {
-            guard let token = Self.localLinkPath(probe.uri),
-                  let path = resolve(token: token, workingDirectory: probe.workingDirectory) else { return nil }
-            return CommandPathMatch(path: path, start: 0, length: probe.text.utf8.count)
+            guard let token = Self.localLinkPath(probe.uri) else { return nil }
+            if let path = resolve(token: token, workingDirectory: probe.workingDirectory) {
+                return CommandPathMatch(path: path, start: 0, length: probe.text.utf8.count)
+            }
+            // Some producers expand a short printed path against their cwd,
+            // even when the prose explicitly names a different parent folder.
+            if Self.isRelative(token) {
+                candidates.insert(.init(token: token, start: 0, length: probe.text.utf8.count), at: 0)
+            }
+        } else {
+            for candidate in candidates {
+                if let path = resolveCandidate(candidate.token, workingDirectory: probe.workingDirectory) {
+                    return CommandPathMatch(path: path, start: candidate.start, length: candidate.length)
+                }
+            }
         }
-        for candidate in CommandPathCandidates.around(probe.text, byte: probe.hoverByte) {
-            if let path = resolve(token: candidate.token, workingDirectory: probe.workingDirectory) {
-                return CommandPathMatch(path: path, start: candidate.start, length: candidate.length)
+
+        // A bounded fallback, only after the literal target failed. Check at
+        // most four explicitly printed directory paths; never search a tree.
+        let parents = contextDirectories(probe)
+        for candidate in candidates where Self.isRelative(candidate.token) {
+            var match: CommandResolvedPath?
+            for parent in parents {
+                guard let path = resolveCandidate(candidate.token, workingDirectory: parent) else { continue }
+                if let match, match.path != path.path { return nil }
+                match = path
             }
-            if let token = CommandPathCandidates.unescape(candidate.token),
-               let path = resolve(token: token, workingDirectory: probe.workingDirectory) {
-                return CommandPathMatch(path: path, start: candidate.start, length: candidate.length)
-            }
+            if let match { return CommandPathMatch(path: match, start: candidate.start, length: candidate.length) }
         }
         return nil
+    }
+
+    private func resolveCandidate(_ token: String, workingDirectory: String?) -> CommandResolvedPath? {
+        if let path = resolve(token: token, workingDirectory: workingDirectory) { return path }
+        guard let unescaped = CommandPathCandidates.unescape(token) else { return nil }
+        return resolve(token: unescaped, workingDirectory: workingDirectory)
+    }
+
+    private func contextDirectories(_ probe: CommandPathProbe) -> [String] {
+        guard probe.context.utf8.count <= 2_048 else { return [] }
+        let punctuation = CharacterSet(charactersIn: "`\"'(),;:[]<>")
+        var parents: [String] = []
+        var inspected = 0
+        for word in probe.context.split(whereSeparator: { $0.isWhitespace }).reversed() {
+            let token = String(word).trimmingCharacters(in: punctuation)
+            let linked = token.lowercased().hasPrefix("file:") ? Self.localLinkPath(token) : nil
+            guard linked != nil || token.hasSuffix("/"), token != "/", token != "./",
+                  linked != nil || !token.contains("://") else { continue }
+            inspected += 1
+            if let path = resolveCandidate(linked ?? token, workingDirectory: probe.workingDirectory), path.kind == .directory,
+               !parents.contains(path.path) { parents.append(path.path) }
+            if inspected == 4 { break }
+        }
+        return parents
+    }
+
+    nonisolated private static func isRelative(_ token: String) -> Bool {
+        !token.hasPrefix("/") && !token.hasPrefix("~")
     }
 
     func resolve(token: String, workingDirectory: String?, trustedDirectory: Bool = false) -> CommandResolvedPath? {
@@ -106,7 +151,7 @@ actor CommandPathResolver {
         if token == "~" { expanded = home } else if token.hasPrefix("~/") { expanded = home + token.dropFirst() } else if token.hasPrefix("/") { expanded = token } else {
             guard let workingDirectory, workingDirectory.hasPrefix("/"),
                   workingDirectory.utf8.count <= 16_384, !workingDirectory.utf8.contains(0) else { return nil }
-            expanded = workingDirectory + "/" + token
+            expanded = workingDirectory + (workingDirectory.hasSuffix("/") ? "" : "/") + token
         }
         // Preserve `..`: collapsing it lexically would change the meaning
         // when an earlier component is a symlink. stat/Finder resolve it.

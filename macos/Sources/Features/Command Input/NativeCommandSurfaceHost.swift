@@ -495,7 +495,8 @@ final class NativeCommandSurfaceHost: NSView {
         let text = withUnsafeBytes(of: probe.text) { String(bytes: $0.prefix(Int(probe.text_len)), encoding: .utf8) }
         let uri = withUnsafeBytes(of: probe.uri) { String(bytes: $0.prefix(Int(probe.uri_len)), encoding: .utf8) }
         let id = withUnsafeBytes(of: probe.block_id) { String(bytes: $0.prefix { $0 != 0 }, encoding: .utf8) }
-        guard let text, let uri else { return .none }
+        let context = withUnsafeBytes(of: probe.context) { String(bytes: $0.prefix(Int(probe.context_len)), encoding: .utf8) }
+        guard let text, let uri, let context else { return .none }
         let kind: CommandPathProbe.Kind
         switch probe.kind {
         case GHOSTTY_PATH_KIND_HEADER: kind = .header
@@ -503,7 +504,7 @@ final class NativeCommandSurfaceHost: NSView {
         default: kind = .output
         }
         return .hit(CommandPathProbe(id: probe.hit_id, kind: kind, text: text, hoverByte: Int(probe.hover_byte), uri: uri,
-                                     workingDirectory: id.flatMap { session.blockMetadata[$0]?.workingDirectory }))
+                                     workingDirectory: id.flatMap { session.blockMetadata[$0]?.workingDirectory }, context: context))
     }
 
     private func publishPath(id: UInt64, match: CommandPathMatch, open: Bool) -> [NSRect]? {

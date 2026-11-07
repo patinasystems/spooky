@@ -116,6 +116,41 @@ struct CommandPathResolverTests {
             #expect(CommandPathResolver.localLinkPath(target) == nil)
         }
     }
+
+    @Test func listedChildrenUseTheExplicitNearbyParentAndRejectAmbiguity() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent("shared/playgrounds/demo/qa")
+        let video = parent.appendingPathComponent("video/walkthrough.mp4")
+        try FileManager.default.createDirectory(at: video.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: video)
+        let resolver = CommandPathResolver()
+        let context = "Everything is in shared/playgrounds/demo/qa/, which contains the recordings."
+        for kind in [CommandPathProbe.Kind.output, .localLink] {
+            let text = kind == .output ? "- video/walkthrough.mp4: a recording" : "video/walkthrough.mp4"
+            let probe = CommandPathProbe(id: 1, kind: kind, text: text, hoverByte: 7,
+                                         uri: root.appendingPathComponent("video/walkthrough.mp4").absoluteString,
+                                         workingDirectory: root.path, context: context)
+            let match = try #require(await resolver.match(probe))
+            #expect(match.path.path == video.path)
+            #expect(String(bytes: Array(text.utf8)[match.start..<(match.start + match.length)], encoding: .utf8)
+                == "video/walkthrough.mp4")
+        }
+        // Exact parent hyperlinks also work when a TUI erased its block anchor.
+        let linked = CommandPathProbe(id: 2, kind: .output, text: "video/walkthrough.mp4:", hoverByte: 3,
+                                      uri: "", workingDirectory: nil, context: parent.absoluteString)
+        #expect(await resolver.match(linked)?.path.path == video.path)
+        let other = root.appendingPathComponent("other/video")
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        try Data().write(to: other.appendingPathComponent("walkthrough.mp4"))
+        let ambiguous = CommandPathProbe(id: 3, kind: .output, text: "video/walkthrough.mp4", hoverByte: 3,
+                                         uri: "", workingDirectory: root.path,
+                                         context: context + "\nAlso other/")
+        #expect(await resolver.match(ambiguous) == nil)
+        let missingContext = CommandPathProbe(id: 4, kind: .output, text: "video/walkthrough.mp4:", hoverByte: 3,
+                                              uri: "", workingDirectory: root.path)
+        #expect(await resolver.match(missingContext) == nil)
+    }
 }
 
 private final class PathStatFixture: @unchecked Sendable {

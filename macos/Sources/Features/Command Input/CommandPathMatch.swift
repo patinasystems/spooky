@@ -8,6 +8,7 @@ struct CommandPathProbe: Equatable, Sendable {
     let hoverByte: Int
     let uri: String
     let workingDirectory: String?
+    var context: String = ""
 }
 
 struct CommandPathMatch: Equatable, Sendable {
@@ -94,7 +95,7 @@ enum CommandPathCandidates {
         // Diagnostic output often decorates a path with punctuation or line and
         // column numbers. Always try the literal filename first.
         var trimmedEnd = end
-        while trimmedEnd > start, [44, 59, 41, 46].contains(bytes[trimmedEnd - 1]) { trimmedEnd -= 1 }
+        while trimmedEnd > start, [44, 58, 59, 41, 46].contains(bytes[trimmedEnd - 1]) { trimmedEnd -= 1 }
         var trimmedStart = start
         while trimmedStart < trimmedEnd, bytes[trimmedStart] == 40 { trimmedStart += 1 }
         append(trimmedStart..<trimmedEnd)

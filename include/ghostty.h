@@ -638,6 +638,8 @@ typedef struct {
   uint32_t uri_len;
   uint8_t text[4096];
   uint8_t uri[4096];
+  uint32_t context_len;
+  uint8_t context[2048];
 } ghostty_path_probe_s;
 typedef struct {
   double x, y, width, height;

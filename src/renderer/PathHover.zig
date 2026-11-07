@@ -9,6 +9,7 @@ const Viewport = @import("NativeViewport.zig").Resolved;
 
 pub const text_capacity = 4096;
 pub const rect_capacity = 8;
+pub const context_capacity = 2048;
 pub const Kind = enum(c_int) { header, output, local_osc8 };
 pub const Probe = extern struct {
     hit_id: u64 = 0,
@@ -19,6 +20,8 @@ pub const Probe = extern struct {
     uri_len: u32 = 0,
     text: [text_capacity]u8 = @splat(0),
     uri: [text_capacity]u8 = @splat(0),
+    context_len: u32 = 0,
+    context: [context_capacity]u8 = @splat(0),
 };
 pub const Rect = struct { x: f32 = 0, y: f32 = 0, width: f32 = 0, height: f32 = 0 };
 pub const Snapshot = struct {
@@ -93,7 +96,10 @@ pub fn probeAt(self: *PathHover, term: *terminal.Terminal, chrome: *const Chrome
         if (!std.meta.eql(identityFor(term, chrome, size, viewport), self.identity.?)) break :retained null;
         const lookup: HeaderLookup = if (self.header) |header| .{ .known = header } else .skip;
         var value = captureAt(term, chrome, size, viewport, x, y, lookup) orelse break :retained null;
-        if (value.header == null) value.probe.block_id = old.block_id;
+        if (value.header == null) {
+            value.probe.block_id = old.block_id;
+            self.captureContext(term, &value);
+        }
         if (value.source_row != self.source_row or !sameText(old, value.probe)) break :retained null;
         break :retained value;
     };
@@ -101,7 +107,10 @@ pub fn probeAt(self: *PathHover, term: *terminal.Terminal, chrome: *const Chrome
         self.clear();
         return null;
     };
-    if (retained == null and capture.header == null) capture.probe.block_id = self.ownerAt(term, capture.identity, &capture.probe, &capture.cells);
+    if (retained == null and capture.header == null) {
+        capture.probe.block_id = self.ownerAt(term, capture.identity, &capture.probe, &capture.cells);
+        self.captureContext(term, &capture);
+    }
     const same = if (self.probe) |old| self.identity != null and
         std.meta.eql(self.identity.?, capture.identity) and self.source_row == capture.source_row and sameText(old, capture.probe) else false;
     if (same) {
@@ -168,8 +177,11 @@ fn validate(self: *PathHover, term: *terminal.Terminal, chrome: *const Chrome, s
     };
     // The stamp changes when a boundary is replaced/erased. Text comparison
     // also catches overwrites within the same page (page serial alone cannot).
-    if (capture.header == null) capture.probe.block_id = old.block_id;
-    if (!std.meta.eql(capture.identity, self.identity.?) or self.source_row != capture.source_row or !sameText(old, capture.probe)) {
+    if (capture.header == null) {
+        capture.probe.block_id = old.block_id;
+    }
+    // Parent text is rechecked by a real pointer/click probe, not each frame.
+    if (!std.meta.eql(capture.identity, self.identity.?) or self.source_row != capture.source_row or !sameTarget(old, capture.probe)) {
         self.clear();
         return null;
     }
@@ -177,10 +189,94 @@ fn validate(self: *PathHover, term: *terminal.Terminal, chrome: *const Chrome, s
 }
 
 fn sameText(a: Probe, b: Probe) bool {
+    return sameTarget(a, b) and a.context_len == b.context_len and
+        std.mem.eql(u8, a.context[0..a.context_len], b.context[0..b.context_len]);
+}
+
+fn sameTarget(a: Probe, b: Probe) bool {
     return a.kind == b.kind and std.mem.eql(u8, &a.block_id, &b.block_id) and
         a.text_len == b.text_len and a.uri_len == b.uri_len and
         std.mem.eql(u8, a.text[0..a.text_len], b.text[0..b.text_len]) and
         std.mem.eql(u8, a.uri[0..a.uri_len], b.uri[0..b.uri_len]);
+}
+
+/// At most eight visible output rows from this command. No history or I/O.
+/// Reject overflow rather than inventing a parent path by truncating a row.
+fn captureContext(self: *const PathHover, term: *terminal.Terminal, capture: *Capture) void {
+    var minimum: u32 = 0;
+    if (self.owner) |owner| if (std.meta.eql(owner.identity, capture.identity) and
+        std.mem.eql(u8, &owner.id, &capture.probe.block_id))
+    {
+        minimum = owner.first_row;
+    };
+    var parents: [8]terminal.Pin = undefined;
+    const limit = @min(parents.len, context_capacity / @max(1, term.cols));
+    var count: usize = 0;
+    var y = capture.source_row;
+    while (y > minimum and count < limit) {
+        y -= 1;
+        const pin = term.screens.active.pages.pin(.{ .viewport = .{ .x = 0, .y = y } }) orelse break;
+        var output = true;
+        for (pin.cells(.all)) |cell| {
+            if (cell.codepoint() != 0 and cell.semantic_content != .output) {
+                output = false;
+                break;
+            }
+        }
+        if (!output) break;
+        parents[count] = pin;
+        count += 1;
+    }
+    var length: usize = 0;
+    var partial = count > 0 and parents[count - 1].rowAndCell().row.wrap_continuation;
+    while (count > 0) {
+        count -= 1;
+        const pin = parents[count];
+        if (partial) {
+            partial = pin.rowAndCell().row.wrap;
+            continue;
+        }
+        for (pin.cells(.all)) |*cell| {
+            if (cell.wide == .spacer_tail or cell.wide == .spacer_head) continue;
+            var bytes: [4]u8 = undefined;
+            const n = std.unicode.utf8Encode(if (cell.codepoint() == 0) ' ' else cell.codepoint(), &bytes) catch return;
+            if (length + n + 1 > context_capacity) return;
+            @memcpy(capture.probe.context[length..][0..n], bytes[0..n]);
+            length += n;
+            if (pin.grapheme(cell)) |extra| for (extra) |cp| {
+                const m = std.unicode.utf8Encode(cp, &bytes) catch return;
+                if (length + m + 1 > context_capacity) return;
+                @memcpy(capture.probe.context[length..][0..m], bytes[0..m]);
+                length += m;
+            };
+        }
+        if (!pin.rowAndCell().row.wrap) {
+            while (length > 0 and capture.probe.context[length - 1] == ' ') length -= 1;
+            capture.probe.context[length] = '\n';
+            length += 1;
+        }
+        // An OSC 8 directory can carry an exact absolute target even when
+        // its visible label is relative and the program erased its C anchor.
+        var previous: ?[]const u8 = null;
+        for (pin.cells(.all), 0..) |_, column| {
+            var cell_pin = pin;
+            cell_pin.x = @intCast(column);
+            const uri = uriAt(cell_pin) orelse {
+                previous = null;
+                continue;
+            };
+            if (previous) |old| if (std.mem.eql(u8, old, uri)) continue;
+            previous = uri;
+            if (uri.len > context_capacity or !localURI(uri) or length + uri.len + 2 > context_capacity) continue;
+            capture.probe.context[length] = '\n';
+            length += 1;
+            @memcpy(capture.probe.context[length..][0..uri.len], uri);
+            length += uri.len;
+            capture.probe.context[length] = '\n';
+            length += 1;
+        }
+    }
+    capture.probe.context_len = @intCast(length);
 }
 
 fn rectangles(self: *const PathHover, term: *terminal.Terminal, size: Size, viewport: Viewport, capture: *const Capture) ?Snapshot {
@@ -504,6 +600,33 @@ test "path hover requires publication and reuses one same-line identity" {
     _ = hover.probeAt(&term, &chrome, size, viewport, 6 + 13 * 8, 37).?;
     try t.expectEqual(@as(u8, 0), hover.snapshot(&term, &chrome, size, viewport).count);
     try t.expect(hover.publish(&term, &chrome, size, viewport, moved.hit_id, 0, 9, false) == null);
+}
+
+test "path hover carries bounded parent text and exact links and revalidates it on click" {
+    const t = std.testing;
+    var term = try terminal.Terminal.init(t.io, t.allocator, .{ .cols = 100, .rows = 10 });
+    defer term.deinit(t.allocator);
+    try testOutput(&term, "Everything is in ");
+    var stream = term.vtStream();
+    defer stream.deinit();
+    stream.nextSlice("\x1b]8;;file:///tmp/qa\x07shared/qa/\x1b]8;;\x07\r\nvideo/walkthrough.mp4: details");
+    const size = testSize(100, 10);
+    const viewport: Viewport = .{ .rows = 10 };
+    const chrome: Chrome = .{};
+    var hover: PathHover = .{};
+    const first = hover.probeAt(&term, &chrome, size, viewport, 10, 53).?;
+    const context = first.context[0..first.context_len];
+    try t.expect(std.mem.indexOf(u8, context, "shared/qa/") != null);
+    try t.expect(std.mem.indexOf(u8, context, "file:///tmp/qa") != null);
+    try t.expectEqualStrings("old", std.mem.sliceTo(&first.block_id, 0));
+    _ = hover.publish(&term, &chrome, size, viewport, first.hit_id, 0, 21, true).?;
+    term.setCursorPos(3, 1);
+    try term.printString("Everything is in changed/");
+    try t.expectEqual(@as(u8, 1), hover.snapshot(&term, &chrome, size, viewport).count);
+    const next = hover.probeAt(&term, &chrome, size, viewport, 10, 53).?;
+    try t.expect(next.hit_id != first.hit_id);
+    try t.expect(hover.publish(&term, &chrome, size, viewport, first.hit_id, 0, 21, true) == null);
+    try t.expect(next.context_len <= context_capacity);
 }
 
 test "path hover pixel crop resolves and clips the partially visible bottom row" {
