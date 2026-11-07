@@ -301,8 +301,9 @@ fn captureAt(term: *terminal.Terminal, chrome: *const Chrome, size: Size, viewpo
     if (hovered.rowAndCell().cell.semantic_content != .output) return null;
     const uri = uriAt(hovered);
     if (uri) |value| {
-        // Web/remote OSC8 retains its upstream behavior. No implicit scheme.
-        if (!localURI(value) or value.len > text_capacity) return null;
+        // Bound relative-target scanning before classifying it. Web/remote
+        // OSC8 retains its upstream behavior; the host validates local paths.
+        if (value.len > text_capacity or !localURI(value)) return null;
         result.probe.kind = .local_osc8;
         result.probe.uri_len = @intCast(value.len);
         @memcpy(result.probe.uri[0..value.len], value);
