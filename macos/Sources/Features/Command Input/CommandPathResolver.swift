@@ -46,9 +46,8 @@ actor CommandPathResolver {
             return CommandPathMatch(path: path, start: 0, length: probe.text.utf8.count)
         }
         if probe.kind == .localLink {
-            guard let url = URL(string: probe.uri), url.isFileURL,
-                  url.host == nil || url.host == "" || url.host?.lowercased() == "localhost",
-                  let path = resolve(token: url.path, workingDirectory: nil) else { return nil }
+            guard let token = Self.localLinkPath(probe.uri),
+                  let path = resolve(token: token, workingDirectory: probe.workingDirectory) else { return nil }
             return CommandPathMatch(path: path, start: 0, length: probe.text.utf8.count)
         }
         for candidate in CommandPathCandidates.around(probe.text, byte: probe.hoverByte) {
@@ -84,6 +83,19 @@ actor CommandPathResolver {
             replacement = (replacement + 1) % capacity
         }
         return result
+    }
+
+    /// OSC 8 labels need not contain their target's spelling. Resolve the
+    /// decoded local target against its owning block, just like printed paths.
+    /// Never let Foundation fill in a relative file URL from the app's cwd.
+    nonisolated static func localLinkPath(_ uri: String) -> String? {
+        guard !uri.hasPrefix("//"),
+              let components = URLComponents(string: uri),
+              components.scheme == nil || components.scheme?.lowercased() == "file",
+              components.host == nil || components.host == "" || components.host?.lowercased() == "localhost",
+              components.user == nil, components.password == nil, components.port == nil,
+              !components.path.isEmpty else { return nil }
+        return components.path
     }
 
     /// Lexical only: no shell expansion, command execution, symlink resolution,

@@ -88,6 +88,34 @@ struct CommandPathResolverTests {
         _ = await resolver.resolve(token: "/a", workingDirectory: nil)
         #expect(fixture.reads == 6)
     }
+
+    @Test func relativeLinksUseTheirBlockDirectoryInsteadOfTheAppOrNewPrompt() async throws {
+        let resolver = CommandPathResolver(home: "/home", inspect: { _ in .file })
+        for (target, expected) in [
+            ("src/report%20%E9%9B%AA.txt", "/old/project/src/report 雪.txt"),
+            ("./src/report.txt", "/old/project/./src/report.txt"),
+            ("../report.txt", "/old/project/../report.txt"),
+            ("file:src/report.txt", "/old/project/src/report.txt"),
+            ("file:../report.txt", "/old/project/../report.txt"),
+            ("src/report.txt#L12", "/old/project/src/report.txt"),
+            ("/absolute/report.txt", "/absolute/report.txt"),
+            ("file:///absolute/report.txt", "/absolute/report.txt"),
+            ("~/report.txt", "/home/report.txt")
+        ] {
+            let probe = CommandPathProbe(id: 1, kind: .localLink, text: "open report", hoverByte: 2,
+                                         uri: target, workingDirectory: "/old/project")
+            let match = try #require(await resolver.match(probe))
+            #expect(match.path.path == expected)
+            #expect(match.start == 0 && match.length == probe.text.utf8.count)
+        }
+        let unknown = CommandPathProbe(id: 2, kind: .localLink, text: "report", hoverByte: 0,
+                                       uri: "src/report.txt", workingDirectory: nil)
+        #expect(await resolver.match(unknown) == nil)
+        for target in ["https://example.com/file", "//server/file", "file://server/file",
+                       "file://user@localhost/tmp/file"] {
+            #expect(CommandPathResolver.localLinkPath(target) == nil)
+        }
+    }
 }
 
 private final class PathStatFixture: @unchecked Sendable {

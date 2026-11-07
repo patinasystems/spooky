@@ -241,9 +241,22 @@ fn uriAt(pin: terminal.Pin) ?[]const u8 {
 }
 
 fn localURI(uri: []const u8) bool {
-    if (!std.ascii.startsWithIgnoreCase(uri, "file://")) return false;
-    const rest = uri[7..];
-    return std.mem.startsWith(u8, rest, "/") or std.ascii.startsWithIgnoreCase(rest, "localhost/");
+    if (uri.len == 0) return false;
+    if (std.ascii.startsWithIgnoreCase(uri, "file:")) {
+        const rest = uri[5..];
+        if (std.mem.startsWith(u8, rest, "//"))
+            return std.mem.startsWith(u8, rest[2..], "/") or std.ascii.startsWithIgnoreCase(rest[2..], "localhost/");
+        return rest.len > 0;
+    }
+    // Relative OSC 8 targets share the block's cwd in the host resolver.
+    // Network authorities and other URI schemes keep upstream link handling.
+    if (std.mem.startsWith(u8, uri, "//")) return false;
+    for (uri) |byte| switch (byte) {
+        ':' => return false,
+        '/' => return true,
+        else => {},
+    };
+    return true;
 }
 
 fn boundaryStamp(term: *terminal.Terminal) u64 {
@@ -616,12 +629,28 @@ test "path hover local OSC8 is exact and web or remote links stay upstream" {
     try t.expectEqual(Kind.local_osc8, local.kind);
     try t.expectEqualStrings("label", local.text[0..local.text_len]);
     try t.expectEqualStrings("file:///tmp/caf%C3%A9%20x", local.uri[0..local.uri_len]);
+    for ([_][]const u8{ "src/report.txt", "./report.txt", "../report.txt", "report.txt", "file:src/report.txt", "file:/tmp/report.txt" }) |uri| {
+        term.setCursorPos(1, 1);
+        stream.nextSlice("\x1b]8;;");
+        stream.nextSlice(uri);
+        stream.nextSlice("\x07label\x1b]8;;\x07");
+        const relative = hover.probeAt(&term, &chrome, size, viewport, 10, 5).?;
+        try t.expectEqual(Kind.local_osc8, relative.kind);
+        try t.expectEqualStrings(uri, relative.uri[0..relative.uri_len]);
+    }
     term.setCursorPos(1, 1);
     stream.nextSlice("\x1b]8;;https://example.com/\x07label\x1b]8;;\x07");
     try t.expect(hover.probeAt(&term, &chrome, size, viewport, 10, 5) == null);
     term.setCursorPos(1, 1);
     stream.nextSlice("\x1b]8;;file://remote/tmp/path\x07label\x1b]8;;\x07");
     try t.expect(hover.probeAt(&term, &chrome, size, viewport, 10, 5) == null);
+    for ([_][]const u8{ "//server/path", "mailto:user@example.com", "javascript:alert(1)" }) |uri| {
+        term.setCursorPos(1, 1);
+        stream.nextSlice("\x1b]8;;");
+        stream.nextSlice(uri);
+        stream.nextSlice("\x07label\x1b]8;;\x07");
+        try t.expect(hover.probeAt(&term, &chrome, size, viewport, 10, 5) == null);
+    }
 }
 
 test "path hover bounds context and excludes covered footer output" {
