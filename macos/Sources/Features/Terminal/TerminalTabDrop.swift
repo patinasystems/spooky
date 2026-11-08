@@ -1,6 +1,9 @@
 import AppKit
 
-extension TerminalWindow: NSDraggingDestination {
+// NSWindow's inherited drag implementation also drives native tab reordering
+// and detachment. Receive our custom pane payload through its documented
+// delegate forwarding, rather than replacing that implementation on the window.
+extension TerminalController: NSDraggingDestination {
     func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation { updateTabDrop(sender) }
     func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation { updateTabDrop(sender) }
     func draggingExited(_ sender: (any NSDraggingInfo)?) { clearTabDropFeedback() }
@@ -16,36 +19,37 @@ extension TerminalWindow: NSDraggingDestination {
     func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         defer { clearTabDropFeedback() }
         guard let source = tabDropSource(sender) else { return false }
-        return terminalController?.receiveTabDrop(source) ?? false
+        return receiveTabDrop(source)
     }
 
     private func tabDropSource(_ sender: any NSDraggingInfo) -> Ghostty.SurfaceView? {
-        guard styleMask.contains(.titled), sender.draggingSourceOperationMask.contains(.move),
-              TerminalTabDropRegion.header(size: frame.size, contentLayout: contentLayoutRect).contains(sender.draggingLocation),
+        guard let window, window.styleMask.contains(.titled), sender.draggingSourceOperationMask.contains(.move),
+              TerminalTabDropRegion.header(size: window.frame.size, contentLayout: window.contentLayoutRect).contains(sender.draggingLocation),
               let sourceView = sender.draggingSource as? Ghostty.SurfaceDragSourceView,
               let source = sourceView.surfaceView,
               let data = sender.draggingPasteboard.data(forType: TerminalSurfaceDragPayload.type),
               TerminalSurfaceDragPayload.id(from: data) == source.id,
-              terminalController?.canReceiveTabDrop(source) == true else { return nil }
+              canReceiveTabDrop(source) else { return nil }
         return source
     }
 
     private func updateTabDrop(_ sender: any NSDraggingInfo) -> NSDragOperation {
-        guard tabDropSource(sender) != nil, let root = contentView?.superview else {
+        guard tabDropSource(sender) != nil, let window = window as? TerminalWindow, let root = window.contentView?.superview else {
             clearTabDropFeedback()
             return []
         }
-        let feedback = tabDropFeedback ?? TerminalTabDropFeedback(frame: .zero)
-        let rect = TerminalTabDropRegion.header(size: frame.size, contentLayout: contentLayoutRect)
+        let feedback = window.tabDropFeedback ?? TerminalTabDropFeedback(frame: .zero)
+        let rect = TerminalTabDropRegion.header(size: window.frame.size, contentLayout: window.contentLayoutRect)
         feedback.frame = root.convert(rect, from: nil).insetBy(dx: 6, dy: 2)
         if feedback.superview !== root { root.addSubview(feedback, positioned: .above, relativeTo: nil) }
-        tabDropFeedback = feedback
+        window.tabDropFeedback = feedback
         return .move
     }
 
     private func clearTabDropFeedback() {
-        tabDropFeedback?.removeFromSuperview()
-        tabDropFeedback = nil
+        guard let window = window as? TerminalWindow else { return }
+        window.tabDropFeedback?.removeFromSuperview()
+        window.tabDropFeedback = nil
     }
 }
 

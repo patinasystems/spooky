@@ -194,6 +194,7 @@ class TerminalWindow: NSWindow {
         }
 
         super.sendEvent(event)
+        tabTitleEditor.mouseEventDidDispatch(event)
     }
 
     override func close() {

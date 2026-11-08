@@ -1,8 +1,20 @@
 import AppKit
+import ObjectiveC
 import Testing
 @testable import Ghostty
 
 struct TerminalTabDropTests {
+    @Test @MainActor func nativeWindowDragImplementationRemainsInherited() throws {
+        // AppKit uses these methods for native tab drags as well as drop targets.
+        // Custom pane drops must be handled by the delegate, never shadow them.
+        for name in ["draggingEntered:", "draggingUpdated:", "draggingExited:",
+                     "prepareForDragOperation:", "performDragOperation:", "concludeDragOperation:"] {
+            let selector = NSSelectorFromString(name)
+            let inherited = try #require(class_getInstanceMethod(NSWindow.self, selector))
+            #expect(class_getInstanceMethod(TerminalWindow.self, selector) == inherited)
+        }
+    }
+
     @Test func surfacePayloadKeepsTheExistingUUIDWireFormat() throws {
         let id = try #require(UUID(uuidString: "00112233-4455-6677-8899-AABBCCDDEEFF"))
         let data = TerminalSurfaceDragPayload.data(for: id)
