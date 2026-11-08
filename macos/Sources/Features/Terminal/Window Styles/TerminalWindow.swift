@@ -8,6 +8,7 @@ import GhosttyKit
 class TerminalWindow: NSWindow {
     /// Posted when a terminal window awakes from nib.
     static let terminalDidAwake = Notification.Name("TerminalWindowDidAwake")
+    static let nativeTabControlDidChange = Notification.Name("TerminalNativeTabControlDidChange")
 
     /// Posted when a terminal window will close
     static let terminalWillCloseNotification = Notification.Name("TerminalWindowWillClose")
@@ -195,6 +196,7 @@ class TerminalWindow: NSWindow {
 
         super.sendEvent(event)
         tabTitleEditor.mouseEventDidDispatch(event)
+        (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.didDispatch(event)
     }
 
     override func close() {
@@ -308,6 +310,7 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidAppear() {
+        notifyNativeTabControlChanged()
         // Remove our reset zoom accessory. For some reason having a SwiftUI
         // titlebar accessory causes our content view scaling to be wrong.
         // Removing it fixes it, we just need to remember to add it again later.
@@ -320,10 +323,19 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidDisappear() {
+        notifyNativeTabControlChanged()
         if styleMask.contains(.titled) {
             if titlebarAccessoryViewControllers.firstIndex(of: resetZoomAccessory) == nil {
                 addTitlebarAccessoryViewController(resetZoomAccessory)
             }
+        }
+    }
+
+    private func notifyNativeTabControlChanged() {
+        // AppKit attaches/removes the actual bar after its accessory callbacks.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            NotificationCenter.default.post(name: Self.nativeTabControlDidChange, object: self)
         }
     }
 

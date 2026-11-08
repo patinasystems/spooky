@@ -93,6 +93,7 @@ extension Ghostty {
         private let grip = GripImageView(frame: .zero)
         private var isHovered = false
         private var isPressed = false
+        private var windowObservers: [NSObjectProtocol] = []
 
         /// Callback invoked when the drag state changes. Called with `true` when
         /// a drag session begins, and `false` when it ends (completed or cancelled).
@@ -128,6 +129,28 @@ extension Ghostty {
 
         required init?(coder: NSCoder) { return nil }
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            windowObservers.forEach(NotificationCenter.default.removeObserver)
+            windowObservers.removeAll()
+            if let window {
+                for name in [NSWindow.didBecomeMainNotification, NSWindow.didBecomeKeyNotification,
+                             TerminalWindow.nativeTabControlDidChange] {
+                    windowObservers.append(NotificationCenter.default.addObserver(
+                        forName: name, object: window, queue: .main
+                    ) { [weak self] _ in self?.syncNativeTabControl() })
+                }
+            }
+            syncNativeTabControl()
+        }
+
+        private func syncNativeTabControl() {
+            guard let window else { isHidden = true; return }
+            isHidden = TerminalDragHandlePolicy.hasNativeControl(
+                tabCount: window.tabGroup?.windows.count ?? 0,
+                tabBarVisible: window.tabGroup?.isTabBarVisible ?? false)
+        }
+
         override func layout() {
             super.layout()
             grip.frame = NSRect(x: (bounds.width - 18) / 2, y: (bounds.height - 12) / 2, width: 18, height: 12)
@@ -160,6 +183,7 @@ extension Ghostty {
         }
 
         deinit {
+            windowObservers.forEach(NotificationCenter.default.removeObserver)
             if let escapeMonitor {
                 NSEvent.removeMonitor(escapeMonitor)
             }

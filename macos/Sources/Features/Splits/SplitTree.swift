@@ -139,10 +139,13 @@ extension SplitTree {
     /// Insert a new view at the given view point by creating a split in the given direction.
     /// This will always reset the zoomed state of the tree.
     func inserting(view: ViewType, at: ViewType, direction: NewDirection) throws -> Self {
+        try inserting(node: .leaf(view: view), at: at, direction: direction)
+    }
+
+    /// Insert a live subtree, preserving its pane identities, ratios and layout.
+    func inserting(node: Node, at: ViewType, direction: NewDirection) throws -> Self {
         guard let root else { throw SplitError.viewNotFound }
-        return .init(
-            root: try root.inserting(view: view, at: at, direction: direction),
-            zoomed: nil)
+        return .init(root: try root.inserting(node: node, at: at, direction: direction), zoomed: nil)
     }
     /// Find a node containing a view with the specified ID.
     /// - Parameter id: The ID of the view to find
@@ -526,6 +529,10 @@ extension SplitTree.Node {
     /// - Note: If the existing view (`at`) is not found in the tree, this method does nothing. We should
     /// maybe throw instead but at the moment we just do nothing.
     func inserting(view: ViewType, at: ViewType, direction: NewDirection) throws -> Self {
+        try inserting(node: .leaf(view: view), at: at, direction: direction)
+    }
+
+    func inserting(node newNode: Node, at: ViewType, direction: NewDirection) throws -> Self {
         // Get the path to our insertion point. If it doesn't exist we do
         // nothing.
         guard let path = path(to: .leaf(view: at)) else {
@@ -551,7 +558,6 @@ extension SplitTree.Node {
         }
 
         // Create the new split node
-        let newNode: Node = .leaf(view: view)
         let existingNode: Node = .leaf(view: at)
         let newSplit: Node = .split(.init(
             direction: splitDirection,

@@ -219,39 +219,21 @@ enum TerminalSplitDropZone: String, Equatable {
         return .bottom
     }
 
-    @ViewBuilder
-    func overlay(in geometry: GeometryProxy) -> some View {
-        let overlayColor = Color.accentColor.opacity(0.3)
-
+    /// Shared by the pane drag and native-tab drag previews, in top-left coordinates.
+    func highlightRect(in size: CGSize) -> CGRect {
         switch self {
-        case .top:
-            VStack(spacing: 0) {
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(height: geometry.size.height / 2)
-                Spacer()
-            }
-        case .bottom:
-            VStack(spacing: 0) {
-                Spacer()
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(height: geometry.size.height / 2)
-            }
-        case .left:
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(width: geometry.size.width / 2)
-                Spacer()
-            }
-        case .right:
-            HStack(spacing: 0) {
-                Spacer()
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(width: geometry.size.width / 2)
-            }
+        case .top: CGRect(x: 0, y: 0, width: size.width, height: size.height / 2)
+        case .bottom: CGRect(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+        case .left: CGRect(x: 0, y: 0, width: size.width / 2, height: size.height)
+        case .right: CGRect(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
         }
+    }
+
+    func overlay(in geometry: GeometryProxy) -> some View {
+        let rect = highlightRect(in: geometry.size)
+        return Rectangle()
+            .fill(Color.accentColor.opacity(0.3))
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
     }
 }

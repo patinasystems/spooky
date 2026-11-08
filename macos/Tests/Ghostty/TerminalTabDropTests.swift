@@ -4,6 +4,14 @@ import Testing
 @testable import Ghostty
 
 struct TerminalTabDropTests {
+    @Test func gripOnlyBelongsToAWindowWithoutNativeTabControls() {
+        #expect(!TerminalDragHandlePolicy.hasNativeControl(tabCount: 0, tabBarVisible: false))
+        #expect(!TerminalDragHandlePolicy.hasNativeControl(tabCount: 1, tabBarVisible: false))
+        #expect(TerminalDragHandlePolicy.hasNativeControl(tabCount: 1, tabBarVisible: true))
+        #expect(TerminalDragHandlePolicy.hasNativeControl(tabCount: 2, tabBarVisible: false))
+        #expect(TerminalDragHandlePolicy.hasNativeControl(tabCount: 3, tabBarVisible: true))
+    }
+
     @Test @MainActor func nativeWindowDragImplementationRemainsInherited() throws {
         // AppKit uses these methods for native tab drags as well as drop targets.
         // Custom pane drops must be handled by the delegate, never shadow them.
