@@ -166,6 +166,7 @@ extension Ghostty {
                 SurfaceGrabHandle(
                     surfaceView: surfaceView,
                     dragHandle: ghostty.config.dragHandle,
+                    isSplit: isSplit,
                 )
             }
         }

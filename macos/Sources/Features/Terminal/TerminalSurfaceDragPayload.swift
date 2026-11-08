@@ -27,11 +27,3 @@ enum TerminalTabDropRegion {
         return NSRect(x: 0, y: top, width: max(0, size.width), height: max(0, size.height - top))
     }
 }
-
-/// Native tabs are the window's drag control, including an explicitly shown
-/// single-tab bar. A pane grip only belongs to a standalone, tab-bar-free window.
-enum TerminalDragHandlePolicy {
-    static func hasNativeControl(tabCount: Int, tabBarVisible: Bool) -> Bool {
-        tabCount > 1 || tabBarVisible
-    }
-}

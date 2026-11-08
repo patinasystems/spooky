@@ -36,6 +36,7 @@ protocol TabTitleEditorDelegate: AnyObject {
 
 /// Handles inline tab title editing for native AppKit window tabs.
 final class TabTitleEditor: NSObject, NSTextFieldDelegate {
+    static let inlineEditorIdentifier = NSUserInterfaceItemIdentifier("SpookyInlineTabTitleEditor")
     /// Host window containing the tab bar where editing occurs.
     private weak var hostWindow: NSWindow?
     /// Delegate that provides and commits title data for target tab windows.
@@ -212,6 +213,7 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
         let sourceLabel = sourceTabTitleLabel(from: tabState.labels.map(\.label), matching: editedTitle)
 
         let editor = NSTextField(frame: .zero)
+        editor.identifier = Self.inlineEditorIdentifier
         editor.delegate = self
         editor.stringValue = editedTitle
         editor.alignment = sourceLabel?.alignment ?? .center
