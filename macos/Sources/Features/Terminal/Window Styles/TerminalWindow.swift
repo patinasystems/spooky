@@ -54,6 +54,9 @@ class TerminalWindow: NSWindow {
     /// Glass effect view for liquid glass background when transparency is enabled
     private var glassEffectView: NSView?
 
+    /// Temporary AppKit feedback, present only during an accepted pane drag.
+    var tabDropFeedback: NSView?
+
     /// Gets the terminal controller from the window controller.
     var terminalController: TerminalController? {
         windowController as? TerminalController
@@ -81,6 +84,7 @@ class TerminalWindow: NSWindow {
     }
 
     override func awakeFromNib() {
+        registerForDraggedTypes([TerminalSurfaceDragPayload.type])
         // Notify that this terminal window has loaded
         NotificationCenter.default.post(name: Self.terminalDidAwake, object: self)
 

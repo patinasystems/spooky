@@ -79,7 +79,7 @@ extension Ghostty {
     /// This view manages mouse tracking and drag initiation for surface reordering.
     /// It uses a local event loop to detect drag gestures and initiates an
     /// `NSDraggingSession` when the user drags beyond the threshold distance.
-    fileprivate class SurfaceDragSourceView: NSView, NSDraggingSource {
+    class SurfaceDragSourceView: NSView, NSDraggingSource {
         /// Scale factor applied to the surface snapshot for the drag preview image.
         private static let previewScale: CGFloat = 0.2
 
@@ -154,7 +154,9 @@ extension Ghostty {
             guard !isTracking, let surfaceView = surfaceView else { return }
 
             // Create our dragging item from our transferable
-            guard let pasteboardItem = surfaceView.pasteboardItem() else { return }
+            // Native titlebar drops read this synchronously. Avoid the generic
+            // Transferable bridge's blocking wait for a 16-byte local UUID.
+            let pasteboardItem = TerminalSurfaceDragPayload.item(for: surfaceView.id)
             let item = NSDraggingItem(pasteboardWriter: pasteboardItem)
 
             // Create a scaled preview image from the surface snapshot
