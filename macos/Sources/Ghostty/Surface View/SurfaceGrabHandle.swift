@@ -4,7 +4,7 @@ extension Ghostty {
     /// A grab handle overlay at the top of the surface for dragging a surface.
     struct SurfaceGrabHandle: View {
         // Size of the actual drag handle; the hover reveal region is larger.
-        private static let handleSize = CGSize(width: 80, height: 12)
+        private static let handleSize = CGSize(width: 56, height: 20)
 
         // Reveal the handle anywhere within the top % of the pane height.
         private static let hoverHeightFactor: CGFloat = 0.2
@@ -33,7 +33,7 @@ extension Ghostty {
             return controller.surfaceTree.isSplit
         }
 
-        private var ellipsisVisible: Bool {
+        private var gripVisible: Bool {
             switch dragHandle {
             case .always:
                 return true
@@ -55,24 +55,14 @@ extension Ghostty {
 
         var body: some View {
             if handleVisible {
-                ZStack {
-                    SurfaceDragSource(
-                        surfaceView: surfaceView,
-                        isDragging: $isDragging,
-                        isHovering: $isHovering
-                    )
-                    .frame(width: Self.handleSize.width, height: Self.handleSize.height)
-                    .contentShape(Rectangle())
-
-                    if ellipsisVisible {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.primary.opacity(isHovering ? 0.8 : 0.3))
-                            .offset(y: -3)
-                            .allowsHitTesting(false)
-                            .transition(.opacity)
-                    }
-                }
+                SurfaceDragSource(
+                    surfaceView: surfaceView,
+                    showsGrip: gripVisible,
+                    isDragging: $isDragging,
+                    isHovering: $isHovering
+                )
+                .frame(width: Self.handleSize.width, height: Self.handleSize.height)
+                .contentShape(Rectangle())
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }

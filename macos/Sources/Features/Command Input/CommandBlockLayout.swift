@@ -182,9 +182,9 @@ struct CommandChromePresentation: Equatable {
             var suffix = ""
             if let status = block.exitStatus { suffix = status == 0 ? "✓" : "exit \(status)" }
             if let elapsed = block.elapsed {
-                suffix += String(format: "  %.3fs", elapsed)
+                suffix += String(format: suffix.isEmpty ? "%.3fs" : " %.3fs", elapsed)
             } else if block.status == "running" { suffix = "running" }
-            if block.completed, let time = block.completionTime { suffix += "  ·  \(time)" }
+            if block.completed, let time = block.completionTime { suffix += suffix.isEmpty ? time : " · \(time)" }
             return Row(id: id, label: label, pathByteCount: pathByteCount, suffix: suffix, current: current,
                        pinned: current && pinnedOffset >= 0)
         }
