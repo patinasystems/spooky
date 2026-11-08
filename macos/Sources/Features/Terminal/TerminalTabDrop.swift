@@ -82,6 +82,9 @@ extension TerminalController {
         let created = TerminalController(ghostty, withSurfaceTree: SplitTree<Ghostty.SurfaceView>())
         created.isBackgroundOpaque = isBackgroundOpaque
         guard let tab = created.window else { return false }
+        // AppKit may already have grouped a fresh window when the system's
+        // tabbing preference is Always. Match the existing new-tab path.
+        if let group = parent.tabGroup, group.windows.contains(tab) { group.removeWindow(tab) }
         guard tab.tabbingMode != .disallowed, parent.addTabbedWindowSafely(tab, ordered: .above) else {
             tab.close()
             return false

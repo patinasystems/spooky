@@ -763,6 +763,12 @@ class AppDelegate: NSObject,
     }
 
     private func syncDockBadge() {
+        // Opening a window or loading config must not request notification
+        // permission when there is no bell badge to display.
+        guard ghostty.config.bellFeatures.contains(.attention), bellCount > 0 else {
+            NSApp.dockTile.badgeLabel = nil
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             switch settings.authorizationStatus {
