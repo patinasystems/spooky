@@ -16,7 +16,110 @@ private final class NativeTabButtonFixture: NSView {
     @objc func associatedWindow() -> NSWindow { target }
 }
 
+@MainActor
+private final class QuietTransferWindow: NSWindow {
+    override func makeKeyAndOrderFront(_ sender: Any?) {}
+}
+
+@MainActor
+private final class TransferControllerFixture: TerminalController {
+    override var windowNibName: NSNib.Name? { nil }
+    override var undoManager: ExpiringUndoManager? { nil }
+
+    init(_ app: Ghostty.App, tree: SplitTree<Ghostty.SurfaceView>) {
+        super.init(app, withSurfaceTree: tree)
+        let window = QuietTransferWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                                         styleMask: .titled, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        self.window = window
+        window.delegate = self
+        window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
 struct NativeTabTrackingPumpTests {
+    @Test @MainActor func aNewNestedDispatchDefersAnAlreadyQueuedCommit() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("committed") }
+        commit.beginDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func nestedDefaultModeTrackingCannotCommitBeforeTheOuterMouseEventReturns() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.beginDispatch()
+        commit.beginDispatch()
+        commit.schedule { samples.modes.append("committed") }
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        #expect(samples.modes.isEmpty)
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func movingANativeTabDisownsTheClosedSourceWithoutReplacingItsSession() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        let core = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/cat"
+        let moved = Ghostty.SurfaceView(core, baseConfig: config)
+        let stationary = Ghostty.SurfaceView(core, baseConfig: config)
+        let handle = try #require(moved.surface)
+        let session = try #require(moved.commandInputSession)
+        let source = TransferControllerFixture(app, tree: .init(view: moved))
+        let destination = TransferControllerFixture(app, tree: .init(view: stationary))
+        defer { source.window?.close(); destination.window?.close() }
+        source.focusedSurfaceDidChange(to: moved)
+        #expect(source.focusedSurface === moved)
+
+        #expect(destination.receiveTabSplit(from: source, at: stationary, zone: .bottom))
+        #expect(source.surfaceTree.isEmpty)
+        #expect(source.focusedSurface == nil)
+        #expect(destination.surfaceTree.contains(moved))
+        #expect(destination.surfaceTree.contains(stationary))
+        #expect(BaseTerminalController.controller(owning: moved) === destination)
+        #expect(moved.surface == handle)
+        #expect(moved.commandInputSession === session)
+    }
+
+    @Test @MainActor func nativeDropCommitWaitsForTrackingToUnwind() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("committed") }
+        commit.schedule { samples.modes.append("duplicate") }
+        #expect(samples.modes.isEmpty)
+        let mode = RunLoop.Mode("SpookyDropCommitTrackingTest")
+        let keepAlive = Timer(timeInterval: 60, repeats: false) { _ in }
+        RunLoop.main.add(keepAlive, forMode: mode)
+        defer { keepAlive.invalidate() }
+        CFRunLoopRunInMode(CFRunLoopMode(rawValue: mode.rawValue as CFString), 0.02, false)
+        #expect(samples.modes.isEmpty)
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func anotherGestureCancelsThePendingNativeDrop() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("stale") }
+        commit.cancel()
+        commit.schedule { samples.modes.append("current") }
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["current"])
+    }
+
     @Test func latchedProposalsKeepTheScreenSpaceEdgeWhenNativeTabsReorder() {
         let rect = CGRect(x: 100, y: 200, width: 800, height: 600)
         #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 500, y: 799), in: rect) == .top)

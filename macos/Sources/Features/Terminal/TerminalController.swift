@@ -184,7 +184,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // If our surface tree is now nil then we close our window.
-        if to.isEmpty {
+        if to.isEmpty, self.window?.contentView != nil {
             self.window?.close()
         }
     }
@@ -199,6 +199,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // This makes it so that undo is handled properly.
         if newTree.isEmpty {
             closeTabImmediately()
+            // Close captures the live tree for undo. The closed controller
+            // must then disown it, especially when these panes moved elsewhere.
+            surfaceTree = newTree
             return
         }
 

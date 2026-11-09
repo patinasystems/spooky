@@ -101,7 +101,7 @@ extension TerminalController {
         defer { undoManager?.endUndoGrouping() }
         owner.removeSurfaceNode(node)
         created.surfaceTree = .init(view: source)
-        created.focusedSurface = source
+        created.focusedSurfaceDidChange(to: source)
         undoManager?.registerUndo(withTarget: created, expiresAfter: created.undoExpiration) { target in
             target.closeTabImmediately()
         }
@@ -120,11 +120,13 @@ extension TerminalController {
                   let owner = BaseTerminalController.controller(owning: surface),
                   owner.window === tab, owner.focusedSurface === surface else { return }
             Ghostty.moveFocus(to: surface, from: nil)
+            (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordTransfer("pane-to-tab-focused")
         }
         relabelTabs()
         (tab.windowController as? TerminalController)?.relabelTabs()
         invalidateRestorableState()
         (tab.windowController as? TerminalController)?.invalidateRestorableState()
+        (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordTransfer("pane-to-tab")
     }
 }
 
