@@ -230,10 +230,40 @@ extension Ghostty {
             needsDisplay = true
         }
 
+        @available(macOS 27.0, *)
+        override var cornerConfiguration: NSViewCornerConfiguration? {
+            .corners(radius: .containerConcentric(TerminalDragGrip.minimumCornerRadius + TerminalDragGrip.highlightInset))
+        }
+
+        @available(macOS 27.0, *)
+        override func viewDidChangeEffectiveCornerRadii() {
+            super.viewDidChangeEffectiveCornerRadii()
+            needsDisplay = true
+        }
+
+        private var highlightCorners: TerminalDragGrip.Corners {
+            let inset = TerminalDragGrip.highlightInset
+            if #available(macOS 27.0, *), let radii = effectiveCornerRadii {
+                return .init(topLeft: max(0, radii.topLeft - inset), topRight: max(0, radii.topRight - inset),
+                             bottomLeft: max(0, radii.bottomLeft - inset), bottomRight: max(0, radii.bottomRight - inset))
+            }
+            // Older AppKit: use the window style's radius and the actual
+            // distance from the highlight to the window's top/right edges.
+            var corners = TerminalDragGrip.Corners()
+            if let window {
+                let rect = convert(TerminalDragGrip.highlightRect(in: bounds), to: nil)
+                let padding = max(window.frame.width - rect.maxX, window.frame.height - rect.maxY)
+                let outer = (window as? TerminalWindow)?.derivedConfig.windowCornerRadius ?? 16
+                corners.topRight = max(TerminalDragGrip.minimumCornerRadius, outer - max(0, padding))
+            }
+            return corners
+        }
+
         override func draw(_ dirtyRect: NSRect) {
             let theme = surfaceView?.derivedConfig.commandUITheme ?? .fallback
             let state: TerminalDragGrip.State = isPressed || isTracking ? .pressed : (isHovered ? .hovered : .idle)
-            TerminalDragGrip.draw(in: bounds, foreground: theme.foreground, accent: theme.accent, state: state)
+            TerminalDragGrip.draw(in: bounds, foreground: theme.foreground, accent: theme.accent, state: state,
+                                  corners: highlightCorners)
         }
 
         private func updateGrip() {
