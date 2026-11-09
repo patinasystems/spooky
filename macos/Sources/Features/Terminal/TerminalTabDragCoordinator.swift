@@ -24,6 +24,10 @@ final class TerminalTabDragCoordinator {
     func start() { enabled = true }
     func stop() { enabled = false; end(reason: "stopped") }
 
+    func transferAfterTracking(_ operation: @escaping @MainActor @Sendable () -> Void) {
+        commit.schedule(operation)
+    }
+
     func recordTransfer(_ reason: String) {
         guard traceURL != nil else { return }
         writeTrace(["time": Date().timeIntervalSince1970, "bundle": Bundle.main.bundleIdentifier ?? "unknown",

@@ -19,6 +19,15 @@ extension TerminalController: NSDraggingDestination {
     func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         defer { clearTabDropFeedback() }
         guard let source = tabDropSource(sender) else { return false }
+        if let coordinator = (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator {
+            // The native drag session still owns its source NSView here.
+            // Accept now, then move it after AppKit has finished that session.
+            coordinator.transferAfterTracking { [weak self, weak source] in
+                guard let self, let source else { return }
+                _ = self.receiveTabDrop(source)
+            }
+            return true
+        }
         return receiveTabDrop(source)
     }
 
