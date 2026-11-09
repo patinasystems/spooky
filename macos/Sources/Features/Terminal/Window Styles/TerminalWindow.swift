@@ -102,6 +102,7 @@ class TerminalWindow: NSWindow {
         // This is required so that window restoration properly creates our tabs
         // again. I'm not sure why this is required. If you don't do this, then
         // tabs restore as separate windows.
+        tabbingIdentifier = Bundle.main.bundleIdentifier ?? "com.patinasystems.spooky"
         tabbingMode = .preferred
         DispatchQueue.main.async {
             self.tabbingMode = .automatic
@@ -118,9 +119,7 @@ class TerminalWindow: NSWindow {
         // immediately. Future `set_title` apprt actions will override this
         // if necessary but this ensures our window loads with the proper
         // title immediately rather than on another event loop tick (see #5934)
-        if let title = derivedConfig.title {
-            self.title = title
-        }
+        self.title = derivedConfig.title ?? AppBranding.displayName
 
         // If window decorations are disabled, remove our title
         if !config.windowDecorations { styleMask.remove(.titled) }

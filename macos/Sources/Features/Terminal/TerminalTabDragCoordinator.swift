@@ -12,8 +12,7 @@ final class TerminalTabDragCoordinator {
     private var releasePoint: NSPoint?
     private var releaseTarget: Target?
     private var hoveredTarget: Target?
-    private var generation: UInt64 = 0
-    private var endScheduled = false
+    private let commit = NativeTabDropCommit()
     private let pump = NativeTabTrackingPump()
     private let preview = TerminalTabSplitPreview(frame: .zero)
     private let traceURL = ProcessInfo.processInfo.environment["SPOOKY_NATIVE_TAB_TRACE"].map { URL(fileURLWithPath: $0) }
@@ -25,7 +24,24 @@ final class TerminalTabDragCoordinator {
     func start() { enabled = true }
     func stop() { enabled = false; end(reason: "stopped") }
 
+    func transferAfterTracking(_ operation: @escaping @MainActor @Sendable () -> Void) {
+        commit.schedule(operation)
+    }
+
+    func recordTransfer(_ reason: String) {
+        guard traceURL != nil else { return }
+        writeTrace(["time": Date().timeIntervalSince1970, "bundle": Bundle.main.bundleIdentifier ?? "unknown",
+                    "buttons": NSEvent.pressedMouseButtons, "windows": Self.windowSnapshot(),
+                    "serverWindows": Self.serverWindowSnapshot()], reason: reason)
+    }
+
+    func recordSettledTransfer(_ reason: String) {
+        guard traceURL != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.recordTransfer(reason) }
+    }
+
     func willDispatch(_ event: NSEvent) {
+        commit.beginDispatch()
         guard enabled else { return }
         if event.type == .leftMouseDown {
             begin(event)
@@ -40,12 +56,13 @@ final class TerminalTabDragCoordinator {
     }
 
     func didDispatch(_ event: NSEvent) {
+        commit.endDispatch()
         guard source != nil else { return }
         if event.type == .leftMouseDown, event.eventNumber == initialEventNumber { dispatchingPress = false }
         // Hardware may already reflect the next press under load. A mouse-up
         // in this event stream remains authoritative for the current gesture.
         guard !dispatchingPress, releasePoint != nil || NSEvent.pressedMouseButtons & 1 == 0 else { return }
-        finish(at: releasePoint ?? NSEvent.mouseLocation)
+        scheduleFinish(at: releasePoint ?? NSEvent.mouseLocation)
     }
 
     private func begin(_ event: NSEvent) {
@@ -64,7 +81,8 @@ final class TerminalTabDragCoordinator {
         let hit = host.tabButtonHit(atScreenPoint: point)
         if traceURL != nil, hit != nil || event.locationInWindow.y >= host.contentLayoutRect.maxY {
             writeTrace(["phase": "press", "application": NSStringFromClass(type(of: NSApp!)),
-                        "eventWindow": NSStringFromClass(type(of: eventWindow)), "hit": hit != nil], reason: "native-tab-hit")
+                        "eventWindow": NSStringFromClass(type(of: eventWindow)), "window": eventWindow.windowNumber,
+                        "windows": Self.windowSnapshot(), "hit": hit != nil], reason: "native-tab-hit")
         }
         guard let hit, let tab = host.tabWindow(for: hit.tabButton, fallbackIndex: hit.index),
               let controller = tab.windowController as? TerminalController,
@@ -98,15 +116,7 @@ final class TerminalTabDragCoordinator {
             pump.stop()
             // The app-level dispatch hook is authoritative while AppKit is
             // tracking the initial press. Otherwise finish on the outer loop.
-            guard !dispatchingPress, !endScheduled else { return }
-            endScheduled = true
-            let token = generation
-            RunLoop.main.perform(inModes: [.default]) { [weak self] in
-                MainActor.assumeIsolated {
-                    guard let self, self.generation == token, let point = self.releasePoint else { return }
-                    self.finish(at: point)
-                }
-            }
+            scheduleFinish(at: point)
             return
         }
         let point = NSEvent.mouseLocation
@@ -214,12 +224,64 @@ final class TerminalTabDragCoordinator {
         reset()
         let accepted = destination.controller.receiveTabSplit(from: source, at: destination.surface, zone: destination.zone)
         writeTrace(trace, reason: accepted ? "split-accepted" : "split-rejected")
+        if traceURL != nil {
+            RunLoop.main.perform(inModes: [.default]) { [weak self] in
+                MainActor.assumeIsolated { self?.recordTransfer("after-split") }
+            }
+            recordSettledTransfer("after-split-settled")
+        }
+    }
+
+    private func scheduleFinish(at point: NSPoint) {
+        guard !dispatchingPress else { return }
+        releasePoint = point
+        if releaseTarget == nil, let source { releaseTarget = target(at: point, excluding: source) }
+        pump.stop()
+        preview.removeFromSuperview()
+        commit.schedule { [weak self] in
+            guard let self else { return }
+            self.finish(at: self.releasePoint ?? point)
+        }
     }
 
     private func traceSnapshot() -> [String: Any]? {
         guard traceURL != nil, let source else { return nil }
         return ["time": Date().timeIntervalSince1970, "source": source.window?.windowNumber ?? 0,
+                "bundle": Bundle.main.bundleIdentifier ?? "unknown", "windows": Self.windowSnapshot(),
                 "ticks": tickCount, "modes": modes, "targets": visited]
+    }
+
+    private static func windowSnapshot() -> [[String: Any]] {
+        NSApp.windows.map { window in
+            let controller = window.windowController as? BaseTerminalController
+            return ["id": window.windowNumber, "class": NSStringFromClass(type(of: window)),
+                    "visible": window.isVisible, "ignoresMouse": window.ignoresMouseEvents,
+                    "keyable": window.canBecomeKey, "terminal": controller != nil, "tabbing": window.tabbingIdentifier,
+                    "controller": window.windowController.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "delegate": window.delegate.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "content": window.contentView.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "firstResponder": window.firstResponder.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "key": window.isKeyWindow, "main": window.isMainWindow, "movable": window.isMovable,
+                    "sheet": window.attachedSheet?.windowNumber ?? 0,
+                    "surfaces": controller?.surfaceTree.map { view in
+                        var host = view.superview
+                        while let current = host, !(current is NativeCommandSurfaceHost) { host = current.superview }
+                        return ["id": view.id.uuidString, "nativeInput": view.commandInputSession != nil,
+                                "nativeHost": host != nil, "window": view.window?.windowNumber ?? 0,
+                                "integration": view.commandInputSession?.hasNativeIntegration ?? false,
+                                "prefersNative": view.commandInputSession?.prefersNativeInput ?? false,
+                                "editable": view.commandInputSession?.isEditable ?? false] as [String: Any]
+                    } ?? []] as [String: Any]
+        }
+    }
+
+    private static func serverWindowSnapshot() -> [[String: Any]] {
+        let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] ?? []
+        let pid = Int(ProcessInfo.processInfo.processIdentifier)
+        return windows.filter { $0[kCGWindowOwnerPID as String] as? Int == pid }.map {
+            ["id": $0[kCGWindowNumber as String] ?? 0, "visible": $0[kCGWindowIsOnscreen as String] ?? false,
+             "layer": $0[kCGWindowLayer as String] ?? 0, "bounds": $0[kCGWindowBounds as String] ?? [String: Any]()]
+        }
     }
 
     private func writeTrace(_ entry: [String: Any]?, reason: String) {
@@ -246,13 +308,12 @@ final class TerminalTabDragCoordinator {
 
     private func reset() {
         pump.stop()
-        generation &+= 1
+        commit.cancel()
         source = nil
         dispatchingPress = false
         releasePoint = nil
         releaseTarget = nil
         hoveredTarget = nil
-        endScheduled = false
         tickCount = 0
         modes.removeAll(keepingCapacity: true)
         visited.removeAll(keepingCapacity: true)

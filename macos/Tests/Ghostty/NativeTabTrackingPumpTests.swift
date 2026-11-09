@@ -16,7 +16,210 @@ private final class NativeTabButtonFixture: NSView {
     @objc func associatedWindow() -> NSWindow { target }
 }
 
+@MainActor
+private final class QuietTransferWindow: TerminalWindow {
+    override func makeKeyAndOrderFront(_ sender: Any?) {}
+    override func orderFront(_ sender: Any?) {}
+}
+
+@MainActor
+private final class TransferControllerFixture: TerminalController {
+    override var windowNibName: NSNib.Name? { nil }
+    override var undoManager: ExpiringUndoManager? { nil }
+
+    private let hostsSurface: Bool
+    private(set) weak var transferredController: TransferControllerFixture?
+    private(set) var transferredWindow: NSWindow?
+    private(set) var presentationCount = 0
+
+    init(_ app: Ghostty.App, tree: SplitTree<Ghostty.SurfaceView>, hostsSurface: Bool = false) {
+        self.hostsSurface = hostsSurface
+        super.init(app, withSurfaceTree: tree)
+        let window = QuietTransferWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 600),
+                                         styleMask: .titled, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        self.window = window
+        window.delegate = self
+        window.tabbingIdentifier = Bundle.main.bundleIdentifier ?? "SpookyTransferTest"
+        if hostsSurface {
+            // Exercise the production content/fullscreen/appearance lifecycle,
+            // including the initially empty transfer destination.
+            windowDidLoad()
+        } else {
+            window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+        }
+    }
+
+    override func showWindow(_ sender: Any?) {
+        presentationCount += 1
+        super.showWindow(sender)
+    }
+
+    override func makeTransferredTabController() -> TerminalController {
+        let created = TransferControllerFixture(ghostty, tree: .init(), hostsSurface: hostsSurface)
+        transferredController = created
+        transferredWindow = created.window
+        return created
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
 struct NativeTabTrackingPumpTests {
+    @Test @MainActor func loadingAnEmptyTransferDestinationDoesNotCloseItsNibWindow() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        // Use the real NIB lifecycle. A manually assigned fixture window hides
+        // reentrant window loading while BaseTerminalController initializes.
+        let controller = TerminalController(app, withSurfaceTree: .init())
+        #expect(!controller.isWindowLoaded)
+        let window = try #require(controller.window)
+        defer { window.close() }
+        #expect(window.contentView is TerminalViewContainer)
+        #expect(window.windowController === controller)
+        #expect(window.delegate === controller)
+    }
+
+    @Test @MainActor func initialNibLayoutPreservesSurfaceOwnershipFocusAndSplitZoom() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        let core = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/cat"
+        let first = Ghostty.SurfaceView(core, baseConfig: config)
+        let second = Ghostty.SurfaceView(core, baseConfig: config)
+        let single = SplitTree<Ghostty.SurfaceView>(view: first)
+        let split = try single.inserting(node: .leaf(view: second), at: first, direction: .down)
+        let zoomed = SplitTree(root: split.root, zoomed: split.root?.node(view: first))
+        for tree in [single, zoomed] {
+            let controller = TerminalController(app, withSurfaceTree: tree)
+            #expect(!controller.isWindowLoaded)
+            #expect(BaseTerminalController.controller(owning: first) === controller)
+            let window = try #require(controller.window as? TerminalWindow)
+            #expect(window.contentView is TerminalViewContainer)
+            #expect(window.surfaceIsZoomed == tree.isZoomed)
+            if !tree.isSplit { #expect(controller.focusedSurface === first) }
+            window.close()
+        }
+    }
+
+    @Test @MainActor func paneMovedToATabKeepsItsPresentationAndLiveSurfaceAfterDetachment() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        let core = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/cat"
+        let moved = Ghostty.SurfaceView(core, baseConfig: config)
+        let stationary = Ghostty.SurfaceView(core, baseConfig: config)
+        let tree = try SplitTree<Ghostty.SurfaceView>(view: stationary).inserting(
+            node: .leaf(view: moved), at: stationary, direction: .down)
+        let owner = TransferControllerFixture(app, tree: tree, hostsSurface: true)
+        let handle = try #require(moved.surface)
+        let session = try #require(moved.commandInputSession)
+        defer { owner.transferredWindow?.close(); owner.window?.close() }
+
+        #expect(owner.receiveTabDrop(moved))
+        let tab = try #require(owner.transferredWindow)
+        // Returning a successful transfer must not leave its content in the old window.
+        #expect(moved.window === tab)
+        CFRunLoopRunInMode(.defaultMode, 0.1, false)
+        #expect(owner.transferredController?.presentationCount == 1)
+        #expect(owner.transferredController != nil)
+        #expect(tab.windowController === owner.transferredController)
+        #expect(tab.delegate === owner.transferredController)
+        #expect(moved.window === tab)
+        #expect(owner.transferredController?.focusedSurface === moved)
+        tab.tabGroup?.removeWindow(tab)
+        tab.contentView?.layoutSubtreeIfNeeded()
+        CFRunLoopRunInMode(.defaultMode, 0.1, false)
+        #expect(owner.transferredController != nil)
+        #expect(tab.windowController === owner.transferredController)
+        #expect(tab.delegate === owner.transferredController)
+        #expect(!tab.ignoresMouseEvents)
+        #expect(tab.canBecomeKey)
+        #expect(tab.contentView != nil)
+        #expect(moved.window === tab)
+        #expect(moved.surface == handle)
+        #expect(moved.commandInputSession === session)
+    }
+
+    @Test @MainActor func aNewNestedDispatchDefersAnAlreadyQueuedCommit() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("committed") }
+        commit.beginDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func nestedDefaultModeTrackingCannotCommitBeforeTheOuterMouseEventReturns() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.beginDispatch()
+        commit.beginDispatch()
+        commit.schedule { samples.modes.append("committed") }
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes.isEmpty)
+        commit.endDispatch()
+        #expect(samples.modes.isEmpty)
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func movingANativeTabDisownsTheClosedSourceWithoutReplacingItsSession() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        let core = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/cat"
+        let moved = Ghostty.SurfaceView(core, baseConfig: config)
+        let stationary = Ghostty.SurfaceView(core, baseConfig: config)
+        let handle = try #require(moved.surface)
+        let session = try #require(moved.commandInputSession)
+        let source = TransferControllerFixture(app, tree: .init(view: moved))
+        let destination = TransferControllerFixture(app, tree: .init(view: stationary))
+        defer { source.window?.close(); destination.window?.close() }
+        source.focusedSurfaceDidChange(to: moved)
+        #expect(source.focusedSurface === moved)
+
+        #expect(destination.receiveTabSplit(from: source, at: stationary, zone: .bottom))
+        #expect(source.surfaceTree.isEmpty)
+        #expect(source.focusedSurface == nil)
+        #expect(destination.surfaceTree.contains(moved))
+        #expect(destination.surfaceTree.contains(stationary))
+        #expect(BaseTerminalController.controller(owning: moved) === destination)
+        #expect(moved.surface == handle)
+        #expect(moved.commandInputSession === session)
+    }
+
+    @Test @MainActor func nativeDropCommitWaitsForTrackingToUnwind() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("committed") }
+        commit.schedule { samples.modes.append("duplicate") }
+        #expect(samples.modes.isEmpty)
+        let mode = RunLoop.Mode("SpookyDropCommitTrackingTest")
+        let keepAlive = Timer(timeInterval: 60, repeats: false) { _ in }
+        RunLoop.main.add(keepAlive, forMode: mode)
+        defer { keepAlive.invalidate() }
+        CFRunLoopRunInMode(CFRunLoopMode(rawValue: mode.rawValue as CFString), 0.02, false)
+        #expect(samples.modes.isEmpty)
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["committed"])
+    }
+
+    @Test @MainActor func anotherGestureCancelsThePendingNativeDrop() {
+        let commit = NativeTabDropCommit()
+        let samples = NativeTabTrackingSamples()
+        commit.schedule { samples.modes.append("stale") }
+        commit.cancel()
+        commit.schedule { samples.modes.append("current") }
+        CFRunLoopRunInMode(.defaultMode, 0.02, false)
+        #expect(samples.modes == ["current"])
+    }
+
     @Test func latchedProposalsKeepTheScreenSpaceEdgeWhenNativeTabsReorder() {
         let rect = CGRect(x: 100, y: 200, width: 800, height: 600)
         #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 500, y: 799), in: rect) == .top)

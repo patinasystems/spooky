@@ -184,7 +184,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         // If our surface tree is now nil then we close our window.
-        if to.isEmpty {
+        if to.isEmpty, self.window?.contentView != nil {
             self.window?.close()
         }
     }
@@ -199,6 +199,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         // This makes it so that undo is handled properly.
         if newTree.isEmpty {
             closeTabImmediately()
+            // Close captures the live tree for undo. The closed controller
+            // must then disown it, especially when these panes moved elsewhere.
+            surfaceTree = newTree
             return
         }
 
@@ -417,6 +420,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         return c
+    }
+
+    /// A transfer destination must never start a second terminal session.
+    func makeTransferredTabController() -> TerminalController {
+        TerminalController(ghostty, withSurfaceTree: SplitTree<Ghostty.SurfaceView>())
     }
 
     static func newTab(
@@ -1106,6 +1114,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let config = ghostty.config
 
         syncRestoration(config)
+        (window as? TerminalWindow)?.surfaceIsZoomed = surfaceTree.isZoomed
 
         // If we have only a single surface (no splits) and there is a default size then
         // we should resize to that default size.

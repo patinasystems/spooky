@@ -150,7 +150,11 @@ class BaseTerminalController: NSWindowController,
 
         // Initialize our initial surface.
         guard let ghostty_app = ghostty.app else { preconditionFailure("app must be loaded") }
-        self.surfaceTree = tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base))
+        // Initialize the Published storage directly. Its wrapped setter runs
+        // didSet even here, dispatching into subclass/window lifecycle before
+        // initialization finishes. An empty transfer tree then closes the NIB
+        // window it just loaded, leaving a window with no content or controller.
+        self._surfaceTree = Published(initialValue: tree ?? .init(view: Ghostty.SurfaceView(ghostty_app, baseConfig: base)))
         Self.updateSurfaceControllers(self, from: .init(), to: surfaceTree)
 
         // Setup our bell state for the window

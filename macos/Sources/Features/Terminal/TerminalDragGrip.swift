@@ -17,7 +17,8 @@ enum TerminalDragGrip {
     }
 
     static func highlightRect(in bounds: CGRect) -> CGRect {
-        bounds.insetBy(dx: highlightInset, dy: highlightInset)
+        // Keep the original height and width; only tighten the right inset.
+        bounds.insetBy(dx: highlightInset, dy: highlightInset).offsetBy(dx: highlightInset, dy: 0)
     }
 
     static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State,
@@ -35,9 +36,9 @@ enum TerminalDragGrip {
             fill = accent.withAlphaComponent(0.18)
             dots = accent
         }
+        let rect = highlightRect(in: bounds)
         if let fill {
             fill.setFill()
-            let rect = highlightRect(in: bounds)
             let limit = max(0, min(rect.width, rect.height) / 2)
             let radius: (CGFloat) -> CGFloat = { min(limit, max(0, $0)) }
             let path = NSBezierPath()
@@ -57,7 +58,7 @@ enum TerminalDragGrip {
         let pattern = NSBezierPath()
         for x: CGFloat in [-5, 0, 5] {
             for y: CGFloat in [-2.5, 2.5] {
-                pattern.appendOval(in: CGRect(x: bounds.midX + x - 1, y: bounds.midY + y - 1, width: 2, height: 2))
+                pattern.appendOval(in: CGRect(x: rect.midX + x - 1, y: rect.midY + y - 1, width: 2, height: 2))
             }
         }
         dots.setFill()

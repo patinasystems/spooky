@@ -19,6 +19,15 @@ extension TerminalController: NSDraggingDestination {
     func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
         defer { clearTabDropFeedback() }
         guard let source = tabDropSource(sender) else { return false }
+        if let coordinator = (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator {
+            // The native drag session still owns its source NSView here.
+            // Accept now, then move it after AppKit has finished that session.
+            coordinator.transferAfterTracking { [weak self, weak source] in
+                guard let self, let source else { return }
+                _ = self.receiveTabDrop(source)
+            }
+            return true
+        }
         return receiveTabDrop(source)
     }
 
@@ -83,7 +92,7 @@ extension TerminalController {
 
         // Attach an empty tab first. A rejected AppKit operation must leave the
         // source tree and session untouched, and must never launch a new shell.
-        let created = TerminalController(ghostty, withSurfaceTree: SplitTree<Ghostty.SurfaceView>())
+        let created = makeTransferredTabController()
         created.isBackgroundOpaque = isBackgroundOpaque
         guard let tab = created.window else { return false }
         // AppKit may already have grouped a fresh window when the system's
@@ -101,18 +110,26 @@ extension TerminalController {
         defer { undoManager?.endUndoGrouping() }
         owner.removeSurfaceNode(node)
         created.surfaceTree = .init(view: source)
-        created.focusedSurface = source
+        created.focusedSurfaceDidChange(to: source)
         undoManager?.registerUndo(withTarget: created, expiresAfter: created.undoExpiration) { target in
             target.closeTabImmediately()
         }
         undoManager?.setActionName("Move Pane to Tab")
-        selectDroppedTab(tab, surface: source)
+        // Complete the same controller presentation used by normal new tabs.
+        // Merely ordering its NSWindow skips initial geometry and appearance
+        // setup; a later native tear-off must start from a fully hosted pane.
+        selectDroppedTab(tab, surface: source, firstPresentation: true)
         return true
     }
 
-    private func selectDroppedTab(_ tab: NSWindow, surface: Ghostty.SurfaceView) {
+    private func selectDroppedTab(_ tab: NSWindow, surface: Ghostty.SurfaceView, firstPresentation: Bool = false) {
         tab.tabGroup?.selectedWindow = tab
-        tab.makeKeyAndOrderFront(nil)
+        if firstPresentation, let controller = tab.windowController as? TerminalController {
+            controller.showWindowSafely(self)
+            tab.contentView?.layoutSubtreeIfNeeded()
+        } else {
+            tab.makeKeyAndOrderFront(nil)
+        }
         // Split rehosting finishes on the next main run-loop turn. Never focus
         // the pane's old window, or steal focus after a newer tab selection.
         DispatchQueue.main.async { [weak surface, weak tab] in
@@ -120,11 +137,14 @@ extension TerminalController {
                   let owner = BaseTerminalController.controller(owning: surface),
                   owner.window === tab, owner.focusedSurface === surface else { return }
             Ghostty.moveFocus(to: surface, from: nil)
+            (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordTransfer("pane-to-tab-focused")
         }
         relabelTabs()
         (tab.windowController as? TerminalController)?.relabelTabs()
         invalidateRestorableState()
         (tab.windowController as? TerminalController)?.invalidateRestorableState()
+        (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordTransfer("pane-to-tab")
+        (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordSettledTransfer("pane-to-tab-settled")
     }
 }
 
