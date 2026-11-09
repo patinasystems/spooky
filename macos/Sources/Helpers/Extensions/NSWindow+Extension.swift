@@ -109,7 +109,14 @@ extension NSWindow {
         let locationInTabBar = tabBarView.convert(locationInTabBarWindow, from: nil)
         guard tabBarView.bounds.contains(locationInTabBar) else { return nil }
 
-        for (index, tabButton) in tabButtonsInVisualOrder().enumerated() {
+        let buttons = tabButtonsInVisualOrder()
+        if let parent = tabBarView.superview,
+           let hit = tabBarView.hitTest(parent.convert(locationInTabBarWindow, from: nil)),
+           let index = buttons.firstIndex(where: { hit === $0 || hit.isDescendant(of: $0) }) {
+            return (index, buttons[index])
+        }
+
+        for (index, tabButton) in buttons.enumerated() {
             let locationInTabButton = tabButton.convert(locationInTabBarWindow, from: nil)
             if tabButton.bounds.contains(locationInTabButton) {
                 return (index, tabButton)
@@ -117,6 +124,17 @@ extension NSWindow {
         }
 
         return nil
+    }
+
+    /// Native controls keep their window identity while AppKit animates/reorders
+    /// tab frames. This getter is private, like the tab views above; guard its
+    /// availability and retain the visual-order fallback for older AppKit.
+    func tabWindow(for button: NSView, fallbackIndex: Int) -> NSWindow? {
+        let selector = NSSelectorFromString("associatedWindow")
+        if button.responds(to: selector), let window = button.perform(selector)?.takeUnretainedValue() as? NSWindow {
+            return window
+        }
+        return (tabbedWindows ?? [self])[safe: fallbackIndex]
     }
 
     /// Returns the index of the tab button at the given screen point, if any.

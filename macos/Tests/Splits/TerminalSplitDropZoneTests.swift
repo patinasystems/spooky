@@ -3,6 +3,14 @@ import Foundation
 @testable import Ghostty
 
 struct TerminalSplitDropZoneTests {
+    @Test func nativeTabAndPanePreviewsUseTheSameHalfPaneGeometry() {
+        let size = CGSize(width: 800, height: 600)
+        #expect(TerminalSplitDropZone.top.highlightRect(in: size) == CGRect(x: 0, y: 0, width: 800, height: 300))
+        #expect(TerminalSplitDropZone.bottom.highlightRect(in: size) == CGRect(x: 0, y: 300, width: 800, height: 300))
+        #expect(TerminalSplitDropZone.left.highlightRect(in: size) == CGRect(x: 0, y: 0, width: 400, height: 600))
+        #expect(TerminalSplitDropZone.right.highlightRect(in: size) == CGRect(x: 400, y: 0, width: 400, height: 600))
+    }
+
     private let standardSize = CGSize(width: 100, height: 100)
 
     // MARK: - Basic Edge Detection

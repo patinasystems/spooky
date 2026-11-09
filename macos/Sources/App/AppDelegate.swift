@@ -169,6 +169,8 @@ class AppDelegate: NSObject,
     private var signals: [DispatchSourceSignal] = []
 
     private let appIconUpdater = AppIconUpdater()
+    @MainActor lazy var nativeTabDragCoordinator = TerminalTabDragCoordinator()
+    @MainActor lazy var terminalWindowTopology = TerminalWindowTopology()
 
     @MainActor private lazy var menuShortcutManager = Ghostty.MenuShortcutManager()
 
@@ -213,6 +215,8 @@ class AppDelegate: NSObject,
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppBranding.configureMainMenu()
+        nativeTabDragCoordinator.start()
+        terminalWindowTopology.start()
 
         // Start filename indexing while the first window and shell are opening.
         // The service actor owns process I/O; startup never waits for the crawl.
@@ -436,6 +440,8 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        nativeTabDragCoordinator.stop()
+        terminalWindowTopology.stop()
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
@@ -763,6 +769,14 @@ class AppDelegate: NSObject,
     }
 
     private func syncDockBadge() {
+        // Opening a window or loading config must not request notification
+        // permission when there is no bell badge to display.
+        guard ghostty.config.bellFeatures.contains(.attention),
+              NSApp.windows.contains(where: { ($0.windowController as? BaseTerminalController)?.bell == true }) else {
+            NSApp.dockTile.badgeLabel = nil
+            NSApp.dockTile.display()
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             switch settings.authorizationStatus {

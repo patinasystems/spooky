@@ -27,6 +27,36 @@ class MockView: NSView, Codable, Identifiable {
 }
 
 struct SplitTreeTests {
+    @Test @MainActor func insertWholeTabPreservesAllPaneIdentitiesAndSourceLayout() throws {
+        let a = MockView(), b = MockView(), destination = MockView(), sibling = MockView()
+        let subtree: SplitTree<MockView>.Node = .split(.init(
+            direction: .vertical, ratio: 0.3, left: .leaf(view: a), right: .leaf(view: b)))
+        let original = try SplitTree(view: destination).inserting(view: sibling, at: destination, direction: .right)
+        for direction in [SplitTree<MockView>.NewDirection.left, .right, .up, .down] {
+            let result = try original.inserting(node: subtree, at: destination, direction: direction)
+            #expect(result.contains(subtree))
+            #expect(result.contains(a) && result.contains(b))
+            #expect(result.contains(destination) && result.contains(sibling))
+            #expect(Array(result).count == 4)
+            #expect(Set(result.map(\.id)).count == 4)
+            #expect(!result.isZoomed)
+            #expect(Array(original).count == 2)
+            #expect(!original.contains(a))
+        }
+    }
+
+    @Test @MainActor func insertingWholeTabRejectsMissingDestinationWithoutMutatingEitherTree() throws {
+        let (source, a, b) = try makeHorizontalSplit()
+        let destination = SplitTree(view: MockView())
+        let root = try #require(source.root)
+        #expect(throws: (any Error).self) {
+            try destination.inserting(node: root, at: MockView(), direction: .right)
+        }
+        #expect(source.contains(a) && source.contains(b))
+        #expect(Array(source).count == 2)
+        #expect(Array(destination).count == 1)
+    }
+
     /// Creates a two-view horizontal split tree (view1 | view2).
     static func makeHorizontalSplit() throws -> (SplitTree<MockView>, MockView, MockView) {
         let view1 = MockView()

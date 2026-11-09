@@ -36,6 +36,7 @@ protocol TabTitleEditorDelegate: AnyObject {
 
 /// Handles inline tab title editing for native AppKit window tabs.
 final class TabTitleEditor: NSObject, NSTextFieldDelegate {
+    static let inlineEditorIdentifier = NSUserInterfaceItemIdentifier("SpookyInlineTabTitleEditor")
     /// Host window containing the tab bar where editing occurs.
     private weak var hostWindow: NSWindow?
     /// Delegate that provides and commits title data for target tab windows.
@@ -51,6 +52,13 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     private var previousTabState: TabUIState?
     /// Deferred begin-editing work used to avoid visual flicker on double-click.
     private var pendingEditWorkItem: DispatchWorkItem?
+
+    /// A double-click is only a rename once released without dragging. Keeping
+    /// native mouse-down delivery intact lets AppKit reorder/detach the tab.
+    private weak var pendingClickTarget: NSWindow?
+    private var pendingClickOrigin: NSPoint?
+    private var pendingClickEventNumber: Int?
+    private var pendingClickMonitor: Any?
 
     /// Creates a coordinator bound to a host window and rename delegate.
     init(hostWindow: NSWindow, delegate: TabTitleEditorDelegate) {
@@ -69,6 +77,7 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     }
 
     deinit {
+        if let pendingClickMonitor { NSEvent.removeMonitor(pendingClickMonitor) }
         if let eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
         }
@@ -78,6 +87,11 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
     /// returns true then the event was handled by the coordinator.
     func handleMouseDown(_ event: NSEvent) -> Bool {
         guard event.type == .leftMouseDown else { return false }
+        // Both the local monitor and TerminalWindow can see the same event.
+        guard pendingClickEventNumber != event.eventNumber else { return false }
+        cancelPendingClick()
+        // Ordinary clicks and drag starts need no native tab hierarchy lookup.
+        guard event.clickCount == 2 || inlineTitleEditor != nil else { return false }
 
         // If we don't have a host window to look up the click, we do nothing.
         guard let hostWindow else { return false }
@@ -102,23 +116,62 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
             inlineTitleEditor?.mouseDown(with: event)
             return true
         }
-        // We only want double-clicks to enable editing
+        // Observe the double-click, but never consume native tab mouse-down.
+        // Starting an editor here used to swallow quick successive tab drags.
         guard event.clickCount == 2 else { return false }
-        // We need to start editing in a separate event loop tick, so set that up.
+        pendingClickTarget = targetWindow
+        pendingClickOrigin = locationInScreen
+        pendingClickEventNumber = event.eventNumber
+        if pendingClickMonitor == nil {
+            pendingClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+                if event.type == .leftMouseDragged {
+                    self?.cancelPendingClick()
+                } else {
+                    // Includes AppKit's detached fullscreen titlebar window.
+                    RunLoop.main.perform(inModes: [.default]) { [weak self] in self?.completePendingClick() }
+                }
+                return event
+            }
+        }
+        RunLoop.main.perform(inModes: [.default]) { [weak self] in self?.completePendingClick() }
+        return false
+    }
+
+    /// Called after native dispatch, including a tab's nested mouse tracking loop.
+    /// Such loops can consume mouse-up without delivering it to local monitors.
+    func mouseEventDidDispatch(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .leftMouseUp { completePendingClick() }
+    }
+
+    private func cancelPendingClick() {
+        if let pendingClickMonitor { NSEvent.removeMonitor(pendingClickMonitor) }
+        pendingClickMonitor = nil
+        pendingClickTarget = nil
+        pendingClickOrigin = nil
+        pendingClickEventNumber = nil
         pendingEditWorkItem?.cancel()
+        pendingEditWorkItem = nil
+    }
+
+    private func completePendingClick() {
+        guard let targetWindow = pendingClickTarget, let origin = pendingClickOrigin,
+              NSEvent.pressedMouseButtons & 1 == 0 else { return }
+        let location = NSEvent.mouseLocation
+        let distance = hypot(location.x - origin.x, location.y - origin.y)
+        let host = hostWindow
+        cancelPendingClick()
+        guard distance <= 4, let host,
+              let index = host.tabIndex(atScreenPoint: location),
+              host.tabbedWindows?[safe: index] === targetWindow else { return }
+
         let workItem = DispatchWorkItem { [weak self, weak targetWindow] in
             guard let self, let targetWindow else { return }
-            if self.beginEditing(for: targetWindow) {
-                return
+            if !self.beginEditing(for: targetWindow) {
+                self.delegate?.tabTitleEditor(self, performFallbackRenameFor: targetWindow)
             }
-
-            // Inline editing failed, so trigger fallback rename whatever it is.
-            self.delegate?.tabTitleEditor(self, performFallbackRenameFor: targetWindow)
         }
-
         pendingEditWorkItem = workItem
         DispatchQueue.main.async(execute: workItem)
-        return true
     }
 
     /// Handles rightMouseDown events from the host window.
@@ -160,6 +213,7 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
         let sourceLabel = sourceTabTitleLabel(from: tabState.labels.map(\.label), matching: editedTitle)
 
         let editor = NSTextField(frame: .zero)
+        editor.identifier = Self.inlineEditorIdentifier
         editor.delegate = self
         editor.stringValue = editedTitle
         editor.alignment = sourceLabel?.alignment ?? .center
@@ -224,9 +278,8 @@ final class TabTitleEditor: NSObject, NSTextFieldDelegate {
 
     /// Finishes any in-flight inline edit and optionally commits the edited title.
     func finishEditing(commit: Bool) {
-        // If we're pending starting a new edit, cancel it.
-        pendingEditWorkItem?.cancel()
-        pendingEditWorkItem = nil
+        // Cancel both an unfinished click and a deferred rename.
+        cancelPendingClick()
 
         // To finish editing we need a current editor.
         guard let editor = inlineTitleEditor else { return }

@@ -170,6 +170,9 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
         super.surfaceTreeDidChange(from: from, to: to)
+        if from.isEmpty != to.isEmpty {
+            (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh()
+        }
 
         // Whenever our surface tree changes in any way (new split, close split, etc.)
         // we want to invalidate our state.
@@ -1174,6 +1177,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
     /// Setup correct window frame before showing the window
     override func showWindow(_ sender: Any?) {
+        defer { (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh() }
         guard let terminalWindow = window as? TerminalWindow else { return }
 
         // Set the initial window position. This must happen after the window

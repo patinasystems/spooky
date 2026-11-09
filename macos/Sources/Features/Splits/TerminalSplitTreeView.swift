@@ -219,39 +219,28 @@ enum TerminalSplitDropZone: String, Equatable {
         return .bottom
     }
 
-    @ViewBuilder
-    func overlay(in geometry: GeometryProxy) -> some View {
-        let overlayColor = Color.accentColor.opacity(0.3)
+    /// Resolve a latched native proposal after AppKit changes tab visibility.
+    /// Screen coordinates have a bottom-left origin; split zones use top-left.
+    static func calculate(atScreenPoint point: CGPoint, in rect: CGRect) -> Self? {
+        guard rect.contains(point), rect.width > 0, rect.height > 0 else { return nil }
+        return calculate(at: CGPoint(x: point.x - rect.minX, y: rect.maxY - point.y), in: rect.size)
+    }
 
+    /// Shared by the pane drag and native-tab drag previews, in top-left coordinates.
+    func highlightRect(in size: CGSize) -> CGRect {
         switch self {
-        case .top:
-            VStack(spacing: 0) {
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(height: geometry.size.height / 2)
-                Spacer()
-            }
-        case .bottom:
-            VStack(spacing: 0) {
-                Spacer()
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(height: geometry.size.height / 2)
-            }
-        case .left:
-            HStack(spacing: 0) {
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(width: geometry.size.width / 2)
-                Spacer()
-            }
-        case .right:
-            HStack(spacing: 0) {
-                Spacer()
-                Rectangle()
-                    .fill(overlayColor)
-                    .frame(width: geometry.size.width / 2)
-            }
+        case .top: CGRect(x: 0, y: 0, width: size.width, height: size.height / 2)
+        case .bottom: CGRect(x: 0, y: size.height / 2, width: size.width, height: size.height / 2)
+        case .left: CGRect(x: 0, y: 0, width: size.width / 2, height: size.height)
+        case .right: CGRect(x: size.width / 2, y: 0, width: size.width / 2, height: size.height)
         }
+    }
+
+    func overlay(in geometry: GeometryProxy) -> some View {
+        let rect = highlightRect(in: geometry.size)
+        return Rectangle()
+            .fill(Color.accentColor.opacity(0.3))
+            .frame(width: rect.width, height: rect.height)
+            .position(x: rect.midX, y: rect.midY)
     }
 }

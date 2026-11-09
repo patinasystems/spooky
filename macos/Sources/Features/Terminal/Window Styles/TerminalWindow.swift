@@ -54,6 +54,9 @@ class TerminalWindow: NSWindow {
     /// Glass effect view for liquid glass background when transparency is enabled
     private var glassEffectView: NSView?
 
+    /// Temporary AppKit feedback, present only during an accepted pane drag.
+    var tabDropFeedback: NSView?
+
     /// Gets the terminal controller from the window controller.
     var terminalController: TerminalController? {
         windowController as? TerminalController
@@ -81,6 +84,7 @@ class TerminalWindow: NSWindow {
     }
 
     override func awakeFromNib() {
+        registerForDraggedTypes([TerminalSurfaceDragPayload.type])
         // Notify that this terminal window has loaded
         NotificationCenter.default.post(name: Self.terminalDidAwake, object: self)
 
@@ -190,6 +194,7 @@ class TerminalWindow: NSWindow {
         }
 
         super.sendEvent(event)
+        tabTitleEditor.mouseEventDidDispatch(event)
     }
 
     override func close() {
@@ -303,6 +308,7 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidAppear() {
+        (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh()
         // Remove our reset zoom accessory. For some reason having a SwiftUI
         // titlebar accessory causes our content view scaling to be wrong.
         // Removing it fixes it, we just need to remember to add it again later.
@@ -315,6 +321,7 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidDisappear() {
+        (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh()
         if styleMask.contains(.titled) {
             if titlebarAccessoryViewControllers.firstIndex(of: resetZoomAccessory) == nil {
                 addTitlebarAccessoryViewController(resetZoomAccessory)

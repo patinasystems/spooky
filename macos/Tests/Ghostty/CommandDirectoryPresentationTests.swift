@@ -37,7 +37,7 @@ struct CommandDirectoryPresentationTests {
                                             status: "completed", exitStatus: 0, elapsed: 0.018,
                                             completionTime: "9:42:35.123 PM")
         let row = try #require(makePresentation(metadata: ["a": metadata]).rows.first)
-        #expect(row.suffix == "✓  0.018s  ·  9:42:35.123 PM")
+        #expect(row.suffix == "✓ 0.018s · 9:42:35.123 PM")
         #expect(row.label == "/fixture  ⎇ main")
         #expect(row.pathByteCount == "/fixture".utf8.count)
     }

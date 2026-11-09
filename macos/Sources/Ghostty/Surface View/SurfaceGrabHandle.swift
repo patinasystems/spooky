@@ -4,36 +4,25 @@ extension Ghostty {
     /// A grab handle overlay at the top of the surface for dragging a surface.
     struct SurfaceGrabHandle: View {
         // Size of the actual drag handle; the hover reveal region is larger.
-        private static let handleSize = CGSize(width: 80, height: 12)
+        private static let handleSize = CGSize(width: 56, height: 20)
 
         // Reveal the handle anywhere within the top % of the pane height.
         private static let hoverHeightFactor: CGFloat = 0.2
 
         @ObservedObject var surfaceView: SurfaceView
         let dragHandle: Ghostty.Config.DragHandle
+        let isSplit: Bool
 
         @State private var isHovering: Bool = false
         @State private var isDragging: Bool = false
 
         private var handleVisible: Bool {
-            switch dragHandle {
-            case .always:
-                return true
-            case .never:
-                return false
-            case .auto:
-                break
-            }
-            // Handle should always be visible in non-fullscreen
-            guard let window = surfaceView.window else { return true }
-            guard window.styleMask.contains(.fullScreen) else { return true }
-
-            // If fullscreen, only show the handle if we have splits
-            guard let controller = window.windowController as? BaseTerminalController else { return false }
-            return controller.surfaceTree.isSplit
+            // AppKit applies the window-count policy without rebuilding this
+            // SwiftUI wrapper whenever another window opens/closes.
+            dragHandle != .never
         }
 
-        private var ellipsisVisible: Bool {
+        private var gripVisible: Bool {
             switch dragHandle {
             case .always:
                 return true
@@ -55,37 +44,29 @@ extension Ghostty {
 
         var body: some View {
             if handleVisible {
-                ZStack {
-                    SurfaceDragSource(
-                        surfaceView: surfaceView,
-                        isDragging: $isDragging,
-                        isHovering: $isHovering
-                    )
-                    .frame(width: Self.handleSize.width, height: Self.handleSize.height)
-                    .contentShape(Rectangle())
-
-                    if ellipsisVisible {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.primary.opacity(isHovering ? 0.8 : 0.3))
-                            .offset(y: -3)
-                            .allowsHitTesting(false)
-                            .transition(.opacity)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                SurfaceDragSource(
+                    surfaceView: surfaceView,
+                    showsGrip: gripVisible,
+                    isSplit: isSplit,
+                    isDragging: $isDragging,
+                    isHovering: $isHovering
+                )
+                .frame(width: Self.handleSize.width, height: Self.handleSize.height)
+                .contentShape(Rectangle())
+                .padding(.trailing, 6)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
         }
 
-        /// The full-width hover band that reveals the drag handle.
+        /// Reveal near the pane’s top-right edge, away from the command text.
         private static func hoverRect(in bounds: CGRect) -> CGRect {
             guard !bounds.isEmpty else { return .zero }
 
             let hoverHeight = min(bounds.height, max(handleSize.height, bounds.height * hoverHeightFactor))
             return CGRect(
-                x: bounds.minX,
+                x: max(bounds.minX, bounds.maxX - handleSize.width - 12),
                 y: bounds.maxY - hoverHeight,
-                width: bounds.width,
+                width: min(bounds.width, handleSize.width + 12),
                 height: hoverHeight
             )
         }
