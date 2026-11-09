@@ -5,9 +5,23 @@ import AppKit
 @MainActor
 enum TerminalDragGrip {
     static let size = CGSize(width: 32, height: 20)
+    nonisolated static let highlightInset: CGFloat = 4
+    nonisolated static let minimumCornerRadius: CGFloat = 4
     enum State { case idle, hovered, pressed }
 
-    static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State) {
+    struct Corners {
+        var topLeft: CGFloat = minimumCornerRadius
+        var topRight: CGFloat = minimumCornerRadius
+        var bottomLeft: CGFloat = minimumCornerRadius
+        var bottomRight: CGFloat = minimumCornerRadius
+    }
+
+    static func highlightRect(in bounds: CGRect) -> CGRect {
+        bounds.insetBy(dx: highlightInset, dy: highlightInset)
+    }
+
+    static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State,
+                     corners: Corners = .init()) {
         let fill: NSColor?
         let dots: NSColor
         switch state {
@@ -23,10 +37,21 @@ enum TerminalDragGrip {
         }
         if let fill {
             fill.setFill()
-            let diameter = max(0, min(bounds.width, bounds.height) - 4)
-            let highlight = CGRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2,
-                                   width: diameter, height: diameter)
-            NSBezierPath(ovalIn: highlight).fill()
+            let rect = highlightRect(in: bounds)
+            let limit = max(0, min(rect.width, rect.height) / 2)
+            let radius: (CGFloat) -> CGFloat = { min(limit, max(0, $0)) }
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.midX, y: rect.minY))
+            path.appendArc(from: NSPoint(x: rect.maxX, y: rect.minY),
+                           to: NSPoint(x: rect.maxX, y: rect.maxY), radius: radius(corners.bottomRight))
+            path.appendArc(from: NSPoint(x: rect.maxX, y: rect.maxY),
+                           to: NSPoint(x: rect.minX, y: rect.maxY), radius: radius(corners.topRight))
+            path.appendArc(from: NSPoint(x: rect.minX, y: rect.maxY),
+                           to: NSPoint(x: rect.minX, y: rect.minY), radius: radius(corners.topLeft))
+            path.appendArc(from: NSPoint(x: rect.minX, y: rect.minY),
+                           to: NSPoint(x: rect.maxX, y: rect.minY), radius: radius(corners.bottomLeft))
+            path.close()
+            path.fill()
         }
 
         let pattern = NSBezierPath()
