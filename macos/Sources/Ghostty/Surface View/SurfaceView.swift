@@ -161,13 +161,8 @@ extension Ghostty {
                     }
                 }
 
-                // Grab handle for dragging the window. We want this to appear at the very
-                // top Z-index os it isn't faded by the unfocused overlay.
-                SurfaceGrabHandle(
-                    surfaceView: surfaceView,
-                    dragHandle: ghostty.config.dragHandle,
-                    isSplit: isSplit,
-                )
+                // Mount the AppKit drag overlay above the dimming layer.
+                SurfaceDragSource(surfaceView: surfaceView, isSplit: isSplit, dragHandle: ghostty.config.dragHandle)
             }
         }
     }
