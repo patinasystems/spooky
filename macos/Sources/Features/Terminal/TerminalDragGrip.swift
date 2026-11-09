@@ -23,7 +23,10 @@ enum TerminalDragGrip {
         }
         if let fill {
             fill.setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 4, yRadius: 4).fill()
+            let diameter = max(0, min(bounds.width, bounds.height) - 4)
+            let highlight = CGRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2,
+                                   width: diameter, height: diameter)
+            NSBezierPath(ovalIn: highlight).fill()
         }
 
         let pattern = NSBezierPath()
