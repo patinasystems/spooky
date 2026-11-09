@@ -25,6 +25,7 @@ extension Ghostty {
         /// The surface view that will be dragged.
         let surfaceView: SurfaceView
         let showsGrip: Bool
+        let isSplit: Bool
 
         /// Binding that reflects whether a drag session is currently active.
         @Binding var isDragging: Bool
@@ -36,6 +37,7 @@ extension Ghostty {
             SurfaceDragSourceViewRepresentable(
                 surfaceView: surfaceView,
                 showsGrip: showsGrip,
+                isSplit: isSplit,
                 isDragging: $isDragging,
                 isHovering: $isHovering)
             .preference(key: DraggingSurfaceKey.self, value: isDragging ? surfaceView.id : nil)
@@ -47,6 +49,7 @@ extension Ghostty {
     fileprivate struct SurfaceDragSourceViewRepresentable: NSViewRepresentable {
         let surfaceView: SurfaceView
         let showsGrip: Bool
+        let isSplit: Bool
         @Binding var isDragging: Bool
         @Binding var isHovering: Bool
 
@@ -54,6 +57,7 @@ extension Ghostty {
             let view = SurfaceDragSourceView(frame: .zero)
             view.surfaceView = surfaceView
             view.showsGrip = showsGrip
+            view.isSplit = isSplit
             view.onDragStateChanged = { dragging in
                 isDragging = dragging
             }
@@ -66,6 +70,7 @@ extension Ghostty {
         func updateNSView(_ nsView: SurfaceDragSourceView, context: Context) {
             nsView.surfaceView = surfaceView
             nsView.showsGrip = showsGrip
+            nsView.isSplit = isSplit
             nsView.onDragStateChanged = { dragging in
                 isDragging = dragging
             }
@@ -90,6 +95,10 @@ extension Ghostty {
         var showsGrip = false {
             didSet { if showsGrip != oldValue { updateGrip() } }
         }
+        var isSplit = false {
+            didSet { if isSplit != oldValue { syncVisibility() } }
+        }
+        private var topologyObserver: NSObjectProtocol?
         private let grip = GripImageView(frame: .zero)
         private var isHovered = false
         private var isPressed = false
@@ -124,9 +133,25 @@ extension Ghostty {
             setAccessibilityLabel("Drag terminal")
             setAccessibilityHelp("Drag onto a window header to add a tab, or onto a terminal to split.")
             updateGrip()
+            topologyObserver = NotificationCenter.default.addObserver(
+                forName: TerminalWindowTopology.didChange, object: nil, queue: .main
+            ) { [weak self] _ in MainActor.assumeIsolated { self?.syncVisibility() } }
+            syncVisibility()
         }
 
         required init?(coder: NSCoder) { return nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            syncVisibility()
+        }
+
+        private func syncVisibility() {
+            guard let window else { isHidden = true; return }
+            let count = (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.windowCount ?? 0
+            isHidden = !TerminalWindowTopology.showsGrip(
+                isSplit: isSplit, hasNativeTabs: TerminalWindowTopology.hasNativeTabs(window), windowCount: count)
+        }
 
         override func layout() {
             super.layout()
@@ -160,6 +185,7 @@ extension Ghostty {
         }
 
         deinit {
+            if let topologyObserver { NotificationCenter.default.removeObserver(topologyObserver) }
             if let escapeMonitor {
                 NSEvent.removeMonitor(escapeMonitor)
             }

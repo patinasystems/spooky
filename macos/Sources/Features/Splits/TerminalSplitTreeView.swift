@@ -219,6 +219,13 @@ enum TerminalSplitDropZone: String, Equatable {
         return .bottom
     }
 
+    /// Resolve a latched native proposal after AppKit changes tab visibility.
+    /// Screen coordinates have a bottom-left origin; split zones use top-left.
+    static func calculate(atScreenPoint point: CGPoint, in rect: CGRect) -> Self? {
+        guard rect.contains(point), rect.width > 0, rect.height > 0 else { return nil }
+        return calculate(at: CGPoint(x: point.x - rect.minX, y: rect.maxY - point.y), in: rect.size)
+    }
+
     /// Shared by the pane drag and native-tab drag previews, in top-left coordinates.
     func highlightRect(in size: CGSize) -> CGRect {
         switch self {

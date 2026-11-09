@@ -17,9 +17,9 @@ extension Ghostty {
         @State private var isDragging: Bool = false
 
         private var handleVisible: Bool {
-            // Window/tab movement belongs to native chrome. Only individual
-            // panes need an extra handle, including panes inside a native tab.
-            isSplit && dragHandle != .never
+            // AppKit applies the window-count policy without rebuilding this
+            // SwiftUI wrapper whenever another window opens/closes.
+            dragHandle != .never
         }
 
         private var gripVisible: Bool {
@@ -47,6 +47,7 @@ extension Ghostty {
                 SurfaceDragSource(
                     surfaceView: surfaceView,
                     showsGrip: gripVisible,
+                    isSplit: isSplit,
                     isDragging: $isDragging,
                     isHovering: $isHovering
                 )

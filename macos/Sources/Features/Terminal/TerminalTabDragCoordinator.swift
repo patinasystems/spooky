@@ -10,7 +10,8 @@ final class TerminalTabDragCoordinator {
     private var initialEventNumber = 0
     private var dispatchingPress = false
     private var releasePoint: NSPoint?
-    private var ownedWindows: [Int] = []
+    private var releaseTarget: Target?
+    private var hoveredTarget: Target?
     private var generation: UInt64 = 0
     private var endScheduled = false
     private let pump = NativeTabTrackingPump()
@@ -31,7 +32,9 @@ final class TerminalTabDragCoordinator {
         } else if source != nil {
             if event.type == .keyDown, event.keyCode == 53 { end(reason: "escape") }
             if event.type == .leftMouseUp, let window = event.window {
-                releasePoint = window.convertPoint(toScreen: event.locationInWindow)
+                let point = window.convertPoint(toScreen: event.locationInWindow)
+                releasePoint = point
+                if let source { releaseTarget = target(at: point, excluding: source) }
             }
         }
     }
@@ -78,7 +81,6 @@ final class TerminalTabDragCoordinator {
         origin = point
         initialEventNumber = event.eventNumber
         dispatchingPress = true
-        ownedWindows = NSApp.windows.map(\.windowNumber)
         pump.start { [weak self] in self?.tick() }
     }
 
@@ -90,7 +92,9 @@ final class TerminalTabDragCoordinator {
             if !modes.contains(mode) { modes.append(mode) }
         }
         guard NSEvent.pressedMouseButtons & 1 != 0 else {
-            releasePoint = releasePoint ?? NSEvent.mouseLocation
+            let point = releasePoint ?? NSEvent.mouseLocation
+            releasePoint = point
+            if releaseTarget == nil { releaseTarget = target(at: point, excluding: source) }
             pump.stop()
             // The app-level dispatch hook is authoritative while AppKit is
             // tracking the initial press. Otherwise finish on the outer loop.
@@ -108,9 +112,11 @@ final class TerminalTabDragCoordinator {
         let point = NSEvent.mouseLocation
         guard hypot(point.x - origin.x, point.y - origin.y) >= 6,
               let target = target(at: point, excluding: source) else {
+            hoveredTarget = nil
             preview.removeFromSuperview()
             return
         }
+        hoveredTarget = target
         if traceURL != nil {
             let value = "\(target.controller.window?.windowNumber ?? 0):\(target.zone.rawValue)"
             if visited.last != value, visited.count < 64 { visited.append(value) }
@@ -125,11 +131,12 @@ final class TerminalTabDragCoordinator {
         let surface: Ghostty.SurfaceView
         let host: NSView
         let zone: TerminalSplitDropZone
+        let screenFrame: NSRect
     }
 
     /// Preview and commit use this same WindowServer order, including other
     /// apps. Do not let the moving source or a native drag-image window block it.
-    private func frontWindow(at point: NSPoint, excluding source: TerminalController) -> NSWindow? {
+    private func frontWindow(at point: NSPoint, excluding source: TerminalController, ignoreSource: Bool = true) -> NSWindow? {
         var below = 0
         for _ in 0..<16 {
             let number = NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: below)
@@ -137,16 +144,15 @@ final class TerminalTabDragCoordinator {
             let window = NSApp.window(withWindowNumber: number)
             let transient: Bool
             if let window {
-                transient = window.ignoresMouseEvents ||
-                    (!ownedWindows.contains(number) && window.windowController == nil && !window.canBecomeKey)
-            } else if !ownedWindows.contains(number),
+                transient = NativeTabHitPolicy.ignoresForDrop(window)
+            } else if
                       let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(number)) as? [[String: Any]],
                       let pid = info.first?[kCGWindowOwnerPID as String] as? Int {
                 transient = pid == Int(ProcessInfo.processInfo.processIdentifier)
             } else {
                 transient = false
             }
-            if window?.windowController === source || transient { below = number; continue }
+            if (ignoreSource && window?.windowController === source) || transient { below = number; continue }
             return window
         }
         return nil
@@ -168,7 +174,8 @@ final class TerminalTabDragCoordinator {
             let topLeft = NSPoint(x: local.x - host.bounds.minX,
                                   y: host.isFlipped ? local.y - host.bounds.minY : host.bounds.maxY - local.y)
             return Target(controller: controller, surface: surface, host: host,
-                          zone: .calculate(at: topLeft, in: host.bounds.size))
+                          zone: .calculate(at: topLeft, in: host.bounds.size),
+                          screenFrame: window.convertToScreen(host.convert(host.bounds, to: nil)))
         }
         return nil
     }
@@ -187,8 +194,20 @@ final class TerminalTabDragCoordinator {
     private func finish(at point: NSPoint) {
         guard !dispatchingPress, releasePoint != nil || NSEvent.pressedMouseButtons & 1 == 0 else { return }
         guard let source else { end(reason: "source-gone"); return }
+        var destination = releaseTarget ?? target(at: point, excluding: source)
+        if destination == nil, let hovered = hoveredTarget,
+           let zone = TerminalSplitDropZone.calculate(atScreenPoint: point, in: hovered.screenFrame),
+           let peer = hovered.controller.window,
+           source.window?.tabGroup?.windows.contains(where: { $0 === peer }) == true,
+           frontWindow(at: point, excluding: source, ignoreSource: false) === source.window {
+            // AppKit can join the tab before returning from native dispatch.
+            // The hovered peer is then hidden behind the selected source tab.
+            // Honor the visible split proposal instead of losing it to tabbing.
+            destination = Target(controller: hovered.controller, surface: hovered.surface, host: hovered.host,
+                                 zone: zone, screenFrame: hovered.screenFrame)
+        }
         guard hypot(point.x - origin.x, point.y - origin.y) >= 6,
-              let destination = target(at: point, excluding: source) else { end(reason: "no-split-target"); return }
+              let destination else { end(reason: "no-split-target"); return }
         // Capture the accepted destination before resetting gesture state. No
         // inference from asynchronously changing native tab-group/frame state.
         let trace = traceSnapshot()
@@ -231,8 +250,9 @@ final class TerminalTabDragCoordinator {
         source = nil
         dispatchingPress = false
         releasePoint = nil
+        releaseTarget = nil
+        hoveredTarget = nil
         endScheduled = false
-        ownedWindows.removeAll(keepingCapacity: true)
         tickCount = 0
         modes.removeAll(keepingCapacity: true)
         visited.removeAll(keepingCapacity: true)
@@ -244,6 +264,12 @@ final class TerminalTabDragCoordinator {
 /// Only the close/accessory buttons and our actual inline editor exclude a drag.
 @MainActor
 enum NativeTabHitPolicy {
+    /// AppKit caches drag-image windows. Their age does not make them real
+    /// destinations or occluders on the next gesture.
+    static func ignoresForDrop(_ window: NSWindow) -> Bool {
+        window.ignoresMouseEvents || (window.windowController == nil && !window.canBecomeKey)
+    }
+
     static func allows(_ view: NSView, in tab: NSView) -> Bool {
         var descendant: NSView? = view
         while let child = descendant, child !== tab {
@@ -286,7 +312,8 @@ extension BaseTerminalController {
     func receiveTabSplit(from source: TerminalController, at destination: Ghostty.SurfaceView,
                          zone: TerminalSplitDropZone) -> Bool {
         guard source !== self, source.ghostty === ghostty,
-              window?.attachedSheet == nil, source.window?.attachedSheet == nil,
+              let targetWindow = window, let sourceWindow = source.window,
+              targetWindow.attachedSheet == nil, sourceWindow.attachedSheet == nil,
               surfaceTree.contains(destination), let root = source.surfaceTree.root else { return false }
         let direction: SplitTree<Ghostty.SurfaceView>.NewDirection = switch zone {
         case .top: .up

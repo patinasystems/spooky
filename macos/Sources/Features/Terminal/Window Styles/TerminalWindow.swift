@@ -308,6 +308,7 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidAppear() {
+        (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh()
         // Remove our reset zoom accessory. For some reason having a SwiftUI
         // titlebar accessory causes our content view scaling to be wrong.
         // Removing it fixes it, we just need to remember to add it again later.
@@ -320,6 +321,7 @@ class TerminalWindow: NSWindow {
     }
 
     private func tabBarDidDisappear() {
+        (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.scheduleRefresh()
         if styleMask.contains(.titled) {
             if titlebarAccessoryViewControllers.firstIndex(of: resetZoomAccessory) == nil {
                 addTitlebarAccessoryViewController(resetZoomAccessory)

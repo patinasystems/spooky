@@ -17,6 +17,51 @@ private final class NativeTabButtonFixture: NSView {
 }
 
 struct NativeTabTrackingPumpTests {
+    @Test func latchedProposalsKeepTheScreenSpaceEdgeWhenNativeTabsReorder() {
+        let rect = CGRect(x: 100, y: 200, width: 800, height: 600)
+        #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 500, y: 799), in: rect) == .top)
+        #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 500, y: 201), in: rect) == .bottom)
+        #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 101, y: 500), in: rect) == .left)
+        #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 899, y: 500), in: rect) == .right)
+        #expect(TerminalSplitDropZone.calculate(atScreenPoint: CGPoint(x: 99, y: 500), in: rect) == nil)
+    }
+
+    @Test @MainActor func standaloneGripRequiresAnotherWindowWhileSplitPanesKeepTheirHandles() {
+        #expect(!TerminalWindowTopology.showsGrip(isSplit: false, hasNativeTabs: false, windowCount: 1))
+        #expect(TerminalWindowTopology.showsGrip(isSplit: false, hasNativeTabs: false, windowCount: 2))
+        #expect(!TerminalWindowTopology.showsGrip(isSplit: false, hasNativeTabs: true, windowCount: 3))
+        #expect(TerminalWindowTopology.showsGrip(isSplit: true, hasNativeTabs: true, windowCount: 1))
+        #expect(TerminalWindowTopology.showsGrip(isSplit: true, hasNativeTabs: false, windowCount: 1))
+    }
+
+    @Test @MainActor func nativeTabMembersCountAsOneWindowForTheStandaloneGrip() {
+        let first = NSObject(), second = NSObject()
+        let a = ObjectIdentifier(first), b = ObjectIdentifier(second)
+        typealias Entry = TerminalWindowTopology.Entry
+        let tabs = [Entry(window: 1, group: a, hasNativeTabs: true), Entry(window: 2, group: a, hasNativeTabs: true)]
+        #expect(TerminalWindowTopology.countGroups(tabs) == 1)
+        #expect(TerminalWindowTopology.countGroups(tabs + [Entry(window: 3, group: nil, hasNativeTabs: false)]) == 2)
+        #expect(TerminalWindowTopology.countGroups(tabs + [Entry(window: 4, group: b, hasNativeTabs: true)]) == 2)
+        #expect(TerminalWindowTopology.countGroups([]) == 0)
+    }
+
+    @Test @MainActor func cachedPassivePreviewWindowsNeverBlockTheNextDrop() {
+        let preview = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: true)
+        preview.isReleasedWhenClosed = false
+        defer { preview.close() }
+        #expect(NativeTabHitPolicy.ignoresForDrop(preview))
+        let controller = NSWindowController(window: preview)
+        withExtendedLifetime(controller) {
+            // A controller-backed utility window still blocks a terminal drop.
+            #expect(!NativeTabHitPolicy.ignoresForDrop(preview))
+            preview.ignoresMouseEvents = true
+            #expect(NativeTabHitPolicy.ignoresForDrop(preview))
+            preview.ignoresMouseEvents = false
+            controller.window = nil
+            #expect(NativeTabHitPolicy.ignoresForDrop(preview))
+        }
+    }
+
     @Test @MainActor func nativeWindowIdentityWinsOverAnAnimatingVisualIndex() {
         let window = NSWindow(contentRect: .zero, styleMask: .titled, backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false

@@ -170,6 +170,7 @@ class AppDelegate: NSObject,
 
     private let appIconUpdater = AppIconUpdater()
     @MainActor lazy var nativeTabDragCoordinator = TerminalTabDragCoordinator()
+    @MainActor lazy var terminalWindowTopology = TerminalWindowTopology()
 
     @MainActor private lazy var menuShortcutManager = Ghostty.MenuShortcutManager()
 
@@ -215,6 +216,7 @@ class AppDelegate: NSObject,
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppBranding.configureMainMenu()
         nativeTabDragCoordinator.start()
+        terminalWindowTopology.start()
 
         // Start filename indexing while the first window and shell are opening.
         // The service actor owns process I/O; startup never waits for the crawl.
@@ -439,6 +441,7 @@ class AppDelegate: NSObject,
 
     func applicationWillTerminate(_ notification: Notification) {
         nativeTabDragCoordinator.stop()
+        terminalWindowTopology.stop()
         // We have no notifications we want to persist after death,
         // so remove them all now. In the future we may want to be
         // more selective and only remove surface-targeted notifications.
