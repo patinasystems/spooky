@@ -4,8 +4,8 @@ import AppKit
 /// a quiet highlight without changing layout or animating.
 @MainActor
 enum TerminalDragGrip {
-    static let size = CGSize(width: 36, height: 24)
-    nonisolated static let highlightInset: CGFloat = 6
+    static let size = CGSize(width: 32, height: 20)
+    nonisolated static let highlightInset: CGFloat = 4
     nonisolated static let minimumCornerRadius: CGFloat = 4
     enum State { case idle, hovered, pressed }
 
@@ -17,13 +17,8 @@ enum TerminalDragGrip {
     }
 
     static func highlightRect(in bounds: CGRect) -> CGRect {
-        // Native titlebar accessories can be stretched vertically by AppKit.
-        // Keep the ink fixed-size and inset from the top/right corner; the
-        // larger view remains available as a comfortable drag target.
-        let width = min(size.width - 2 * highlightInset, max(0, bounds.width - 2 * highlightInset))
-        let height = min(size.height - 2 * highlightInset, max(0, bounds.height - 2 * highlightInset))
-        return CGRect(x: bounds.maxX - highlightInset - width,
-                      y: bounds.maxY - highlightInset - height, width: width, height: height)
+        // Keep the original height and width; only tighten the right inset.
+        bounds.insetBy(dx: highlightInset, dy: highlightInset).offsetBy(dx: highlightInset, dy: 0)
     }
 
     static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State,
