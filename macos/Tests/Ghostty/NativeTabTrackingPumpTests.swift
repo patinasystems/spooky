@@ -66,6 +66,41 @@ private final class TransferControllerFixture: TerminalController {
 }
 
 struct NativeTabTrackingPumpTests {
+    @Test @MainActor func loadingAnEmptyTransferDestinationDoesNotCloseItsNibWindow() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        // Use the real NIB lifecycle. A manually assigned fixture window hides
+        // reentrant window loading while BaseTerminalController initializes.
+        let controller = TerminalController(app, withSurfaceTree: .init())
+        #expect(!controller.isWindowLoaded)
+        let window = try #require(controller.window)
+        defer { window.close() }
+        #expect(window.contentView is TerminalViewContainer)
+        #expect(window.windowController === controller)
+        #expect(window.delegate === controller)
+    }
+
+    @Test @MainActor func initialNibLayoutPreservesSurfaceOwnershipFocusAndSplitZoom() throws {
+        let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
+        let core = try #require(app.app)
+        var config = Ghostty.SurfaceConfiguration()
+        config.command = "/bin/cat"
+        let first = Ghostty.SurfaceView(core, baseConfig: config)
+        let second = Ghostty.SurfaceView(core, baseConfig: config)
+        let single = SplitTree<Ghostty.SurfaceView>(view: first)
+        let split = try single.inserting(node: .leaf(view: second), at: first, direction: .down)
+        let zoomed = SplitTree(root: split.root, zoomed: split.root?.node(view: first))
+        for tree in [single, zoomed] {
+            let controller = TerminalController(app, withSurfaceTree: tree)
+            #expect(!controller.isWindowLoaded)
+            #expect(BaseTerminalController.controller(owning: first) === controller)
+            let window = try #require(controller.window as? TerminalWindow)
+            #expect(window.contentView is TerminalViewContainer)
+            #expect(window.surfaceIsZoomed == tree.isZoomed)
+            if !tree.isSplit { #expect(controller.focusedSurface === first) }
+            window.close()
+        }
+    }
+
     @Test @MainActor func paneMovedToATabKeepsItsPresentationAndLiveSurfaceAfterDetachment() throws {
         let app = try #require((NSApp.delegate as? AppDelegate)?.ghostty)
         let core = try #require(app.app)

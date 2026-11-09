@@ -1114,6 +1114,7 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         let config = ghostty.config
 
         syncRestoration(config)
+        (window as? TerminalWindow)?.surfaceIsZoomed = surfaceTree.isZoomed
 
         // If we have only a single surface (no splits) and there is a default size then
         // we should resize to that default size.
