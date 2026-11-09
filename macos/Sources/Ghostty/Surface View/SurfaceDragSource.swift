@@ -24,22 +24,16 @@ extension Ghostty {
     struct SurfaceDragSource: View {
         /// The surface view that will be dragged.
         let surfaceView: SurfaceView
-        let showsGrip: Bool
         let isSplit: Bool
-
-        /// Binding that reflects whether a drag session is currently active.
-        @Binding var isDragging: Bool
-
-        /// Binding that reflects whether the mouse is hovering over this view.
-        @Binding var isHovering: Bool
+        let dragHandle: Ghostty.Config.DragHandle
+        @State private var isDragging = false
 
         var body: some View {
             SurfaceDragSourceViewRepresentable(
                 surfaceView: surfaceView,
-                showsGrip: showsGrip,
                 isSplit: isSplit,
-                isDragging: $isDragging,
-                isHovering: $isHovering)
+                enabled: dragHandle != .never,
+                isDragging: $isDragging)
             .preference(key: DraggingSurfaceKey.self, value: isDragging ? surfaceView.id : nil)
         }
     }
@@ -48,35 +42,60 @@ extension Ghostty {
     /// This gives us control over the drag lifecycle, particularly detecting drag start.
     fileprivate struct SurfaceDragSourceViewRepresentable: NSViewRepresentable {
         let surfaceView: SurfaceView
-        let showsGrip: Bool
         let isSplit: Bool
+        let enabled: Bool
         @Binding var isDragging: Bool
-        @Binding var isHovering: Bool
 
-        func makeNSView(context: Context) -> SurfaceDragSourceView {
-            let view = SurfaceDragSourceView(frame: .zero)
+        func makeNSView(context: Context) -> SurfaceDragOverlay {
+            let overlay = SurfaceDragOverlay(frame: .zero)
+            let view = overlay.grip
             view.surfaceView = surfaceView
-            view.showsGrip = showsGrip
             view.isSplit = isSplit
+            view.enabled = enabled
             view.onDragStateChanged = { dragging in
                 isDragging = dragging
             }
-            view.onHoverChanged = { hovering in
-                isHovering = hovering
-            }
-            return view
+            return overlay
         }
 
-        func updateNSView(_ nsView: SurfaceDragSourceView, context: Context) {
+        func updateNSView(_ overlay: SurfaceDragOverlay, context: Context) {
+            let nsView = overlay.grip
             nsView.surfaceView = surfaceView
-            nsView.showsGrip = showsGrip
             nsView.isSplit = isSplit
+            nsView.enabled = enabled
             nsView.onDragStateChanged = { dragging in
                 isDragging = dragging
             }
-            nsView.onHoverChanged = { hovering in
-                isHovering = hovering
-            }
+        }
+
+        func sizeThatFits(_ proposal: ProposedViewSize, nsView: SurfaceDragOverlay, context: Context) -> CGSize? {
+            guard let width = proposal.width, let height = proposal.height else { return nil }
+            return CGSize(width: width, height: height)
+        }
+    }
+
+    /// Native placement and hit testing. The full-pane mounting view passes
+    /// clicks through everywhere except the visible grip itself.
+    fileprivate final class SurfaceDragOverlay: NSView {
+        let grip = SurfaceDragSourceView(frame: .zero)
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            addSubview(grip)
+        }
+        required init?(coder: NSCoder) { return nil }
+
+        override func layout() {
+            super.layout()
+            grip.frame = CGRect(x: max(bounds.minX, bounds.maxX - TerminalDragGrip.size.width - 6),
+                                y: max(bounds.minY, bounds.maxY - TerminalDragGrip.size.height - 6),
+                                width: TerminalDragGrip.size.width, height: TerminalDragGrip.size.height)
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = convert(point, from: superview)
+            guard bounds.contains(local), !grip.isHidden else { return nil }
+            return grip.hitTest(local)
         }
     }
 
@@ -91,25 +110,23 @@ extension Ghostty {
 
         /// The surface view that will be dragged. Its UUID is encoded into the
         /// pasteboard for drop targets to identify which surface is being moved.
-        var surfaceView: SurfaceView?
-        var showsGrip = false {
-            didSet { if showsGrip != oldValue { updateGrip() } }
+        var surfaceView: SurfaceView? {
+            didSet { if surfaceView !== oldValue { bindTheme() } }
+        }
+        var enabled = true {
+            didSet { if enabled != oldValue { syncVisibility() } }
         }
         var isSplit = false {
             didSet { if isSplit != oldValue { syncVisibility() } }
         }
         private var topologyObserver: NSObjectProtocol?
-        private let grip = GripImageView(frame: .zero)
+        private var themeObserver: NSObjectProtocol?
         private var isHovered = false
         private var isPressed = false
 
         /// Callback invoked when the drag state changes. Called with `true` when
         /// a drag session begins, and `false` when it ends (completed or cancelled).
         var onDragStateChanged: ((Bool) -> Void)?
-
-        /// Callback invoked when the mouse enters or exits this view's bounds.
-        /// Used to update the hover state for visual feedback in the parent view.
-        var onHoverChanged: ((Bool) -> Void)?
 
         /// Whether we are currently in a mouse tracking loop (between mouseDown
         /// and either mouseUp or drag initiation). Used to determine cursor state.
@@ -123,11 +140,6 @@ extension Ghostty {
 
         override init(frame: NSRect) {
             super.init(frame: frame)
-            grip.image = (NSImage(systemSymbolName: "circle.grid.2x3.fill", accessibilityDescription: nil)
-                ?? NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: nil))?
-                .withSymbolConfiguration(.init(pointSize: 11, weight: .semibold))
-            grip.imageScaling = .scaleProportionallyDown
-            addSubview(grip)
             setAccessibilityElement(true)
             setAccessibilityRole(.handle)
             setAccessibilityLabel("Drag terminal")
@@ -149,42 +161,35 @@ extension Ghostty {
         private func syncVisibility() {
             guard let window else { isHidden = true; return }
             let count = (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.windowCount ?? 0
-            isHidden = !TerminalWindowTopology.showsGrip(
+            isHidden = !enabled || !TerminalWindowTopology.showsGrip(
                 isSplit: isSplit, hasNativeTabs: TerminalWindowTopology.hasNativeTabs(window), windowCount: count)
         }
 
-        override func layout() {
-            super.layout()
-            grip.frame = NSRect(x: (bounds.width - 18) / 2, y: (bounds.height - 12) / 2, width: 18, height: 12)
+        private func bindTheme() {
+            if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) }
+            themeObserver = nil
+            if let surfaceView {
+                themeObserver = NotificationCenter.default.addObserver(
+                    forName: .spookyCommandThemeDidChange, object: surfaceView, queue: .main
+                ) { [weak self] _ in MainActor.assumeIsolated { self?.needsDisplay = true } }
+            }
+            needsDisplay = true
         }
 
         override func draw(_ dirtyRect: NSRect) {
-            guard isHovered || isPressed || isTracking else { return }
-            let pressed = isPressed || isTracking
-            let rect = bounds.insetBy(dx: 6, dy: 2)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 5, yRadius: 5)
-            (pressed ? NSColor.controlAccentColor.withAlphaComponent(0.20)
-                : NSColor.labelColor.withAlphaComponent(0.08)).setFill()
-            path.fill()
-            (pressed ? NSColor.controlAccentColor.withAlphaComponent(0.4)
-                : NSColor.separatorColor.withAlphaComponent(0.45)).setStroke()
-            path.lineWidth = 0.5
-            path.stroke()
+            let theme = surfaceView?.derivedConfig.commandUITheme ?? .fallback
+            let state: TerminalDragGrip.State = isPressed || isTracking ? .pressed : (isHovered ? .hovered : .idle)
+            TerminalDragGrip.draw(in: bounds, background: theme.background, foreground: theme.foreground,
+                                  accent: theme.accent, state: state, scale: window?.backingScaleFactor ?? 2)
         }
 
         private func updateGrip() {
-            let pressed = isPressed || isTracking
-            grip.isHidden = !(showsGrip || isHovered || pressed)
-            grip.contentTintColor = pressed ? .controlAccentColor : (isHovered ? .labelColor : .secondaryLabelColor)
             needsDisplay = true
             window?.invalidateCursorRects(for: self)
         }
 
-        private final class GripImageView: NSImageView {
-            override func hitTest(_ point: NSPoint) -> NSView? { nil }
-        }
-
         deinit {
+            if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) }
             if let topologyObserver { NotificationCenter.default.removeObserver(topologyObserver) }
             if let escapeMonitor {
                 NSEvent.removeMonitor(escapeMonitor)
@@ -234,13 +239,11 @@ extension Ghostty {
         override func mouseEntered(with event: NSEvent) {
             isHovered = true
             updateGrip()
-            onHoverChanged?(true)
         }
 
         override func mouseExited(with event: NSEvent) {
             isHovered = false
             updateGrip()
-            onHoverChanged?(false)
         }
 
         override func mouseDragged(with event: NSEvent) {
