@@ -35,6 +35,11 @@ final class TerminalTabDragCoordinator {
                     "serverWindows": Self.serverWindowSnapshot()], reason: reason)
     }
 
+    func recordSettledTransfer(_ reason: String) {
+        guard traceURL != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.recordTransfer(reason) }
+    }
+
     func willDispatch(_ event: NSEvent) {
         commit.beginDispatch()
         guard enabled else { return }
@@ -76,7 +81,8 @@ final class TerminalTabDragCoordinator {
         let hit = host.tabButtonHit(atScreenPoint: point)
         if traceURL != nil, hit != nil || event.locationInWindow.y >= host.contentLayoutRect.maxY {
             writeTrace(["phase": "press", "application": NSStringFromClass(type(of: NSApp!)),
-                        "eventWindow": NSStringFromClass(type(of: eventWindow)), "hit": hit != nil], reason: "native-tab-hit")
+                        "eventWindow": NSStringFromClass(type(of: eventWindow)), "window": eventWindow.windowNumber,
+                        "windows": Self.windowSnapshot(), "hit": hit != nil], reason: "native-tab-hit")
         }
         guard let hit, let tab = host.tabWindow(for: hit.tabButton, fallbackIndex: hit.index),
               let controller = tab.windowController as? TerminalController,
@@ -222,7 +228,7 @@ final class TerminalTabDragCoordinator {
             RunLoop.main.perform(inModes: [.default]) { [weak self] in
                 MainActor.assumeIsolated { self?.recordTransfer("after-split") }
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in self?.recordTransfer("after-split-settled") }
+            recordSettledTransfer("after-split-settled")
         }
     }
 
@@ -251,6 +257,12 @@ final class TerminalTabDragCoordinator {
             return ["id": window.windowNumber, "class": NSStringFromClass(type(of: window)),
                     "visible": window.isVisible, "ignoresMouse": window.ignoresMouseEvents,
                     "keyable": window.canBecomeKey, "terminal": controller != nil, "tabbing": window.tabbingIdentifier,
+                    "controller": window.windowController.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "delegate": window.delegate.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "content": window.contentView.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "firstResponder": window.firstResponder.map { NSStringFromClass(type(of: $0)) } ?? "nil",
+                    "key": window.isKeyWindow, "main": window.isMainWindow, "movable": window.isMovable,
+                    "sheet": window.attachedSheet?.windowNumber ?? 0,
                     "surfaces": controller?.surfaceTree.map { view in
                         var host = view.superview
                         while let current = host, !(current is NativeCommandSurfaceHost) { host = current.superview }

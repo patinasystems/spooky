@@ -422,6 +422,11 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         return c
     }
 
+    /// A transfer destination must never start a second terminal session.
+    func makeTransferredTabController() -> TerminalController {
+        TerminalController(ghostty, withSurfaceTree: SplitTree<Ghostty.SurfaceView>())
+    }
+
     static func newTab(
         _ ghostty: Ghostty.App,
         from parent: NSWindow? = nil,

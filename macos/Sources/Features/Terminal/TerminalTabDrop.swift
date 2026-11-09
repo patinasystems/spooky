@@ -92,7 +92,7 @@ extension TerminalController {
 
         // Attach an empty tab first. A rejected AppKit operation must leave the
         // source tree and session untouched, and must never launch a new shell.
-        let created = TerminalController(ghostty, withSurfaceTree: SplitTree<Ghostty.SurfaceView>())
+        let created = makeTransferredTabController()
         created.isBackgroundOpaque = isBackgroundOpaque
         guard let tab = created.window else { return false }
         // AppKit may already have grouped a fresh window when the system's
@@ -115,13 +115,21 @@ extension TerminalController {
             target.closeTabImmediately()
         }
         undoManager?.setActionName("Move Pane to Tab")
-        selectDroppedTab(tab, surface: source)
+        // Complete the same controller presentation used by normal new tabs.
+        // Merely ordering its NSWindow skips initial geometry and appearance
+        // setup; a later native tear-off must start from a fully hosted pane.
+        selectDroppedTab(tab, surface: source, firstPresentation: true)
         return true
     }
 
-    private func selectDroppedTab(_ tab: NSWindow, surface: Ghostty.SurfaceView) {
+    private func selectDroppedTab(_ tab: NSWindow, surface: Ghostty.SurfaceView, firstPresentation: Bool = false) {
         tab.tabGroup?.selectedWindow = tab
-        tab.makeKeyAndOrderFront(nil)
+        if firstPresentation, let controller = tab.windowController as? TerminalController {
+            controller.showWindowSafely(self)
+            tab.contentView?.layoutSubtreeIfNeeded()
+        } else {
+            tab.makeKeyAndOrderFront(nil)
+        }
         // Split rehosting finishes on the next main run-loop turn. Never focus
         // the pane's old window, or steal focus after a newer tab selection.
         DispatchQueue.main.async { [weak surface, weak tab] in
@@ -136,6 +144,7 @@ extension TerminalController {
         invalidateRestorableState()
         (tab.windowController as? TerminalController)?.invalidateRestorableState()
         (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordTransfer("pane-to-tab")
+        (NSApp.delegate as? AppDelegate)?.nativeTabDragCoordinator.recordSettledTransfer("pane-to-tab-settled")
     }
 }
 
