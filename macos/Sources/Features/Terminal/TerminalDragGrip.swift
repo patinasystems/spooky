@@ -1,41 +1,34 @@
 import AppKit
 
-/// Small, opaque AppKit grip. Idle is discoverable; interaction changes only
-/// its colors. No hover-driven layout, animation, images or background work.
+/// Flat, horizontal header grip. Idle dots stay visible; interaction adds
+/// a quiet highlight without changing layout or animating.
 @MainActor
 enum TerminalDragGrip {
-    static let size = CGSize(width: 34, height: 24)
+    static let size = CGSize(width: 32, height: 20)
     enum State { case idle, hovered, pressed }
 
-    static func draw(in bounds: CGRect, background: NSColor, foreground: NSColor,
-                     accent: NSColor, state: State, scale: CGFloat) {
-        let fill: NSColor
-        let border: NSColor
+    static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State) {
+        let fill: NSColor?
         let dots: NSColor
         switch state {
         case .idle:
-            fill = background.blended(withFraction: 0.06, of: foreground) ?? background
-            border = foreground.withAlphaComponent(0.16)
-            dots = foreground.withAlphaComponent(0.7)
+            fill = nil
+            dots = foreground.withAlphaComponent(0.6)
         case .hovered:
-            fill = background.blended(withFraction: 0.11, of: foreground) ?? background
-            border = foreground.withAlphaComponent(0.28)
+            fill = foreground.withAlphaComponent(0.09)
             dots = foreground.withAlphaComponent(0.95)
         case .pressed:
-            fill = background.blended(withFraction: 0.2, of: accent) ?? background
-            border = accent.withAlphaComponent(0.7)
+            fill = accent.withAlphaComponent(0.18)
             dots = accent
         }
-        let chip = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 6, yRadius: 6)
-        fill.setFill()
-        chip.fill()
-        border.setStroke()
-        chip.lineWidth = 1 / max(1, scale)
-        chip.stroke()
+        if let fill {
+            fill.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 4, yRadius: 4).fill()
+        }
 
         let pattern = NSBezierPath()
-        for x: CGFloat in [-2.5, 2.5] {
-            for y: CGFloat in [-4, 0, 4] {
+        for x: CGFloat in [-5, 0, 5] {
+            for y: CGFloat in [-2.5, 2.5] {
                 pattern.appendOval(in: CGRect(x: bounds.midX + x - 1, y: bounds.midY + y - 1, width: 2, height: 2))
             }
         }

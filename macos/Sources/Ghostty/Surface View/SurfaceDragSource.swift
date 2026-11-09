@@ -66,6 +66,11 @@ extension Ghostty {
             nsView.onDragStateChanged = { dragging in
                 isDragging = dragging
             }
+            overlay.updatePlacement()
+        }
+
+        static func dismantleNSView(_ overlay: SurfaceDragOverlay, coordinator: ()) {
+            overlay.removeAccessory()
         }
 
         func sizeThatFits(_ proposal: ProposedViewSize, nsView: SurfaceDragOverlay, context: Context) -> CGSize? {
@@ -74,27 +79,74 @@ extension Ghostty {
         }
     }
 
-    /// Native placement and hit testing. The full-pane mounting view passes
-    /// clicks through everywhere except the visible grip itself.
+    /// A standalone window uses AppKit's titlebar accessory layout. Splits and
+    /// undecorated windows keep a compact grip within their pane's top edge.
+    /// The mounting view never intercepts terminal content underneath it.
     fileprivate final class SurfaceDragOverlay: NSView {
         let grip = SurfaceDragSourceView(frame: .zero)
+        private var accessory: NSTitlebarAccessoryViewController?
+        private weak var accessoryWindow: NSWindow?
+        private var placingGrip = false
 
         override init(frame: NSRect) {
             super.init(frame: frame)
             addSubview(grip)
+            grip.onVisibilityChanged = { [weak self] in
+                guard let self, !self.placingGrip else { return }
+                self.updatePlacement()
+            }
         }
         required init?(coder: NSCoder) { return nil }
 
         override func layout() {
             super.layout()
+            updatePlacement()
+            guard accessory == nil else { return }
             grip.frame = CGRect(x: max(bounds.minX, bounds.maxX - TerminalDragGrip.size.width - 6),
-                                y: max(bounds.minY, bounds.maxY - TerminalDragGrip.size.height - 6),
+                                y: max(bounds.minY, bounds.maxY - TerminalDragGrip.size.height - 2),
                                 width: TerminalDragGrip.size.width, height: TerminalDragGrip.size.height)
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updatePlacement()
+        }
+
+        func updatePlacement() {
+            guard !placingGrip else { return }
+            placingGrip = true
+            defer { placingGrip = false }
+            let target = !grip.isHidden && !grip.isSplit && window?.styleMask.contains(.titled) == true ? window : nil
+            if accessory != nil, accessoryWindow !== target { removeAccessory() }
+            if let target, accessory == nil {
+                let controller = NSTitlebarAccessoryViewController()
+                controller.identifier = NSUserInterfaceItemIdentifier("SpookyPaneDragGrip")
+                controller.layoutAttribute = .right
+                grip.frame = NSRect(origin: .zero, size: TerminalDragGrip.size)
+                controller.view = grip
+                accessory = controller
+                accessoryWindow = target
+                target.addTitlebarAccessoryViewController(controller)
+            }
+        }
+
+        func removeAccessory() {
+            let wasPlacing = placingGrip
+            placingGrip = true
+            defer { placingGrip = wasPlacing }
+            if let accessory, let window = accessoryWindow,
+               let index = window.titlebarAccessoryViewControllers.firstIndex(of: accessory) {
+                window.removeTitlebarAccessoryViewController(at: index)
+            }
+            accessory = nil
+            accessoryWindow = nil
+            if grip.superview !== self { addSubview(grip) }
+            needsLayout = true
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? {
             let local = convert(point, from: superview)
-            guard bounds.contains(local), !grip.isHidden else { return nil }
+            guard grip.superview === self, bounds.contains(local), !grip.isHidden else { return nil }
             return grip.hitTest(local)
         }
     }
@@ -123,6 +175,7 @@ extension Ghostty {
         private var themeObserver: NSObjectProtocol?
         private var isHovered = false
         private var isPressed = false
+        var onVisibilityChanged: (() -> Void)?
 
         /// Callback invoked when the drag state changes. Called with `true` when
         /// a drag session begins, and `false` when it ends (completed or cancelled).
@@ -159,6 +212,7 @@ extension Ghostty {
         }
 
         private func syncVisibility() {
+            defer { onVisibilityChanged?() }
             guard let window else { isHidden = true; return }
             let count = (NSApp.delegate as? AppDelegate)?.terminalWindowTopology.windowCount ?? 0
             isHidden = !enabled || !TerminalWindowTopology.showsGrip(
@@ -179,8 +233,7 @@ extension Ghostty {
         override func draw(_ dirtyRect: NSRect) {
             let theme = surfaceView?.derivedConfig.commandUITheme ?? .fallback
             let state: TerminalDragGrip.State = isPressed || isTracking ? .pressed : (isHovered ? .hovered : .idle)
-            TerminalDragGrip.draw(in: bounds, background: theme.background, foreground: theme.foreground,
-                                  accent: theme.accent, state: state, scale: window?.backingScaleFactor ?? 2)
+            TerminalDragGrip.draw(in: bounds, foreground: theme.foreground, accent: theme.accent, state: state)
         }
 
         private func updateGrip() {
@@ -200,6 +253,8 @@ extension Ghostty {
             // Ensure this view gets the mouse event before window dragging handlers
             return true
         }
+
+        override var mouseDownCanMoveWindow: Bool { false }
 
         override func mouseDown(with event: NSEvent) {
             // Consume the mouseDown event to prevent it from propagating to the
