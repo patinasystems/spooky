@@ -4,8 +4,8 @@ import AppKit
 /// a quiet highlight without changing layout or animating.
 @MainActor
 enum TerminalDragGrip {
-    static let size = CGSize(width: 32, height: 20)
-    nonisolated static let highlightInset: CGFloat = 4
+    static let size = CGSize(width: 36, height: 24)
+    nonisolated static let highlightInset: CGFloat = 6
     nonisolated static let minimumCornerRadius: CGFloat = 4
     enum State { case idle, hovered, pressed }
 
@@ -17,7 +17,13 @@ enum TerminalDragGrip {
     }
 
     static func highlightRect(in bounds: CGRect) -> CGRect {
-        bounds.insetBy(dx: highlightInset, dy: highlightInset)
+        // Native titlebar accessories can be stretched vertically by AppKit.
+        // Keep the ink fixed-size and inset from the top/right corner; the
+        // larger view remains available as a comfortable drag target.
+        let width = min(size.width - 2 * highlightInset, max(0, bounds.width - 2 * highlightInset))
+        let height = min(size.height - 2 * highlightInset, max(0, bounds.height - 2 * highlightInset))
+        return CGRect(x: bounds.maxX - highlightInset - width,
+                      y: bounds.maxY - highlightInset - height, width: width, height: height)
     }
 
     static func draw(in bounds: CGRect, foreground: NSColor, accent: NSColor, state: State,
@@ -35,9 +41,9 @@ enum TerminalDragGrip {
             fill = accent.withAlphaComponent(0.18)
             dots = accent
         }
+        let rect = highlightRect(in: bounds)
         if let fill {
             fill.setFill()
-            let rect = highlightRect(in: bounds)
             let limit = max(0, min(rect.width, rect.height) / 2)
             let radius: (CGFloat) -> CGFloat = { min(limit, max(0, $0)) }
             let path = NSBezierPath()
@@ -57,7 +63,7 @@ enum TerminalDragGrip {
         let pattern = NSBezierPath()
         for x: CGFloat in [-5, 0, 5] {
             for y: CGFloat in [-2.5, 2.5] {
-                pattern.appendOval(in: CGRect(x: bounds.midX + x - 1, y: bounds.midY + y - 1, width: 2, height: 2))
+                pattern.appendOval(in: CGRect(x: rect.midX + x - 1, y: rect.midY + y - 1, width: 2, height: 2))
             }
         }
         dots.setFill()

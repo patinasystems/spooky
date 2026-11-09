@@ -102,8 +102,8 @@ extension Ghostty {
             super.layout()
             updatePlacement()
             guard accessory == nil else { return }
-            grip.frame = CGRect(x: max(bounds.minX, bounds.maxX - TerminalDragGrip.size.width - 6),
-                                y: max(bounds.minY, bounds.maxY - TerminalDragGrip.size.height - 2),
+            grip.frame = CGRect(x: max(bounds.minX, bounds.maxX - TerminalDragGrip.size.width),
+                                y: max(bounds.minY, bounds.maxY - TerminalDragGrip.size.height),
                                 width: TerminalDragGrip.size.width, height: TerminalDragGrip.size.height)
         }
 
