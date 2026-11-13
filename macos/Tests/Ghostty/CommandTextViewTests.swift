@@ -916,11 +916,11 @@ struct CommandTextViewTests {
         #expect(initialReloads > 0)
         let next = [candidate("alpha", replacement: "new/alpha"), candidate("beta", replacement: "new/beta")]
         popup.show(items: next, message: nil, selected: 1,
-                   header: .init(title: "/w", status: CommandFilePicker.initialIndexMessage), for: editor)
+                   header: .init(title: "/w", status: "Looking for matching filenames…"), for: editor)
         #expect(table.reloadCount == initialReloads)
         #expect(table.selectedRow == 1)
         popup.show(items: next, message: nil, selected: 1,
-                   header: .init(title: "/w", status: CommandFilePicker.initialIndexMessage), for: editor)
+                   header: .init(title: "/w", status: "Looking for matching filenames…"), for: editor)
         #expect(table.reloadCount == initialReloads)
     }
 
@@ -989,17 +989,17 @@ struct CommandTextViewTests {
         popup.show(items: [], message: "Searching…", selected: 0, for: editor)
         #expect(table.reloadCount > previous)
         previous = table.reloadCount
-        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        popup.show(items: [], message: "Looking for matching filenames…", selected: 0, for: editor)
         #expect(table.reloadCount > previous)
         previous = table.reloadCount
-        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        popup.show(items: [], message: "Looking for matching filenames…", selected: 0, for: editor)
         #expect(table.reloadCount == previous)
         editor.font = .monospacedSystemFont(ofSize: 30, weight: .regular)
-        popup.show(items: [], message: CommandFilePicker.initialIndexMessage, selected: 0, for: editor)
+        popup.show(items: [], message: "Looking for matching filenames…", selected: 0, for: editor)
         #expect(table.reloadCount > previous)
         let message = try #require(popup.tableView(table, viewFor: table.tableColumns.first, row: 0) as? NSTableCellView)
         #expect(message.textField?.font == editor.font)
-        #expect(message.textField?.stringValue == CommandFilePicker.initialIndexMessage)
+        #expect(message.textField?.stringValue == "Looking for matching filenames…")
         #expect(table.rowHeight >= CommandCompletionView.rowHeight(for: try #require(editor.font)))
     }
 

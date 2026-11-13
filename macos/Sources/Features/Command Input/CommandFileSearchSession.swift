@@ -6,8 +6,6 @@ struct CommandFileSearchProvider: Sendable {
     var search: @Sendable (_ query: String, _ near: URL, _ scope: URL?, _ limit: Int) async throws
         -> [CommandFileSearchEntry]
     var children: @Sendable (_ directory: URL, _ limit: Int) async throws -> [CommandFileSearchEntry]
-    /// Nil in fixtures that do not exercise the app-wide index lifecycle.
-    var indexState: (@Sendable () async throws -> CommandFileSearchIndexState)?
 
     static let live = CommandFileSearchProvider(
         search: { query, near, scope, limit in
@@ -15,8 +13,7 @@ struct CommandFileSearchProvider: Sendable {
         },
         children: { directory, limit in
             try await CommandFileSearchService.shared.children(of: directory, limit: limit)
-        },
-        indexState: { try await CommandFileSearchService.shared.indexState() })
+        })
 }
 
 /// Pure `@` picker rules: trigger detection, active range, query planning,
@@ -277,18 +274,8 @@ final class CommandFilePicker {
     private(set) var session: CommandFileSearchSession?
     private(set) var entries: [CommandFileSearchEntry] = []
     private(set) var selectedIndex = 0
-    var message: String? {
-        if !queryFailed, entries.isEmpty, let notice = indexPresentation.notice { return notice }
-        return queryMessage
-    }
-    var header: CommandCompletionHeader? {
-        guard var header = queryHeader else { return nil }
-        if !queryFailed, let notice = indexPresentation.notice { header.status = notice }
-        return header
-    }
-    private var queryMessage: String?
-    private var queryHeader: CommandCompletionHeader?
-    private var queryFailed = false
+    private(set) var message: String?
+    private(set) var header: CommandCompletionHeader?
     private(set) var generation: UInt64 = 0
     private var resultsGeneration: UInt64?
     private var near = ""
@@ -298,44 +285,18 @@ final class CommandFilePicker {
     private var preferredPath: String?
     private var lastQuery: String?
     private var task: Task<Void, Never>?
-    private var indexTask: Task<Void, Never>?
-    private var indexObservationID: UUID?
-    private var indexPresentation = IndexPresentation.none
     private var childrenCache: [String: [CommandFileSearchEntry]] = [:]
     private let provider: CommandFileSearchProvider
     private let debounce: Duration
-    private let retryInitial: Duration
-    private let retryMaximum: Duration
-    private let indexPollInterval: Duration
-    nonisolated static let initialIndexMessage = "Initial search index is being created…"
-
-    private enum IndexPresentation: Equatable {
-        case none, creating, failed(String)
-
-        var notice: String? {
-            switch self {
-            case .none: return nil
-            case .creating: return CommandFilePicker.initialIndexMessage
-            case .failed(let message): return message
-            }
-        }
-    }
-    /// Bounds a stuck index even if no edit or dismissal ever cancels it.
-    static let maximumIndexingRetries = 240
     /// Called after an async result or failure changes visible state.
     var onChange: () -> Void = {}
 
-    init(provider: CommandFileSearchProvider = .live, debounce: Duration = .milliseconds(8),
-         retryInitial: Duration = .milliseconds(300), retryMaximum: Duration = .seconds(1),
-         indexPollInterval: Duration = .milliseconds(500)) {
+    init(provider: CommandFileSearchProvider = .live, debounce: Duration = .milliseconds(8)) {
         self.provider = provider
         self.debounce = debounce
-        self.retryInitial = retryInitial
-        self.retryMaximum = retryMaximum
-        self.indexPollInterval = indexPollInterval
     }
 
-    deinit { task?.cancel(); indexTask?.cancel() }
+    deinit { task?.cancel() }
 
     var isActive: Bool { session != nil }
     var resultsAreCurrent: Bool { resultsGeneration == generation }
@@ -346,22 +307,16 @@ final class CommandFilePicker {
     func begin(anchor: Int, cwd: String) {
         end()
         session = CommandFileSearchSession(anchor: anchor, cwd: cwd)
-        observeIndexState()
     }
 
     func end() {
         task?.cancel()
         task = nil
-        indexTask?.cancel()
-        indexTask = nil
-        indexObservationID = nil
-        indexPresentation = .none
         session = nil
         entries = []
         selectedIndex = 0
-        queryMessage = nil
-        queryHeader = nil
-        queryFailed = false
+        message = nil
+        header = nil
         resultsGeneration = nil
         userMovedSelection = false
         preferredPath = nil
@@ -399,14 +354,13 @@ final class CommandFilePicker {
         let current = generation
         task?.cancel()
         task = nil
-        queryFailed = false
         let plan = CommandFilePicking.plan(query: remaining, scope: scope, cwd: session.cwd,
                                            browsed: session.browsed || anchor != nil)
         switch plan {
         case let .list(directory):
             near = directory
             showsDetail = false
-            queryHeader = .init(title: CommandFilePicking.abbreviated(directory), status: "")
+            header = .init(title: CommandFilePicking.abbreviated(directory), status: "")
             if let cached = childrenCache[directory] {
                 apply(CommandFilePicking.filterChildren(cached, filter: ""), generation: current,
                       empty: "Empty folder")
@@ -437,45 +391,26 @@ final class CommandFilePicker {
             let base = scope ?? near
             self.near = base
             showsDetail = true
-            queryHeader = .init(title: CommandFilePicking.abbreviated(base), status: "")
+            header = .init(title: CommandFilePicking.abbreviated(base), status: "")
             markPending()
             let includeHidden = text.hasPrefix(".")
-            task = Task { [weak self, provider, debounce, retryInitial, retryMaximum] in
+            task = Task { [weak self, provider, debounce] in
                 do {
                     try await Task.sleep(for: debounce)
-                    var delay = retryInitial
-                    var attempts = 0
-                    while true {
-                        let results: [CommandFileSearchEntry]
-                        do {
-                            results = try await provider.search(text, URL(fileURLWithPath: near),
-                                                                scope.map { URL(fileURLWithPath: $0) },
-                                                                CommandFilePicking.searchLimit)
-                        } catch let failure as CommandFileSearchService.Failure {
-                            // A cold index is recoverable: show its status and
-                            // retry this generation until ready. Edits,
-                            // dismissal, and focus loss cancel it.
-                            guard case .indexing = failure,
-                                  attempts < CommandFilePicker.maximumIndexingRetries else { throw failure }
-                            attempts += 1
-                            guard !Task.isCancelled, self?.showIndexing(generation: current) == true else { return }
-                            try await Task.sleep(for: delay)
-                            delay = min(delay * 2, retryMaximum)
-                            continue
-                        }
-                        guard !Task.isCancelled, let self, self.generation == current else { return }
-                        let visible = results.filter {
-                            (scope == nil || CommandFilePicking.relativePath($0.path, to: base) != nil)
-                                && CommandFilePicking.visible($0, relativeTo: base, includeHidden: includeHidden)
-                        }
-                        if visible.isEmpty,
-                           try await self.redirectFuzzyDirectory(query: query, text: text, cursor: cursor,
-                                                                 generation: current) { return }
-                        guard self.generation == current, !Task.isCancelled else { return }
-                        self.apply(visible, generation: current, empty: "No matches",
-                                   truncated: results.count >= CommandFilePicking.searchLimit)
-                        break
+                    let results = try await provider.search(text, URL(fileURLWithPath: near),
+                                                            scope.map { URL(fileURLWithPath: $0) },
+                                                            CommandFilePicking.searchLimit)
+                    guard !Task.isCancelled, let self, self.generation == current else { return }
+                    let visible = results.filter {
+                        (scope == nil || CommandFilePicking.relativePath($0.path, to: base) != nil)
+                            && CommandFilePicking.visible($0, relativeTo: base, includeHidden: includeHidden)
                     }
+                    if visible.isEmpty,
+                       try await self.redirectFuzzyDirectory(query: query, text: text, cursor: cursor,
+                                                             generation: current) { return }
+                    guard self.generation == current, !Task.isCancelled else { return }
+                    self.apply(visible, generation: current, empty: "No matches",
+                               truncated: results.count >= CommandFilePicking.searchLimit)
                 } catch {
                     guard !Task.isCancelled, let self, self.generation == current else { return }
                     self.fail(error, generation: current)
@@ -578,18 +513,6 @@ final class CommandFilePicker {
         }
     }
 
-    /// Returns false when the generation is no longer current (stop retrying).
-    private func showIndexing(generation current: UInt64) -> Bool {
-        guard session != nil, generation == current else { return false }
-        let previousHeader = header
-        let previousMessage = message
-        queryHeader?.status = Self.initialIndexMessage
-        if entries.isEmpty { queryMessage = Self.initialIndexMessage }
-        // Retrying an unchanged cold query must not reshape/reload its popup.
-        if header != previousHeader || message != previousMessage { onChange() }
-        return true
-    }
-
     private func markPending() {
         if preferredPath == nil, userMovedSelection, entries.indices.contains(selectedIndex) {
             preferredPath = entries[selectedIndex].path
@@ -597,8 +520,8 @@ final class CommandFilePicker {
         entries = []
         selectedIndex = 0
         resultsGeneration = nil
-        queryHeader?.status = "Searching…"
-        queryMessage = "Searching…"
+        header?.status = "Searching…"
+        message = "Searching…"
     }
 
     private func apply(_ results: [CommandFileSearchEntry], generation current: UInt64, empty: String,
@@ -612,50 +535,16 @@ final class CommandFilePicker {
             preferredPath = nil
             userMovedSelection = userMovedSelection || selectedIndex != 0
         }
-        queryMessage = results.isEmpty ? empty : nil
-        queryHeader?.status = truncated ? "\(CommandFilePicking.searchLimit)+" : ""
+        message = results.isEmpty ? empty : nil
+        header?.status = truncated ? "\(CommandFilePicking.searchLimit)+" : ""
     }
 
     private func fail(_ error: Error, generation current: UInt64) {
         entries = []
         resultsGeneration = current
         selectedIndex = 0
-        queryFailed = true
-        queryMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        queryHeader?.status = ""
+        message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        header?.status = ""
     }
 
-    /// Readiness is app-wide, independent of the active filename query. Keep
-    /// one observer for this picker session so edits and cached child results
-    /// cannot clear its notice or start an additional polling loop.
-    private func observeIndexState() {
-        guard let indexState = provider.indexState else { return }
-        let identifier = UUID()
-        indexObservationID = identifier
-        indexTask = Task { [weak self, indexState, indexPollInterval] in
-            while !Task.isCancelled {
-                do {
-                    let state = try await indexState()
-                    guard !Task.isCancelled, let self, self.indexObservationID == identifier else { return }
-                    self.updateIndexPresentation(state == .creating ? .creating : .none)
-                    if state == .ready { self.indexTask = nil; return }
-                } catch {
-                    guard !Task.isCancelled, let self, self.indexObservationID == identifier else { return }
-                    self.updateIndexPresentation(.failed((error as? LocalizedError)?.errorDescription
-                        ?? error.localizedDescription))
-                    self.indexTask = nil
-                    return
-                }
-                do { try await Task.sleep(for: indexPollInterval) } catch { return }
-            }
-        }
-    }
-
-    private func updateIndexPresentation(_ value: IndexPresentation) {
-        guard indexPresentation != value else { return }
-        let previousHeader = header
-        let previousMessage = message
-        indexPresentation = value
-        if header != previousHeader || message != previousMessage { onChange() }
-    }
 }

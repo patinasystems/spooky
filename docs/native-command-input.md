@@ -352,30 +352,22 @@ verification and remaining physical IME/VoiceOver qualification.
 
 A typed `@` at a shell argument boundary opens the existing completion list in
 file-picker mode. It starts with the current directory's children; a filename
-query searches the fsearch index, while explicit paths and keyboard navigation
+query searches the existing macOS Spotlight index, while explicit paths and keyboard navigation
 browse a directory. Tab enters a selected directory, Command-Up moves to its
 parent, and Return inserts a file or directory. Left/Right retain native caret
 movement. Escape cancels without changing the draft. Acceptance replaces only
 the active `@query`, quotes shell metacharacters, and is one undo step.
 
 `CommandFileSearchSession` owns query generations and navigation. Its injected
-provider calls `CommandFileSearchService`, an actor with bounded requests to one
-app-owned JSON-lines helper, started in the background at application launch.
-Latest-query cancellation and generation
-checks reject stale results; directory listings do not wait for the global
-index. Zsh still provides semantic command, option, and argument completions.
+provider calls `CommandFileSearchService` for bounded native metadata queries
+and direct directory listings. Latest-query cancellation and generation checks
+reject stale results. Zsh still provides semantic command, option, and argument
+completions.
 
-The helper links fsearch v0.2.1 at revision
-`88e63fdf850cf7749deae8198b187accd21f8ba5`. A checked patch adds a names-only engine
-and literal filename queries. The integration does not enable fsearch's query
-language, content indexing, socket daemon, login item, or keep-warm spin loop.
-It uses Spooky's own index under `~/Library/Application Support/Spooky/` and
-exits with the app. Protected directories remain subject to macOS permissions.
-While the initial index is unfinished, the picker shows “Initial search index
-is being created…” even for the first empty `@`. It keeps the query and updates
-automatically when the index becomes ready. Immediate directory browsing remains
-available during the crawl. Readiness requests are independent of searches and
-cannot cancel them.
+File search reuses the system Spotlight index. Spooky does not launch a search
+helper, crawl the filesystem, watch filesystem changes, or maintain its own index.
+Search coverage follows Spotlight's indexing and privacy settings; explicit paths
+and directory navigation remain available independently of the system index.
 
 `CommandOverlaySurface` supplies the shared AppKit material, tint, border and
 shadow for completion, file picking, and terminal search. Reduce Transparency

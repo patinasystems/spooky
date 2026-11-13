@@ -68,193 +68,130 @@ struct CommandFilePickerTests {
         #expect(!picker.refresh(text: "cat @x;", cursor: 7))
     }
 
-    @Test func indexingRetriesTheSameQueryWithoutAnotherKeystroke() async {
-        let calls = CallCounter()
+    @Test func openingAPickerDoesNoWorkUntilItsFirstRefresh() async {
+        let searches = CallCounter()
+        let listings = CallCounter()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { query, _, _, _ in
-                if calls.next() <= 2 { throw CommandFileSearchService.Failure.indexing("Indexing files") }
-                return [entry("/w/\(query).txt")]
-            },
-            children: { _, _ in [] }), debounce: .zero, retryInitial: .milliseconds(1), retryMaximum: .milliseconds(2))
+            search: { _, _, _, _ in _ = searches.next(); return [] },
+            children: { _, _ in _ = listings.next(); return [] }), debounce: .zero)
         picker.begin(anchor: 0, cwd: "/w")
-        picker.refresh(text: "@ma", cursor: 3)
-        for _ in 0..<500 where picker.header?.status != CommandFilePicker.initialIndexMessage && !picker.resultsAreCurrent {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        if !picker.resultsAreCurrent {
-            #expect(picker.header?.status == CommandFilePicker.initialIndexMessage)
-            #expect(picker.selectedEntry == nil)
-            #expect(picker.acceptance(at: 0, text: "@ma", cursor: 3) == nil)
-        }
+        try? await Task.sleep(for: .milliseconds(20))
+        #expect(searches.count == 0)
+        #expect(listings.count == 0)
+        picker.refresh(text: "@", cursor: 1)
         await settle(picker)
-        #expect(calls.count == 3)
-        #expect(picker.entries.map(\.name) == ["ma.txt"])
-        #expect(picker.header?.status == "")
-        #expect(picker.acceptance(at: 0, text: "@ma", cursor: 3)?.text == "ma.txt ")
+        #expect(searches.count == 0)
+        #expect(listings.count == 1)
+        picker.end()
     }
 
-    @Test func dismissingCancelsIndexingRetries() async {
+    @Test func searchFailureIsShownOnceWithoutBackgroundRetries() async {
         let calls = CallCounter()
-        let secondRequest = PickerResponseGate<Void>()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
             search: { _, _, _, _ in
-                if calls.next() == 2 { await secondRequest.wait() }
-                throw CommandFileSearchService.Failure.indexing("Indexing files")
-            },
-            children: { _, _ in [] }), debounce: .zero, retryInitial: .milliseconds(1), retryMaximum: .milliseconds(1))
+                _ = calls.next()
+                throw CommandFileSearchService.Failure.unavailable("Spotlight is unavailable")
+            }, children: { _, _ in [] }), debounce: .zero)
+        defer { picker.end() }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@ma", cursor: 3)
-        for _ in 0..<500 where calls.count < 2 { try? await Task.sleep(for: .milliseconds(1)) }
-        #expect(picker.header?.status == CommandFilePicker.initialIndexMessage)
-        #expect(picker.message == CommandFilePicker.initialIndexMessage)
-        picker.end()
-        #expect(calls.count == 2)
-        await secondRequest.release(())
+        await settle(picker)
+        #expect(picker.message == "Spotlight is unavailable")
+        #expect(picker.entries.isEmpty)
         try? await Task.sleep(for: .milliseconds(30))
-        #expect(calls.count == 2)
+        #expect(calls.count == 1)
+    }
+
+    @Test func dismissingCancelsTheActiveSearch() async {
+        let started = CallCounter()
+        let cancelled = CallCounter()
+        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
+            search: { _, _, _, _ in
+                try await withTaskCancellationHandler {
+                    _ = started.next()
+                    try await Task.sleep(for: .seconds(60))
+                    return []
+                } onCancel: {
+                    _ = cancelled.next()
+                }
+            }, children: { _, _ in [] }), debounce: .zero)
+        picker.begin(anchor: 0, cwd: "/w")
+        picker.refresh(text: "@ma", cursor: 3)
+        for _ in 0..<500 where started.count == 0 { try? await Task.sleep(for: .milliseconds(1)) }
+        #expect(started.count == 1)
+        picker.end()
+        #expect(cancelled.count == 1)
         #expect(!picker.isActive)
         #expect(picker.header == nil)
     }
 
-    @Test func otherSearchErrorsStillShowTheirMessage() async {
-        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { _, _, _, _ in throw CommandFileSearchService.Failure.unavailable("Search helper missing") },
-            children: { _, _ in [] }), debounce: .zero)
-        picker.begin(anchor: 0, cwd: "/w")
-        picker.refresh(text: "@ma", cursor: 3)
-        await settle(picker)
-        #expect(picker.message == "Search helper missing")
-        #expect(picker.entries.isEmpty)
-    }
-
-    @Test func emptyPickerShowsInitialIndexBeforeChildrenAndClearsWithoutTyping() async {
+    @Test func emptyPickerShowsOnlyItsPendingDirectoryLookup() async {
         let children = PickerResponseGate<[CommandFileSearchEntry]>()
-        let status = PickerIndexState()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { _, _, _, _ in [] }, children: { _, _ in await children.wait() },
-            indexState: { await status.read() }), indexPollInterval: .milliseconds(1))
+            search: { _, _, _, _ in [] }, children: { _, _ in await children.wait() }))
         defer { picker.end() }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@", cursor: 1)
-        for _ in 0..<500 where picker.header?.status != CommandFilePicker.initialIndexMessage {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(picker.header?.status == "Initial search index is being created…")
-        #expect(picker.message == "Initial search index is being created…")
+        #expect(picker.header?.status == "Searching…")
+        #expect(picker.message == "Searching…")
         #expect(!picker.resultsAreCurrent)
-
         await children.release([entry("/w/local.txt")])
         await settle(picker)
         #expect(picker.selectedEntry?.name == "local.txt")
         #expect(picker.acceptance(at: 0, text: "@", cursor: 1)?.text == "local.txt ")
-        #expect(picker.header?.status == CommandFilePicker.initialIndexMessage)
-        let generation = picker.generation
-        await status.set(.ready)
-        for _ in 0..<500 where picker.header?.status != "" {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
         #expect(picker.header?.status == "")
         #expect(picker.message == nil)
-        #expect(picker.generation == generation)
-        #expect(picker.selectedEntry?.name == "local.txt")
     }
 
-    @Test func cachedChildrenCannotEraseIndexStatusOrStartAnotherObserver() async {
-        let reads = CallCounter()
+    @Test func cachedChildrenDoNotRepeatTheDirectoryLookup() async {
         let listings = CallCounter()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
             search: { _, _, _, _ in [] },
-            children: { _, _ in _ = listings.next(); return [entry("/w/local.txt")] },
-            indexState: { _ = reads.next(); return .creating }), indexPollInterval: .seconds(60))
+            children: { _, _ in _ = listings.next(); return [entry("/w/local.txt")] }))
         defer { picker.end() }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@", cursor: 1)
         await settle(picker)
-        for _ in 0..<500 where picker.header?.status != CommandFilePicker.initialIndexMessage {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
         picker.refresh(text: "@", cursor: 1)
         #expect(picker.resultsAreCurrent)
-        #expect(picker.header?.status == CommandFilePicker.initialIndexMessage)
         #expect(picker.selectedEntry?.name == "local.txt")
         #expect(listings.count == 1)
-        #expect(reads.count == 1)
     }
 
-    @Test func oldIndexStatusCannotChangeAReopenedPicker() async {
-        let first = PickerResponseGate<CommandFileSearchIndexState>()
+    @Test func oldSearchReplyCannotChangeAReopenedPicker() async {
+        let first = PickerResponseGate<[CommandFileSearchEntry]>()
         let reads = CallCounter()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { query, _, _, _ in [entry("/w/\(query).txt")] }, children: { _, _ in [] },
-            indexState: { if reads.next() == 1 { return await first.wait() }; return .ready }), debounce: .zero)
+            search: { query, _, _, _ in
+                if reads.next() == 1 { return await first.wait() }
+                return [entry("/w/\(query).txt")]
+            }, children: { _, _ in [] }), debounce: .zero)
         defer { picker.end() }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@old", cursor: 4)
         for _ in 0..<500 where reads.count == 0 { try? await Task.sleep(for: .milliseconds(1)) }
+        #expect(reads.count == 1)
         picker.end()
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@new", cursor: 4)
         await settle(picker)
-        for _ in 0..<500 where reads.count < 2 { try? await Task.sleep(for: .milliseconds(1)) }
-        await first.release(.creating)
+        await first.release([entry("/w/old.txt")])
         for _ in 0..<5 { await Task.yield() }
         #expect(picker.header?.status == "")
         #expect(picker.entries.map(\.name) == ["new.txt"])
         #expect(picker.acceptance(at: 0, text: "@new", cursor: 4)?.text == "new.txt ")
     }
 
-    @Test func indexStatusFailureDoesNotClaimTheIndexIsBeingCreated() async {
-        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { _, _, _, _ in [] }, children: { _, _ in [] },
-            indexState: { throw CommandFileSearchService.Failure.unavailable("Filename helper is unavailable") }))
-        defer { picker.end() }
-        picker.begin(anchor: 0, cwd: "/w")
-        picker.refresh(text: "@", cursor: 1)
-        await settle(picker)
-        for _ in 0..<500 where picker.message != "Filename helper is unavailable" {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(picker.header?.status == "Filename helper is unavailable")
-        #expect(picker.message == "Filename helper is unavailable")
-    }
-
-    @Test func directoryFailureIsNotMaskedByIndexCreation() async {
+    @Test func directoryFailureShowsItsError() async {
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
             search: { _, _, _, _ in [] },
-            children: { _, _ in throw CommandFileSearchService.Failure.unavailable("Folder cannot be read") },
-            indexState: { .creating }))
+            children: { _, _ in throw CommandFileSearchService.Failure.unavailable("Folder cannot be read") }))
         defer { picker.end() }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@", cursor: 1)
         await settle(picker)
         #expect(picker.message == "Folder cannot be read")
         #expect(picker.header?.status == "")
-    }
-
-    @Test func dismissingStopsIndexStatusPolling() async {
-        let reads = CallCounter()
-        let picker = CommandFilePicker(provider: CommandFileSearchProvider(
-            search: { _, _, _, _ in [] }, children: { _, _ in [] },
-            indexState: { _ = reads.next(); return .creating }), indexPollInterval: .milliseconds(1))
-        picker.begin(anchor: 0, cwd: "/w")
-        picker.refresh(text: "@", cursor: 1)
-        for _ in 0..<500 where reads.count < 2 { try? await Task.sleep(for: .milliseconds(1)) }
-        #expect(reads.count >= 2)
-        picker.end()
-        let stopped = reads.count
-        try? await Task.sleep(for: .milliseconds(20))
-        #expect(reads.count == stopped)
-        #expect(picker.header == nil)
-    }
-
-    @Test func initialIndexHeaderFitsAlongsideAShortScopeLabel() {
-        let status = CommandFilePicker.initialIndexMessage
-        let font = NSFont.systemFont(ofSize: 11)
-        let statusWidth = ceil((status as NSString).size(withAttributes: [.font: font]).width)
-        let header = CommandCompletionHeader(title: "/Users/example/projects/spooky", status: status)
-        let width = CommandCompletionView.width(for: header, contentWidth: 160)
-        #expect(width >= statusWidth + 96 + CommandOverlayStyle.inset * 5)
-        #expect(width <= CommandOverlayStyle.maximumPopupWidth)
     }
 
     @Test func shellQuotingKeepsMetacharactersLiteral() {
@@ -329,33 +266,29 @@ struct CommandFilePickerTests {
         #expect(picker.acceptance(at: 0, text: "cat @main", cursor: 9)?.text == "main.txt ")
     }
 
-    @Test func coldSearchClearsDirectoryRowsAndUnchangedRetriesDoNotRepublish() async {
+    @Test func pendingSearchClearsDirectoryRowsWithoutRepeatedPublications() async {
         let calls = CallCounter()
         let result = PickerResponseGate<[CommandFileSearchEntry]>()
         let picker = CommandFilePicker(provider: CommandFileSearchProvider(
             search: { _, _, _, _ in
-                if calls.next() <= 3 { throw CommandFileSearchService.Failure.indexing("indexing: fixture") }
+                _ = calls.next()
                 return await result.wait()
-            }, children: { _, _ in [entry("/w/Documents", dir: true), entry("/w/Desktop", dir: true)] },
-            indexState: { .creating }), debounce: .zero, retryInitial: .milliseconds(1),
-            retryMaximum: .milliseconds(1), indexPollInterval: .seconds(60))
+            }, children: { _, _ in [entry("/w/Documents", dir: true), entry("/w/Desktop", dir: true)] }),
+            debounce: .zero)
         defer { picker.end() }
         var publications = 0
         picker.onChange = { publications += 1 }
         picker.begin(anchor: 0, cwd: "/w")
         picker.refresh(text: "@", cursor: 1)
         await settle(picker)
-        for _ in 0..<500 where picker.header?.status != CommandFilePicker.initialIndexMessage {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
         #expect(picker.selectedEntry != nil)
         let before = publications
         picker.refresh(text: "@ghost", cursor: 6)
         #expect(picker.entries.isEmpty)
-        #expect(picker.message == CommandFilePicker.initialIndexMessage)
+        #expect(picker.message == "Searching…")
         #expect(picker.acceptance(at: 0, text: "@ghost", cursor: 6) == nil)
-        for _ in 0..<500 where calls.count < 4 { try? await Task.sleep(for: .milliseconds(1)) }
-        #expect(calls.count == 4)
+        for _ in 0..<500 where calls.count == 0 { try? await Task.sleep(for: .milliseconds(1)) }
+        #expect(calls.count == 1)
         #expect(publications == before)
         #expect(!picker.resultsAreCurrent)
         await result.release([entry("/w/ghostty")])
@@ -653,12 +586,6 @@ struct CommandFilePickerTests {
 
 private func entry(_ path: String, dir: Bool = false) -> CommandFileSearchEntry {
     CommandFileSearchEntry(path: path, name: (path as NSString).lastPathComponent, isDirectory: dir)
-}
-
-private actor PickerIndexState {
-    private var value = CommandFileSearchIndexState.creating
-    func read() -> CommandFileSearchIndexState { value }
-    func set(_ state: CommandFileSearchIndexState) { value = state }
 }
 
 /// Deliberately ignores cancellation to exercise stale service replies.

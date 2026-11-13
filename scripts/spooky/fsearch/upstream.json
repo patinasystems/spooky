@@ -1,7 +1,0 @@
-{
-  "repository": "https://github.com/noahdunnagan/fsearch.git",
-  "revision": "88e63fdf850cf7749deae8198b187accd21f8ba5",
-  "version": "0.2.1",
-  "license": "MIT",
-  "patch": "names-only.patch"
-}

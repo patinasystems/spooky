@@ -10,12 +10,12 @@ native editor is enabled by default; other configured shells and explicit
 commands retain ordinary terminal input. Block chrome uses Ghostty's Metal
 renderer; editing and interactive controls use AppKit.
 
-Type **@** in the editor to find and insert files with fsearch. Use **Up/Down**
-to select, **Tab** to enter a directory, **⌘↑** to go to its parent, **Return**
-to insert the selected path, and **Esc** to dismiss. Names are indexed in the
-background at launch; the menu shows progress while the initial index is being
-created. Completion, file picking, and terminal search share native AppKit
-material surfaces.
+Type **@** in the editor to find and insert files. Searches query macOS Spotlight's
+existing index on demand; Spooky does not run its own indexer or startup crawl.
+Explicit paths and directory navigation work independently of Spotlight's search
+coverage. Use **Up/Down** to select, **Tab** to enter a directory, **⌘↑** to go to
+its parent, **Return** to insert the selected path, and **Esc** to dismiss.
+Completion, file picking, and terminal search share native AppKit material surfaces.
 
 ## Install Spooky
 

@@ -22,6 +22,7 @@ class PublishTests(unittest.TestCase):
         self.data = dict(product='Spooky', bundle_identifier='com.patinasystems.spooky',
                          architecture='arm64', version='0.1', source_commit='123456789abcdef',
                          upstream_updates_disabled=True, release_kind='preview', notarized=False,
+                         file_search=publish.packager.FILE_SEARCH.copy(),
                          dmg=dict(file=self.dmg.name, sha256=hashlib.sha256(self.dmg.read_bytes()).hexdigest(),
                                   bytes=self.dmg.stat().st_size))
         self.write()
@@ -44,6 +45,12 @@ class PublishTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '--allow-unnotarized-preview'):
             publish.artifacts(self.path)
         self.assertEqual(len(publish.artifacts(self.path, allow_unnotarized_preview=True)), 5)
+
+    def test_rejects_legacy_indexer_manifests(self):
+        self.data['file_search'] = dict(upstream_revision='legacy', packaged_executable_sha256='old')
+        self.write()
+        with self.assertRaisesRegex(ValueError, 'native Spotlight'):
+            publish.artifacts(self.path, allow_unnotarized_preview=True)
 
     def test_notarized_boolean_alone_is_not_evidence(self):
         self.data.update(notarized=True, release_kind='release')
@@ -101,15 +108,15 @@ class PublishTests(unittest.TestCase):
     def test_contained_app_is_verified_and_detached_even_on_a_nested_failure(self):
         app = self.root / 'Spooky.app'
         main = app / 'Contents/MacOS/ghostty'
-        helper = app / 'Contents/Helpers/spooky-fsearch'
-        for path in (main, helper):
+        plugin = app / 'Contents/PlugIns/DockTile.plugin/Contents/MacOS/DockTile'
+        for path in (main, plugin):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(path.name.encode())
         (self.root / 'Applications').symlink_to('/Applications')
         info = dict(CFBundleShortVersionString='0.1', CFBundleVersion='1', LSMinimumSystemVersion='13.0',
                     CFBundleExecutable='ghostty')
         self.data.update(build_number='1', minimum_macos='13.0', packaged_executable_sha256=publish.digest(main),
-                         file_search=dict(packaged_executable_sha256=publish.digest(helper), upstream_revision='fixture'))
+                         file_search=publish.packager.FILE_SEARCH.copy())
         state = {'detached': False}
 
         @contextmanager
@@ -121,9 +128,9 @@ class PublishTests(unittest.TestCase):
 
         with patch.object(publish.notarization, 'mounted_image', side_effect=mounted), patch.object(
                 publish.packager, 'read_bundle', return_value=info) as admission, patch.object(
-                publish.packager, 'read_file_search', return_value={'revision': 'fixture'}), patch.object(
+                publish.packager, 'read_file_search', return_value=publish.packager.FILE_SEARCH.copy()), patch.object(
                 publish.packager, 'run', return_value=subprocess.CompletedProcess([], 0, 'arm64', '')), patch.object(
-                publish.packager, 'signing_targets', return_value=[main, helper, app]), patch.object(
+                publish.packager, 'signing_targets', return_value=[main, plugin, app]), patch.object(
                 publish.notarization, 'verify_developer_signature') as signature, patch.object(
                 publish.notarization, 'verify_ticket') as ticket:
             publish.verify_contained_app(self.dmg, self.data, 'ABCDEFGHIJ')
@@ -133,12 +140,12 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(signature.call_args_list[1].kwargs, {'team': 'ABCDEFGHIJ'})
             ticket.assert_called_once_with(app)
             state['detached'] = False
-            signature.side_effect = ValueError('Nested helper lacks Hardened Runtime')
+            signature.side_effect = ValueError('Nested plugin lacks Hardened Runtime')
             with self.assertRaisesRegex(ValueError, 'Hardened Runtime'):
                 publish.verify_contained_app(self.dmg, self.data, 'ABCDEFGHIJ')
             self.assertTrue(state['detached'])
             ticket.reset_mock()
-            helper.write_bytes(b'changed helper')
+            main.write_bytes(b'changed executable')
             with self.assertRaisesRegex(ValueError, 'manifest hashes'):
                 publish.verify_contained_app(self.dmg, self.data, 'ABCDEFGHIJ')
             ticket.assert_not_called()

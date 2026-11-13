@@ -6,22 +6,10 @@ on:
     branches: [main]
     paths:
       - "scripts/spooky/**/*.py"
-      - "scripts/spooky/fsearch/upstream.json"
-      - "scripts/spooky/fsearch/Cargo.toml"
-      - "scripts/spooky/fsearch/Cargo.lock"
-      - "scripts/spooky/fsearch/src/**"
-      - "scripts/spooky/fsearch/*.patch"
-      - "scripts/spooky/fsearch/LICENSE*"
       - ".github/workflows/spooky-release-tools.yml"
   pull_request:
     paths:
       - "scripts/spooky/**/*.py"
-      - "scripts/spooky/fsearch/upstream.json"
-      - "scripts/spooky/fsearch/Cargo.toml"
-      - "scripts/spooky/fsearch/Cargo.lock"
-      - "scripts/spooky/fsearch/src/**"
-      - "scripts/spooky/fsearch/*.patch"
-      - "scripts/spooky/fsearch/LICENSE*"
       - ".github/workflows/spooky-release-tools.yml"
 
 permissions:

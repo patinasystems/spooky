@@ -24,15 +24,9 @@ def main [
         []
     }
 
-    # The native helper and app must target the same architecture. Explicit
-    # --arch remains available for cross builds; ordinary local builds are native.
+    # Explicit --arch remains available for cross builds; local builds are native.
     let build_arch = if $arch == "" { (^uname -m | str trim) } else { $arch }
     let arch_args = [-arch $build_arch]
-    let helper_dir = ($output_dir | path join "fsearch")
-    if $scheme == "Ghostty" and ($action in ["build" "test" "archive" "build-for-testing"]) {
-        ^python3 ($env.FILE_PWD | path join ".." "scripts" "spooky" "fsearch" "build.py") --architectures $build_arch --output-dir $helper_dir
-        if $env.LAST_EXIT_CODE != 0 { error make {msg: "Building Spooky's file-search helper failed"} }
-    }
     let config_args = if $xcconfig == "" { [] } else { [-xcconfig ($xcconfig | path expand)] }
     let test_args = if $only_testing == "" { [] } else { $only_testing | split row "," | each { |id| $"-only-testing:($id)" } }
     let derived_args = [-derivedDataPath ($output_dir | path join "DerivedData")]
@@ -42,21 +36,32 @@ def main [
     let test_env = if $action == "test" and $test_parallelism > 0 {
         [$"TEST_RUNNER_SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH=($test_parallelism)"]
     } else { [] }
+    # A serial Swift Testing runner is not enough if Xcode launches several
+    # copies of the AppKit host. Honor the serial option at both levels.
+    let runner_args = if $action == "test" and $test_parallelism == 1 {
+        [-parallel-testing-enabled NO]
+    } else { [] }
+    # Opt-in real Spotlight coverage without forcing an index import on CI.
+    let spotlight_fixture = ($env.SPOOKY_SPOTLIGHT_FIXTURE_PATH? | default "")
+    let spotlight_env = if $action == "test" and $spotlight_fixture != "" {
+        [$"TEST_RUNNER_SPOOKY_SPOTLIGHT_FIXTURE_PATH=($spotlight_fixture)"]
+    } else { [] }
 
     (^env -i
         $"HOME=($env.HOME)"
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin"
         ...$test_env
+        ...$spotlight_env
         xcodebuild
         -project $project
         -scheme $scheme
         -configuration $configuration
         $"SYMROOT=($output_dir)"
-        $"SPOOKY_FSEARCH_HELPER_DIR=($helper_dir)"
         ...$derived_args
         ...$arch_args
         ...$config_args
         ...$test_args
+        ...$runner_args
         ...$skip_testing
         $action)
 }

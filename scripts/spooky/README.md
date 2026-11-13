@@ -54,11 +54,11 @@ Spooky's own feed, signing key, version ordering, and release flow. See the
 
 Build the native GhosttyKit core using the documented Zig workflow, then run from
 the repository root. Use the host's build queue unless the user has explicitly
-overridden it. Cargo/Rust and the requested macOS target must be installed.
-`build.nu` builds the pinned filename-search helper before Xcode; its copy-only
-phase embeds and signs the helper. With no `--arch`, both target the host
-architecture. Direct Xcode builds must first run
-`python3 scripts/spooky/fsearch/build.py --architectures arm64 --output-dir macos/build-spooky/fsearch`.
+overridden it. Filename search uses macOS Spotlight's existing index; building
+Spooky no longer requires Cargo/Rust or a separately signed search helper.
+`build.nu` targets the host architecture unless `--arch` is specified. An Xcode
+cleanup phase removes obsolete indexer files from incremental build products
+before code signing.
 The public packaging path currently supports **arm64 only**, macOS 13 or later;
 an Intel download requires a separately built and tested artifact.
 
@@ -82,7 +82,7 @@ artifacts:
 
 1. Admit only the normal Spooky bundle with native input enabled, upstream
    updates disabled, no capture/profiling settings, no test/debug residue, and
-   matching arm64 app/helper provenance and licenses.
+   an arm64 executable with no obsolete filename-indexer helper or resources.
 2. Reject the debugging entitlement throughout nested code. Sign Mach-O files
    and bundles inside-out with the selected Developer ID identity, Hardened
    Runtime, and secure timestamps, preserving required component entitlements.
@@ -158,7 +158,7 @@ claiming to be notarized.
 The publisher verifies hashes, accepted receipts, the actual Developer ID DMG
 signature, ticket, and Gatekeeper policy. It then mounts the image read-only,
 without browsing or launching, and independently checks its actual Spooky app:
-bundle flags, version, main/helper hashes and architecture, helper provenance,
+bundle flags, version, executable hash and architecture, native search backend,
 every nested signing target/team/runtime/debug entitlement, and the app's own
 stapled ticket and Gatekeeper assessment. It detaches in `finally`. If detach
 fails it leaves the read-only mount intact with an actionable path, refuses to

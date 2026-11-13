@@ -1,7 +1,5 @@
 """Read-only admission checks for preview packaging; no signing or DMG creation."""
 from pathlib import Path
-import json
-import hashlib
 import plistlib
 import runpy
 import shutil
@@ -101,42 +99,51 @@ class PackageAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "external symlink"):
             read_bundle(self.app)
 
-    def test_requires_pinned_names_only_helper_and_license(self):
-        with self.assertRaisesRegex(ValueError, "missing.*helper"):
-            read_file_search(self.app)
+    def test_uses_system_index_without_a_bundled_helper(self):
+        self.assertEqual(read_file_search(self.app), {"backend": "spotlight", "app_owned_index": False})
+
+    def test_rejects_legacy_search_files_in_incremental_builds(self):
+        for relative in ("Contents/Helpers/spooky-fsearch", "Contents/Resources/FSearch"):
+            with self.subTest(relative=relative):
+                residue = self.app / relative
+                residue.parent.mkdir(parents=True, exist_ok=True)
+                residue.write_bytes(b"legacy fixture")
+                with self.assertRaisesRegex(ValueError, "Legacy filename-search residue"):
+                    read_bundle(self.app)
+                residue.unlink()
+                residue.symlink_to(self.app / 'missing')
+                with self.assertRaisesRegex(ValueError, "Legacy filename-search residue"):
+                    read_file_search(self.app)
+                residue.unlink()
+
+    def test_incremental_cleanup_removes_only_legacy_bundle_files(self):
+        clean = runpy.run_path(str(Path(__file__).with_name("clean-legacy-file-search.py")))["clean"]
         helper = self.app / "Contents/Helpers/spooky-fsearch"
-        helper.parent.mkdir()
-        helper.write_bytes(b"fixture")
-        helper.chmod(0o755)
         resources = self.app / "Contents/Resources/FSearch"
+        helper.parent.mkdir()
+        helper.write_bytes(b"legacy executable")
         resources.mkdir(parents=True)
-        with self.assertRaisesRegex(ValueError, "license"):
-            read_file_search(self.app)
-        source = Path(__file__).parent / "fsearch"
-        (resources / "LICENSE.fsearch").write_bytes((source / "LICENSE.fsearch").read_bytes())
-        (resources / "LICENSE.dependencies").write_bytes((source / "LICENSE.dependencies").read_bytes())
-        pin = json.loads((source / "upstream.json").read_text())
-        data = dict(revision=pin["revision"], content_indexing=False,
-                    idle_keep_warm=False, architectures=["arm64"],
-                    patch_sha256=hashlib.sha256((source / pin["patch"]).read_bytes()).hexdigest(),
-                    cargo_lock_sha256=hashlib.sha256((source / "Cargo.lock").read_bytes()).hexdigest(),
-                    dependency_licenses_sha256=hashlib.sha256((source / "LICENSE.dependencies").read_bytes()).hexdigest(),
-                    adapter_source_sha256=hashlib.sha256((source / "Cargo.toml").read_bytes() + b"\0"
-                                                       + (source / "src/main.rs").read_bytes()).hexdigest())
-        manifest = resources / "fsearch-provenance.json"
-        manifest.write_text(json.dumps(data))
-        self.assertEqual(read_file_search(self.app), data)
-        for key, value in [("content_indexing", True), ("idle_keep_warm", True),
-                           ("revision", "wrong"), ("architectures", ["x86_64"]),
-                           ("patch_sha256", "wrong"), ("cargo_lock_sha256", "wrong"),
-                           ("adapter_source_sha256", "wrong")]:
-            manifest.write_text(json.dumps(dict(data, **{key: value})))
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "provenance"):
-                read_file_search(self.app)
-        manifest.write_text(json.dumps(data))
-        (resources / "LICENSE.dependencies").unlink()
-        with self.assertRaisesRegex(ValueError, "dependency licenses"):
-            read_file_search(self.app)
+        (resources / "LICENSE").write_text("legacy notice")
+        other = helper.with_name("other-helper")
+        other.write_bytes(b"keep me")
+        clean(self.app / "Contents")
+        clean(self.app / "Contents")
+        self.assertFalse(helper.exists())
+        self.assertFalse(resources.exists())
+        self.assertEqual(other.read_bytes(), b"keep me")
+        self.assertEqual(read_bundle(self.app), self.info)
+
+    def test_incremental_cleanup_does_not_follow_symlinks(self):
+        clean = runpy.run_path(str(Path(__file__).with_name("clean-legacy-file-search.py")))["clean"]
+        outside = Path(self.temporary.name) / "unrelated"
+        outside.mkdir()
+        (outside / "keep").write_text("untouched")
+        resources = self.app / "Contents/Resources/FSearch"
+        resources.parent.mkdir()
+        resources.symlink_to(outside, target_is_directory=True)
+        clean(self.app / "Contents")
+        self.assertFalse(resources.is_symlink())
+        self.assertEqual((outside / "keep").read_text(), "untouched")
 
 
 class PackageNotarizationFlowTests(unittest.TestCase):
@@ -145,7 +152,7 @@ class PackageNotarizationFlowTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.app = self.root / 'Spooky.app'
-        for relative in ['Contents/MacOS/ghostty', 'Contents/Helpers/spooky-fsearch']:
+        for relative in ['Contents/MacOS/ghostty']:
             path = self.app / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'executable fixture')
@@ -181,7 +188,7 @@ class PackageNotarizationFlowTests(unittest.TestCase):
                 packager.importlib.metadata, 'version', return_value='1.6.7'), patch.dict(
                 packager.sys.modules, {'dmgbuild': SimpleNamespace(build_dmg=self.image)}), patch.object(
                 packager, 'read_bundle', return_value=self.info), patch.object(
-                packager, 'read_file_search', return_value={'revision': 'fsearch-fixture'}), patch.object(
+                packager, 'read_file_search', return_value=packager.FILE_SEARCH.copy()), patch.object(
                 packager, 'signing_targets', side_effect=lambda app: [app]), patch.object(
                 packager, 'sign_app'), patch.object(packager, 'signing_details', return_value={}), patch.object(
                 packager, 'run', side_effect=self.tool), patch.object(packager.notarization, 'preflight',
@@ -196,6 +203,7 @@ class PackageNotarizationFlowTests(unittest.TestCase):
         manifest = self.execute()
         self.assertTrue(manifest['notarized'])
         self.assertEqual(manifest['release_kind'], 'release')
+        self.assertEqual(manifest['file_search'], {'backend': 'spotlight', 'app_owned_index': False})
         image = self.args.output_dir / manifest['dmg']['file']
         self.assertTrue(image.read_bytes().endswith(b' stapled'))
         self.assertEqual(manifest['dmg']['sha256'], packager.sha256(image))

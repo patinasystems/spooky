@@ -49,15 +49,11 @@ SPOOKY_WINDOW_CAPTURE_DIRECTORY=<unique-prefix>-capture
 SPOOKY_WINDOW_CAPTURE_SECONDS=60
 SPOOKY_WINDOW_CAPTURE_VIDEO=0
 SPOOKY_WINDOW_CAPTURE_ROI=x,y,width,height
-SPOOKY_FSEARCH_DIAGNOSTICS_PATH=<unique-prefix>-index.jsonl
-SPOOKY_FSEARCH_INDEX_DIRECTORY=<private-benchmark-index-directory>
 ```
 
-The last two apply only to Spooky. A new private directory produces a genuine
-initial crawl; reusing that same completed directory produces the warm case.
-Never reset the user's production index. Record the helper's measured crawl /
-build / ready state and CPU intervals; “fresh directory” alone does not prove
-that a particular key overlapped busy indexing.
+Filename search now queries the existing macOS Spotlight index. There is no
+Spooky indexer process or private index to reset. Record whether a picker query
+is active and any system indexing activity separately from Spooky's process CPU.
 
 ROI coordinates are **native pixels from the full window's top-left**, including
 the title bar, not AppKit points. Check the actual capture header and one native
@@ -109,10 +105,10 @@ each burst so a lost key does not silently become a latency sample.
    #bwmxgbwmxgbwmxg
    ```
 
-2. **Completion and indexing load.** In a separate native run, type `cd /`,
+2. **Completion and filename-search load.** In a separate native run, type `cd /`,
    wait 200 ms for automatic suggestions, then type `Applications` at 35 ms per
    key while the menu is open. Reset, then type `@spooky`. Repeat once. Run
-   while the fresh index's telemetry reports crawl, and again when ready.
+   while the filename picker is querying Spotlight, and again after dismissal.
    Capture actual glyphs, not caret changes or the menu appearing. Stock can
    type the same strings as a text-input control; it has no equivalent `@`
    feature, so this is a workload-cost comparison, not identical functionality.

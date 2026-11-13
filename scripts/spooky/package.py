@@ -30,6 +30,7 @@ import notarization
 
 
 BUNDLE_ID = "com.patinasystems.spooky"
+FILE_SEARCH = {"backend": "spotlight", "app_owned_index": False}
 MACHO_MAGICS = {
     b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
     b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca",
@@ -46,35 +47,13 @@ def sha256(path: Path) -> str:
 
 
 def read_file_search(app: Path) -> dict:
-    helper = app / "Contents/Helpers/spooky-fsearch"
-    attribution = app / "Contents/Resources/FSearch"
-    if not helper.is_file() or not os.access(helper, os.X_OK):
-        raise ValueError("Preview is missing its executable filename-search helper")
-    if not (attribution / "LICENSE.fsearch").is_file():
-        raise ValueError("Preview is missing the fsearch license")
-    try:
-        provenance = json.loads((attribution / "fsearch-provenance.json").read_text())
-    except (OSError, ValueError) as error:
-        raise ValueError("Preview is missing valid fsearch provenance") from error
-    source = Path(__file__).parent / "fsearch"
-    pin = json.loads((source / "upstream.json").read_text())
-    adapter_hash = hashlib.sha256((source / "Cargo.toml").read_bytes() + b"\0"
-                                 + (source / "src/main.rs").read_bytes()).hexdigest()
-    if (provenance.get("revision") != pin["revision"]
-            or provenance.get("content_indexing") is not False
-            or provenance.get("idle_keep_warm") is not False
-            or provenance.get("architectures") != ["arm64"]
-            or provenance.get("patch_sha256") != sha256(source / pin["patch"])
-            or provenance.get("cargo_lock_sha256") != sha256(source / "Cargo.lock")
-            or provenance.get("adapter_source_sha256") != adapter_hash):
-        raise ValueError("Preview filename-search provenance does not match the pinned names-only helper")
-    if (attribution / "LICENSE.fsearch").read_bytes() != (source / "LICENSE.fsearch").read_bytes():
-        raise ValueError("Preview fsearch license does not match its source")
-    dependencies = attribution / "LICENSE.dependencies"
-    if (not dependencies.is_file() or dependencies.read_bytes() != (source / "LICENSE.dependencies").read_bytes()
-            or provenance.get("dependency_licenses_sha256") != sha256(source / "LICENSE.dependencies")):
-        raise ValueError("Preview is missing matching dependency licenses")
-    return provenance
+    # An incremental Xcode build can retain files from the removed indexer.
+    # Never ship that executable or its obsolete resources in a new release.
+    for relative in ("Contents/Helpers/spooky-fsearch", "Contents/Resources/FSearch"):
+        path = app / relative
+        if path.exists() or path.is_symlink():
+            raise ValueError(f"Legacy filename-search residue: {relative}; rebuild the app")
+    return FILE_SEARCH.copy()
 
 
 def read_bundle(app: Path) -> dict:
@@ -108,6 +87,7 @@ def read_bundle(app: Path) -> dict:
             raise ValueError(f"Test/debug residue in source app: {entry.relative_to(app)}; use a clean build directory")
         if entry.is_symlink() and not entry.resolve().is_relative_to(app):
             raise ValueError(f"App contains an external symlink: {entry.relative_to(app)}")
+    read_file_search(app)
     return info
 
 
@@ -175,9 +155,6 @@ def package(args: argparse.Namespace) -> dict:
     architectures = run("/usr/bin/lipo", "-archs", app / executable).stdout.split()
     if architectures != ["arm64"]:
         raise ValueError(f"This preview is explicitly arm64; got architectures: {architectures}")
-    helper = Path("Contents/Helpers/spooky-fsearch")
-    if run("/usr/bin/lipo", "-archs", app / helper).stdout.split() != ["arm64"]:
-        raise ValueError("Filename-search helper must match the arm64 preview")
     run("/usr/bin/codesign", "--verify", "--strict", "--deep", app)
     for target in signing_targets(app):
         notarization.reject_debug_entitlement(target)
@@ -231,9 +208,7 @@ def package(args: argparse.Namespace) -> dict:
             "source_executable_sha256": source_sha, "packaged_executable_sha256": packaged_sha,
             "source_signing": source_signing, "packaged_signing": signing_details(staged),
             "upstream_updates_disabled": True, "native_input_enabled": True,
-            "file_search": {"upstream_revision": file_search["revision"],
-                            "names_only": True, "idle_keep_warm": False,
-                            "packaged_executable_sha256": sha256(staged / helper)},
+            "file_search": file_search,
             "dmg": {"file": names[0], "sha256": sha256(dmg), "bytes": dmg.stat().st_size},
         }
         if notary_receipts:

@@ -58,21 +58,17 @@ def verify_contained_app(dmg: Path, manifest: dict, team: str) -> None:
         if not applications.is_symlink() or os.readlink(applications) != '/Applications':
             raise ValueError('Disk image must contain an Applications shortcut pointing exactly to /Applications')
         info = packager.read_bundle(app)
-        provenance = packager.read_file_search(app)
+        file_search = packager.read_file_search(app)
         if (info.get('CFBundleShortVersionString') != manifest['version']
                 or str(info.get('CFBundleVersion', '')) != manifest.get('build_number')
                 or info.get('LSMinimumSystemVersion') != manifest.get('minimum_macos')):
             raise ValueError('Contained app version/build/platform metadata does not match the manifest')
         main = app / 'Contents/MacOS' / info['CFBundleExecutable']
-        helper = app / 'Contents/Helpers/spooky-fsearch'
-        search = manifest.get('file_search', {})
         if (digest(main) != manifest.get('packaged_executable_sha256')
-                or digest(helper) != search.get('packaged_executable_sha256')
-                or provenance['revision'] != search.get('upstream_revision')):
-            raise ValueError('Contained app/helper does not match the packaged manifest hashes/provenance')
-        for executable in (main, helper):
-            if packager.run('/usr/bin/lipo', '-archs', executable).stdout.split() != ['arm64']:
-                raise ValueError('Contained app/helper is not the claimed arm64 build')
+                or file_search != manifest.get('file_search')):
+            raise ValueError('Contained app does not match the packaged manifest hashes/backend')
+        if packager.run('/usr/bin/lipo', '-archs', main).stdout.split() != ['arm64']:
+            raise ValueError('Contained app is not the claimed arm64 build')
         for target in packager.signing_targets(app):
             notarization.verify_developer_signature(target, team=team)
         notarization.verify_ticket(app)
@@ -85,6 +81,8 @@ def artifacts(manifest_path: Path, *, allow_unnotarized_preview: bool = False) -
             or manifest.get("architecture") != "arm64"
             or manifest.get("upstream_updates_disabled") is not True):
         raise ValueError("Expected a Spooky arm64 release manifest with upstream updates disabled")
+    if manifest.get("file_search") != packager.FILE_SEARCH:
+        raise ValueError("Expected native Spotlight file search without an app-owned index")
     if (not isinstance(manifest.get("source_commit"), str)
             or not re.fullmatch(r"[0-9a-fA-F]{7,40}", manifest["source_commit"])
             or not isinstance(manifest.get("version"), str)

@@ -1,199 +1,243 @@
+import CoreServices
 import Foundation
 import Testing
 @testable import Ghostty
 
 struct CommandFileSearchServiceTests {
-    @Test func diagnosticIndexOverridesAreOptInAndRequireAbsolutePaths() {
-        let disabled = CommandFileSearchService.diagnosticConfiguration(
-            enabled: false, indexDirectory: "/tmp/private-fixture", outputPath: "/tmp/measure.jsonl")
-        #expect(disabled.indexDirectory == nil)
-        #expect(disabled.outputPath == nil)
-        let enabled = CommandFileSearchService.diagnosticConfiguration(
-            enabled: true, indexDirectory: "/tmp/private-fixture", outputPath: "/tmp/measure.jsonl")
-        #expect(enabled.indexDirectory?.path == "/tmp/private-fixture")
-        #expect(enabled.outputPath == "/tmp/measure.jsonl")
-        let invalid = CommandFileSearchService.diagnosticConfiguration(
-            enabled: true, indexDirectory: "relative", outputPath: "/tmp/nul\0invalid")
-        #expect(invalid.indexDirectory == nil)
-        #expect(invalid.outputPath == nil)
-    }
-
-    @Test func startupStartsOnceAndReportsReadinessWithoutInventingASearch() async throws {
+    @Test func initializationAndDirectoryNavigationNeverQuerySpotlight() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let first = try await service.indexState()
-        #expect(first == .creating)
-        try await service.startIndexing()
-        try await service.startIndexing()
-        #expect(try await service.indexState() == .ready)
-        let requests = try String(contentsOf: root.appendingPathComponent("index/requests"), encoding: .utf8)
-        #expect(!requests.contains("\"query\""))
-        let launches = try String(contentsOf: root.appendingPathComponent("index/launches"), encoding: .utf8)
-        #expect(launches == "launch\n")
-        let result = try await service.search(query: "first", near: root)
-        #expect(result.first?.name == "result-1")
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        try Data().write(to: root.appendingPathComponent("local.txt"))
+        let children = try await service.search(query: " ", near: root)
+        #expect(children.map(\.name) == ["local.txt"])
+        #expect(await probe.requests.isEmpty)
         await service.shutdown()
-    }
-
-    @Test func readinessPollDoesNotCancelPendingSearch() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let search = Task { try await service.search(query: "slow", near: root) }
-        try await waitForRequest(in: root)
-        #expect(try await service.indexState() == .creating)
-        #expect(try await search.value.first?.name == "result-1")
-        await service.shutdown()
-    }
-
-    @Test func searchDoesNotCancelPendingReadiness() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root, slowStatus: true)
-        let readiness = Task { try await service.indexState() }
-        try await waitForRequest(in: root)
-        let result = try await service.search(query: "first", near: root)
-        #expect(try await readiness.value == .creating)
-        #expect(result.first?.name == "result-1")
-        await service.shutdown()
-    }
-
-    @Test func stoppedReaderProducesBackpressureInsteadOfBlockingCancellation() throws {
-        let pipe = Pipe()
-        defer {
-            try? pipe.fileHandleForReading.close()
-            try? pipe.fileHandleForWriting.close()
-        }
-        try CommandFileSearchPipe.configure(pipe.fileHandleForWriting)
-        let bytes = Data(repeating: 120, count: 16_384)
-        var reachedBackpressure = false
-        for _ in 0..<256 {
-            do { try CommandFileSearchPipe.write(bytes, to: pipe.fileHandleForWriting) } catch {
-                reachedBackpressure = true
-                break
-            }
-        }
-        #expect(reachedBackpressure)
-        // Draining the real kernel pipe demonstrates that it was full, not closed.
-        let retained = try pipe.fileHandleForReading.read(upToCount: 16_384)
-        #expect(retained?.isEmpty == false)
+        #expect(await probe.requests.isEmpty)
     }
 
     @Test func directoryNavigationIsBoundedSortedAndIncludesHiddenFilesAndDirectoryLinks() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let directory = root.appendingPathComponent("folder")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let folder = root.appendingPathComponent("folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        try Data().write(to: folder.appendingPathComponent("nested.txt"))
         try Data().write(to: root.appendingPathComponent("z.txt"))
         try Data().write(to: root.appendingPathComponent(".hidden"))
-        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("linked"), withDestinationURL: directory)
-        try Data().write(to: directory.appendingPathComponent("nested.txt"))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("alias"), withDestinationURL: folder)
         let service = CommandFileSearchService()
-        let entries = try await service.children(of: root)
-        #expect(entries.map(\.name) == ["folder", "linked", ".hidden", "z.txt"])
-        let firstEntriesAreDirectories = entries.prefix(2).allSatisfy { $0.isDirectory }
+        let children = try await service.children(of: root)
+        #expect(children.map(\.name) == ["alias", "folder", ".hidden", "z.txt"])
+        let firstEntriesAreDirectories = children.prefix(2).allSatisfy(\.isDirectory)
         #expect(firstEntriesAreDirectories)
-        #expect(!entries.contains { $0.name == "nested.txt" })
+        #expect(!children.contains { $0.name == "nested.txt" })
         #expect(try await service.children(of: root, limit: 2).count == 2)
-        #expect(Set(entries.map(\.id)).count == entries.count)
     }
 
-    @Test func emptyQueryListsTheRequestedScopeWithoutLaunchingAHelper() async throws {
+    @Test func emptyQueryUsesExplicitFolderWithoutAProvider() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        try Data().write(to: root.appendingPathComponent("local.txt"))
-        let service = CommandFileSearchService(executableURL: root.appendingPathComponent("missing"))
-        let entries = try await service.search(query: " ", near: URL(fileURLWithPath: "/"), scope: root)
-        #expect(entries.map(\.name) == ["local.txt"])
+        try Data().write(to: root.appendingPathComponent("scoped.txt"))
+        let service = CommandFileSearchService(metadataSearch: { _ in
+            Issue.record("Directory navigation must not request the system index")
+            return []
+        })
+        let results = try await service.search(query: "", near: URL(fileURLWithPath: "/"), scope: root)
+        #expect(results.map(\.name) == ["scoped.txt"])
     }
 
-    @Test func invalidQueryFailsBeforeProcessLaunch() async throws {
-        let service = CommandFileSearchService(executableURL: URL(fileURLWithPath: "/missing"))
-        await #expect(throws: CommandFileSearchService.Failure.invalidRequest) {
-            try await service.search(query: String(repeating: "é", count: 513), near: URL(fileURLWithPath: "/tmp"))
-        }
-        await #expect(throws: CommandFileSearchService.Failure.invalidRequest) {
-            try await service.search(query: "name", near: URL(string: "https://example.com")!)
-        }
-    }
-
-    @Test func protocolRejectsDuplicatePathsAndRelativePaths() throws {
-        let id = UUID()
-        for entries in [
-            [["path": "relative", "name": "relative", "isDirectory": false]],
-            [["path": "/a", "name": "a", "isDirectory": false],
-             ["path": "/a", "name": "a", "isDirectory": true]]
-        ] {
-            let data = try JSONSerialization.data(withJSONObject: [
-                "id": id.uuidString, "entries": entries, "cancelled": false
-            ])
-            #expect(throws: CommandFileSearchService.Failure.invalidResponse) {
-                try CommandFileSearchService.decodeResponse(data)
+    @Test func invalidQueriesFailBeforeCallingTheProvider() async {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        for query in [String(repeating: "x", count: 1_025), "a\0b"] {
+            await #expect(throws: CommandFileSearchService.Failure.invalidRequest) {
+                try await service.search(query: query, near: URL(fileURLWithPath: "/tmp"))
             }
         }
-    }
-
-    @Test func helperIsReusedAndReceivesLiteralText() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let first = try await service.search(query: "grep:secret", near: root)
-        let second = try await service.search(query: "git:status", near: root)
-        #expect(first.first?.name == "result-1")
-        #expect(second.first?.name == "result-2")
-        let requests = try String(contentsOf: root.appendingPathComponent("index/requests"), encoding: .utf8)
-        #expect(requests.contains("grep:secret"))
-        #expect(requests.contains("git:status"))
-        await service.shutdown()
-    }
-
-    @Test func cancelledLateResponseCannotReplaceTheNextRequest() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let first = Task { try await service.search(query: "slow", near: root) }
-        try await waitForRequest(in: root)
-        first.cancel()
-        await #expect(throws: CancellationError.self) { try await first.value }
-        let next = try await service.search(query: "next", near: root)
-        #expect(next.first?.name == "result-2")
-        await service.shutdown()
-    }
-
-    @Test func newSearchSupersedesPendingSearchEvenWithoutCallerCancellation() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let first = Task { try await service.search(query: "slow", near: root) }
-        try await waitForRequest(in: root)
-        let next = try await service.search(query: "next", near: root)
-        await #expect(throws: CancellationError.self) { try await first.value }
-        #expect(next.first?.name == "result-2")
-        await service.shutdown()
-    }
-
-    @Test func timeoutCompletesTheRequest() async throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root, timeout: .milliseconds(20))
-        await #expect(throws: CommandFileSearchService.Failure.timedOut) {
-            try await service.search(query: "slow", near: root)
+        await #expect(throws: CommandFileSearchService.Failure.invalidRequest) {
+            try await service.search(query: "x", near: URL(string: "https://example.com")!)
         }
-        await service.shutdown()
+        #expect(await probe.requests.isEmpty)
     }
 
-    @Test func shutdownCancelsPendingWorkAndNextSearchStartsFresh() async throws {
+    @Test func predicateQuotesExpressionsAndDoesNotTreatPunctuationAsQuerySyntax() {
+        #expect(CommandFileSearchService.predicate(for: "foo bar") ==
+                "kMDItemFSName == \"*f*o*o*\"cd && kMDItemFSName == \"*b*a*r*\"cd")
+        #expect(CommandFileSearchService.predicate(for: "a\"b\\c*?") ==
+                #"kMDItemFSName == "*a*\"*b*\\*c*****"cd"#)
+        for literal in ["report", "café", "grep:secret", "a\"||kMDItemTextContent==\"*", "star*?.txt", "back\\slash"] {
+            let predicate = CommandFileSearchService.predicate(for: literal)
+            #expect(MDQueryCreate(kCFAllocatorDefault, predicate as CFString, nil, nil) != nil)
+        }
+    }
+
+    @Test func wildcardCharactersAreMatchedLiterallyAfterTheMetadataPrefilter() {
+        let candidates = [entry("/w/report.txt"), entry("/w/report*.txt"), entry("/w/report?.txt")]
+        #expect(CommandFileSearchService.ranked(candidates, query: "*", near: "/w", scope: nil, limit: 100)
+            .map(\.name) == ["report*.txt"])
+        #expect(CommandFileSearchService.ranked(candidates, query: "?", near: "/w", scope: nil, limit: 100)
+            .map(\.name) == ["report?.txt"])
+    }
+
+    @Test func rankingPrefersExactThenPrefixSubstringAndFuzzyWithCwdTieBreaks() {
+        let candidates = [entry("/elsewhere/kitchen"), entry("/w/kitchen"), entry("/w/kitchen-tests"),
+                          entry("/w/my-kitchen"), entry("/w/k_i_t_c_h_e_n"), entry("/w/unrelated")]
+        #expect(CommandFileSearchService.ranked(candidates, query: "kitchen", near: "/w", scope: nil, limit: 100)
+            .map(\.path) == ["/w/kitchen", "/elsewhere/kitchen", "/w/kitchen-tests", "/w/my-kitchen", "/w/k_i_t_c_h_e_n"])
+        #expect(CommandFileSearchService.ranked([entry("/w/CaféMenu")], query: "cafe", near: "/w", scope: nil, limit: 100)
+            .count == 1)
+    }
+
+    @Test func rankingFiltersMalformedDuplicatesAndOutOfScopeCandidates() {
+        let candidates = [entry("/workspace/a.txt"), entry("/workspace/a.txt"), entry("/workspace-other/a.txt"),
+                          entry("relative/a.txt"), entry("/workspace/b.txt"),
+                          CommandFileSearchEntry(path: "/workspace/a", name: "a/b", isDirectory: false)]
+        #expect(CommandFileSearchService.ranked(candidates, query: "a", near: "/", scope: "/workspace", limit: 100)
+            .map(\.path) == ["/workspace/a.txt"])
+    }
+
+    @Test func searchBoundsCandidatesAndReturnedRows() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { request in
+            _ = try await probe.search(request)
+            return (0..<3_000).map { entry("/w/file-\($0)") }
+        })
+        let results = try await service.search(query: "file", near: URL(fileURLWithPath: "/w"),
+                                               scope: URL(fileURLWithPath: "/w"), limit: 999)
+        #expect(results.count == 200)
+        let request = try #require(await probe.requests.first)
+        #expect(request.limit == 2_048)
+        #expect(request.scope == "/w")
+        let bounded = CommandFileSearchService.ranked((0..<2_048).map { entry("/w/unrelated-\($0)") }
+            + [entry("/w/exact")], query: "exact", near: "/w", scope: nil, limit: 100)
+        #expect(bounded.isEmpty)
+    }
+
+    @Test func searchSupersedesAndCancelsItsPreviousMetadataQuery() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        let first = Task { try await service.search(query: "slow", near: URL(fileURLWithPath: "/w")) }
+        try await waitForQuery(probe)
+        let next = try await service.search(query: "fast", near: URL(fileURLWithPath: "/w"))
+        await #expect(throws: CancellationError.self) { try await first.value }
+        #expect(next.map(\.name) == ["fast.txt"])
+        #expect(await probe.cancelled == 1)
+    }
+
+    @Test func callerCancellationStopsTheUnderlyingMetadataQuery() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        let request = Task { try await service.search(query: "slow", near: URL(fileURLWithPath: "/w")) }
+        try await waitForQuery(probe)
+        request.cancel()
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(await probe.cancelled == 1)
+    }
+
+    @Test func timeoutCancelsTheUnderlyingMetadataQuery() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) }, timeout: .milliseconds(20))
+        await #expect(throws: CommandFileSearchService.Failure.timedOut) {
+            try await service.search(query: "slow", near: URL(fileURLWithPath: "/w"))
+        }
+        #expect(await probe.cancelled == 1)
+    }
+
+    @Test func shutdownCancelsSearchAndTheNextRequestStillWorks() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        let request = Task { try await service.search(query: "slow", near: URL(fileURLWithPath: "/w")) }
+        try await waitForQuery(probe)
+        await service.shutdown()
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(await probe.cancelled == 1)
+        #expect(try await service.search(query: "fast", near: URL(fileURLWithPath: "/w")).map(\.name) == ["fast.txt"])
+    }
+
+    @Test func directoryNavigationSupersedesAnIndexedSearch() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let service = try fakeService(root)
-        let first = Task { try await service.search(query: "slow", near: root) }
-        try await waitForRequest(in: root)
-        await service.shutdown()
-        await #expect(throws: CancellationError.self) { try await first.value }
-        let next = try await service.search(query: "next", near: root)
-        #expect(next.first?.name == "result-1")
-        await service.shutdown()
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        let request = Task { try await service.search(query: "slow", near: root) }
+        try await waitForQuery(probe)
+        #expect(try await service.search(query: "", near: root).isEmpty)
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(await probe.cancelled == 1)
+    }
+
+    @Test func typedFilenameFindsUnindexedImmediateChildren() async throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: root.appendingPathComponent("report-final.txt"))
+        let service = CommandFileSearchService(metadataSearch: { _ in [] })
+        let results = try await service.search(query: "rptfnl", near: root, scope: root)
+        #expect(results.map(\.name) == ["report-final.txt"])
+    }
+
+    @Test func scopedSearchPreservesASymlinkDirectoryAlias() async throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target")
+        let alias = root.appendingPathComponent("alias")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+        try Data().write(to: target.appendingPathComponent("report.txt"))
+        let indexed = entry(target.resolvingSymlinksInPath().appendingPathComponent("report.txt").path)
+        let service = CommandFileSearchService(metadataSearch: { _ in [indexed] })
+        let results = try await service.search(query: "report", near: root, scope: alias)
+        #expect(results.map(\.path) == [alias.appendingPathComponent("report.txt").path])
+    }
+
+    @Test func metadataParentAliasesNormalizeWithoutResolvingTheResultSymlink() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("target.txt")
+        let link = root.appendingPathComponent("link.txt")
+        try Data().write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let parentAlias = root.appendingPathComponent("parent-alias")
+        try FileManager.default.createSymbolicLink(at: parentAlias, withDestinationURL: root)
+        let normalized = try CommandFileSearchService.normalized([entry(parentAlias.appendingPathComponent("link.txt").path)],
+                                                                preferredDirectory: root)
+        #expect(normalized.map(\.path) == [link.path])
+        #expect(normalized.first?.name == "link.txt")
+    }
+
+    @Test func unavailableSpotlightDoesNotHideMatchingLocalFiles() async throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: root.appendingPathComponent("report.txt"))
+        let service = CommandFileSearchService(metadataSearch: { _ in
+            throw CommandFileSearchService.Failure.unavailable("Indexing disabled")
+        })
+        #expect(try await service.search(query: "report", near: root).map(\.name) == ["report.txt"])
+    }
+
+    @Test func contiguousAndFuzzyPatternsUseASingleBoundedNativeQuery() async throws {
+        let probe = MetadataProbe()
+        let service = CommandFileSearchService(metadataSearch: { try await probe.search($0) })
+        #expect(try await service.search(query: "fast", near: URL(fileURLWithPath: "/w")).count == 1)
+        #expect(await probe.requests.count == 1)
+        #expect(await probe.requests.first?.predicate ==
+                #"(kMDItemFSName == "*fast*"cd) || (kMDItemFSName == "*f*a*s*t*"cd)"#)
+        #expect(CommandFileSearchService.metadataPredicate(for: "a") == #"kMDItemFSName == "*a*"cd"#)
+    }
+
+    /// Opt-in because CI and developer volumes may disable Spotlight. Point this
+    /// to an existing, indexed file (e.g. /Applications/Spooky.app) to validate the
+    /// actual query dialect and MDItem extraction, without triggering indexing.
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["SPOOKY_SPOTLIGHT_FIXTURE_PATH"] != nil))
+    func nativeMetadataQueryFindsAnExistingIndexedFilename() async throws {
+        let path = try #require(ProcessInfo.processInfo.environment["SPOOKY_SPOTLIGHT_FIXTURE_PATH"])
+        let file = URL(fileURLWithPath: path)
+        let service = CommandFileSearchService()
+        // Deliberately list a missing folder: a local directory fallback must not
+        // make this integration check pass if the native metadata query is broken.
+        let results = try await service.search(query: file.lastPathComponent,
+            near: URL(fileURLWithPath: "/spooky-no-local-fixture-\(UUID())"))
+        #expect(results.contains { $0.path == path })
     }
 
     private func fixture() throws -> URL {
@@ -202,47 +246,31 @@ struct CommandFileSearchServiceTests {
         return root
     }
 
-    private func fakeService(
-        _ root: URL,
-        timeout: Duration = .seconds(3),
-        slowStatus: Bool = false
-    ) throws -> CommandFileSearchService {
-        let executable = root.appendingPathComponent("helper")
-        let script = #"""
-        #!/bin/sh
-        count=0
-        statuses=0
-        printf 'launch\n' >> "$1/launches"
-        while IFS= read -r line; do
-          case "$line" in *'"op":"cancel"'*) continue;; esac
-          printf '%s\n' "$line" >> "$1/requests"
-          rest=${line#*\"id\":\"}
-          id=${rest%%\"*}
-          case "$line" in *'"op":"status"'*)
-            STATUS_DELAY
-            statuses=$((statuses + 1))
-            state=ready
-            if [ "$statuses" -eq 1 ]; then state=creating; fi
-            printf '{"id":"%s","entries":[],"cancelled":false,"state":"%s"}\n' "$id" "$state"
-            continue;;
-          esac
-          count=$((count + 1))
-          case "$line" in *'"query":"slow"'*) /bin/sleep 0.15;; esac
-          printf '{"id":"%s","entries":[{"path":"/tmp/result-%s","name":"result-%s","isDirectory":false}],"cancelled":false}\n' "$id" "$count" "$count"
-        done
-        """#
-        let contents = script.replacingOccurrences(of: "STATUS_DELAY", with: slowStatus ? "/bin/sleep 0.15" : ":")
-        try contents.write(to: executable, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-        return CommandFileSearchService(executableURL: executable,
-                                        indexDirectory: root.appendingPathComponent("index"), timeout: timeout)
-    }
-
-    private func waitForRequest(in root: URL) async throws {
-        for _ in 0..<200 {
-            if FileManager.default.fileExists(atPath: root.appendingPathComponent("index/requests").path) { return }
-            try await Task.sleep(for: .milliseconds(5))
+    private func waitForQuery(_ probe: MetadataProbe) async throws {
+        for _ in 0..<500 {
+            if await !probe.requests.isEmpty { return }
+            try await Task.sleep(for: .milliseconds(1))
         }
         throw CommandFileSearchService.Failure.timedOut
+    }
+}
+
+private func entry(_ path: String) -> CommandFileSearchEntry {
+    CommandFileSearchEntry(path: path, name: (path as NSString).lastPathComponent, isDirectory: false)
+}
+
+private actor MetadataProbe {
+    private(set) var requests: [CommandFileSearchService.MetadataRequest] = []
+    private(set) var cancelled = 0
+
+    func search(_ request: CommandFileSearchService.MetadataRequest) async throws -> [CommandFileSearchEntry] {
+        requests.append(request)
+        if request.predicate.contains("s*l*o*w") || request.predicate.contains("*slow*") {
+            do { try await Task.sleep(for: .seconds(60)) } catch {
+                cancelled += 1
+                throw error
+            }
+        }
+        return [entry("/w/fast.txt")]
     }
 }

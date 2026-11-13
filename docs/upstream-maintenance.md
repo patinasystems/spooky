@@ -76,7 +76,7 @@ These are graph counts including merge commits, not 20 separate features.
 
 Ghostty's [source build guide](https://ghostty.org/docs/install/build) describes
 upstream requirements. Spooky's [build guide](../prototype/native-input/README.md)
-owns fork-specific commands, helper packaging, and native input checks.
+owns fork-specific commands, release packaging, and native input checks.
 
 ## Fork patch boundaries and verification
 
@@ -86,7 +86,7 @@ owns fork-specific commands, helper packaging, and native input checks.
 | Native ABI and callback lifetime | `include/ghostty.h`, `apprt/embedded.zig`, `apprt/action.zig`, Swift Ghostty bridge | Rebuild GhosttyKit before Swift; targeted handoff, submission-presentation, focus and bridge tests; exercise splits, tab changes, close, and app backgrounding. Keep C declarations, Zig layouts, and Swift calls in agreement. |
 | Metal rendering and viewport | `CommandChrome`, `NativeViewport`, `NativeSubmissionGate`, `NativePresentation`, generic renderer, Metal frame/layer and both shader backends | Core geometry, clipping, semantic input tint, cursor suppression and presentation tests; compile supported renderer paths; visible multiline submit, raw/TUI handoff, selection and bottom/scrollback checks. Parser receipt is not proof of a displayed frame. |
 | AppKit input and appearance | `NativeCommandSurfaceHost`, native text/completion/history/file-picker controls, surface view and window controllers | Swift editor/IME/selection/undo, completion/history/file picker/path tests; dark/light appearance, backing scale, system accent, search, clipboard, and key-window focus checks. Preserve upstream keyboard and pointer behavior when native editing is inactive. |
-| Release identity and dependencies | Bundle settings, `AppBranding`, updater guards, fsearch pins/license, installer scripts and Actions | Distinct Spooky bundle/app identity, upstream updates disabled, no test/capture/debug residue, exact helper provenance, code signature and release-mode checks, DMG install and anonymous public checksum verification. |
+| Release identity and dependencies | Bundle settings, `AppBranding`, updater guards, native filename search, installer scripts and Actions | Distinct Spooky bundle/app identity, upstream updates disabled, no test/capture/debug residue, no obsolete indexer executable, code signature and release-mode checks, DMG install and anonymous public checksum verification. |
 
 Keep fork-specific code in dedicated files where possible. When upstream gains
 an equivalent facility, remove the superseded patch after testing compatibility
@@ -106,9 +106,8 @@ after every test was skipped. Upstream-only skipped jobs are **not Spooky test
 coverage**; porting the native/core build suite to Spooky-owned CI remains work.
 
 **Spooky Release Tools** runs the mocked release-admission and hermetic Git
-tests on Ubuntu/Python 3.12 when those scripts or fsearch provenance inputs
-change, or on manual dispatch. It has read-only permissions and a five-minute
-limit. Passing these guard tests is not proof of Apple signing or notarization.
+tests on Ubuntu/Python 3.12 when those scripts change, or on manual dispatch.
+It has read-only permissions and a five-minute limit. Passing these guard tests is not proof of Apple signing or notarization.
 
 Spooky's updater is deliberately disabled in the bundle, updater start/check
 entry points, and feed delegate. Ghostty's historical feed URLs and public key
@@ -118,8 +117,7 @@ release process before any guard is removed. Until then, users update through
 the [Spooky download](https://downloads.patinasystems.com/spooky/Spooky.dmg).
 
 Retain the upstream MIT [license and copyright](../LICENSE) and Ghostty
-attribution. Preserve separate dependency notices, including the filename-search
-helper's pinned source/license. A working preview URL is not evidence of
+attribution. Preserve the notices for dependencies still distributed with the app. A working preview URL is not evidence of
 Developer ID signing or Apple notarization; use the packaging manifest and
 installer checks to describe the actual release accurately.
 

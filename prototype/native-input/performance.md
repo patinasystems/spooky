@@ -1073,6 +1073,9 @@ typing or scrolling improvement from an idle file-read reduction.
 
 ## November 3: docking, shell and filename-search integration
 
+The filename-helper measurements below are historical. On November 14 the
+app-owned indexer was removed; current file search uses macOS Spotlight.
+
 These measurements used controlled synthetic zsh fixtures on the user's busy
 Mac. The before/after command runs were interleaved; they are not idle-machine
 or whole-app latency claims. Native submission includes the request-file bridge
@@ -1213,7 +1216,7 @@ crawled about 18.2 million names in 151.99 seconds, then built in 2.77 seconds
 and saved in 0.20 seconds. This is one loaded-machine observation; filesystem
 cache state, other jobs, and the normal app's watcher were uncontrolled.
 No personal index was deleted or replaced. See the
-[helper diagnostic settings](../../scripts/spooky/fsearch/README.md) for the
+[historical helper diagnostic settings](https://github.com/patinasystems/spooky/blob/8ca73fbc1354b1e6cebb091e05e6487a48b4d789/scripts/spooky/fsearch/README.md) for the
 opt-in log path and disposable index-directory override. Records contain no
 filenames, query text, or file contents.
 
