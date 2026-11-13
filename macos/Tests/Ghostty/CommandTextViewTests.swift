@@ -338,6 +338,7 @@ struct CommandTextViewTests {
         let editor = CommandInputView(frame: NSRect(x: 0, y: 0, width: 400, height: 30))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
                               styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
         defer { window.close() }
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
