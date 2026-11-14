@@ -2055,12 +2055,14 @@ pub const CAPI = struct {
         const term = core.renderer_state.terminal;
         const screen = term.screens.active;
         const scrollbar = screen.pages.scrollbar();
+        const scroll_offset_y = core.renderer_state.viewportScrollOffset(size);
+        const prompt_geometry = renderer.NativePresentation.PromptGeometry.capture(term, size, scrollbar, scroll_offset_y);
         layout.* = .{
             .snapshot_valid = true,
             .primary = term.screens.active_key == .primary,
             .viewport_at_bottom = screen.viewportIsBottom(),
             .has_scrollback = term.screens.active_key == .primary and scrollbar.total > scrollbar.len,
-            .cursor_valid = false,
+            .cursor_valid = prompt_geometry.cursor_valid,
             .columns = screen.pages.cols,
             .rows = screen.pages.rows,
             .scrollback_rows = scrollbar.total -| scrollbar.len,
@@ -2071,8 +2073,8 @@ pub const CAPI = struct {
             .cell_height = cell_height,
             .padding_left = padding_left,
             .padding_top = padding_top,
-            .cursor_x = 0,
-            .cursor_y = 0,
+            .cursor_x = prompt_geometry.cursor_x / scale.x,
+            .cursor_y = prompt_geometry.cursor_y / scale.y,
             .last_started_id = term.last_started_command_id,
             .last_primary_input_id = term.last_primary_input_id,
             .native_state_revision = term.native_input.revision,
@@ -2088,14 +2090,6 @@ pub const CAPI = struct {
             @memcpy(layout.native_cwd[0..pwd.len], pwd);
         };
         if (!layout.primary) return 0;
-        if (screen.pages.pointFromPin(.viewport, screen.cursor.page_pin.*)) |point| {
-            if (point.viewport.y < screen.pages.rows and point.viewport.x < screen.pages.cols) {
-                layout.cursor_valid = true;
-                layout.cursor_x = padding_left + @as(f64, @floatFromInt(point.viewport.x)) * cell_width;
-                layout.cursor_y = padding_top + @as(f64, @floatFromInt(point.viewport.y)) * cell_height;
-            }
-        }
-
         const output = blocks orelse return 0;
         if (capacity == 0) return 0;
         screen.command_blocks.prune(&screen.pages);
@@ -2111,10 +2105,10 @@ pub const CAPI = struct {
             output[written] = .{
                 .id = block.id,
                 .flags = region.flags,
-                .header_y = padding_top + @as(f64, @floatFromInt(region.header)) * cell_height,
-                .input_y = padding_top + @as(f64, @floatFromInt(region.input)) * cell_height,
-                .output_y = padding_top + @as(f64, @floatFromInt(region.output)) * cell_height,
-                .end_y = padding_top + @as(f64, @floatFromInt(region.end)) * cell_height,
+                .header_y = renderer.NativePresentation.rowY(size, region.header, scroll_offset_y) / scale.y,
+                .input_y = renderer.NativePresentation.rowY(size, region.input, scroll_offset_y) / scale.y,
+                .output_y = renderer.NativePresentation.rowY(size, region.output, scroll_offset_y) / scale.y,
+                .end_y = renderer.NativePresentation.rowY(size, region.end, scroll_offset_y) / scale.y,
                 .complete = block.complete,
             };
             written += 1;

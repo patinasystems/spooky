@@ -245,7 +245,18 @@ pub inline fn present(self: *Metal, target: Target, sync: bool, snapshot: render
 fn nativeInputPresented(context: ?*anyopaque, snapshot: rendererpkg.NativePresentation.Snapshot) void {
     const surface: *apprt.Surface = @ptrCast(@alignCast(context orelse return));
     surface.core_surface.native_presented_generation = snapshot.generation;
-    const prompt: apprt.action.NativeInputPrompt = .{ .id = snapshot.prompt_id, .generation = snapshot.generation };
+    const geometry = snapshot.prompt_geometry;
+    const prompt: apprt.action.NativeInputPrompt = .{
+        .id = snapshot.prompt_id,
+        .generation = snapshot.generation,
+        .cursor_valid = geometry.cursor_valid,
+        .cursor_x = geometry.cursor_x,
+        .cursor_y = geometry.cursor_y,
+        .viewport_width = geometry.viewport_width,
+        .viewport_height = geometry.viewport_height,
+        .columns = geometry.columns,
+        .rows = geometry.rows,
+    };
     // A prompt-generation transition can notify without proving that C's
     // glyphs are visible (for example a cropped footer during D/A). Such a
     // notification must not retire the native editor or completion overlay.

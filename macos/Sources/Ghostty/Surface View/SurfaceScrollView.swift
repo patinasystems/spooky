@@ -198,6 +198,13 @@ class SurfaceScrollView: NSView {
         }
     }
 
+    /// An inline editor is a sibling above this view. Leave the history
+    /// scrollbar's entire hit area uncovered, even while its knob is faded.
+    /// Docked editors need no gutter because their track ends above the dock.
+    var inlineEditorTrailingInset: CGFloat {
+        SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: self)
+    }
+
     // MARK: Scrolling
 
     private func synchronizeAppearance() {
@@ -410,6 +417,15 @@ class SurfaceNativeScrollView: NSScrollView {
 }
 
 enum SurfaceScrollerTrack {
+    /// Derive the gutter from AppKit's laid-out track, not the transient knob.
+    /// Hiding, fading, or dragging the knob must not reflow an inline draft.
+    @MainActor
+    static func trailingInset(in scrollView: NSScrollView, relativeTo view: NSView) -> CGFloat {
+        guard scrollView.hasVerticalScroller, let scroller = scrollView.verticalScroller else { return 0 }
+        let track = view.convert(scroller.bounds, from: scroller)
+        return min(max(0, view.bounds.maxX - track.minX), max(0, view.bounds.width))
+    }
+
     @MainActor
     @discardableResult
     static func applyBottomInset(_ height: CGFloat, to scrollView: NSScrollView) -> Bool {

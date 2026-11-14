@@ -429,9 +429,7 @@ final class CommandCompletionController {
 
     func updatePosition() {
         guard !submissionPresentationHeld, let textView else { return }
-        if listVisible {
-            popup?.updatePosition(for: textView, diagnosticInputID: CommandInputDiagnostics.currentInputID)
-        }
+        updatePopupPosition()
         if canSuggest, let inlineSuggestion {
             // Draft/candidate edits compute this projection in present();
             // selection changes invalidate it. A geometry or appearance
@@ -442,6 +440,13 @@ final class CommandCompletionController {
             // draft. Keep its projection available for the next valid layout.
             ghost.removeFromSuperview()
         }
+    }
+
+    /// Inline prediction is already a child of the moving editor; only the
+    /// window-level popup needs a new anchor during terminal pixel scrolling.
+    func updatePopupPosition() {
+        guard !submissionPresentationHeld, listVisible, let textView else { return }
+        popup?.updatePosition(for: textView, diagnosticInputID: CommandInputDiagnostics.currentInputID)
     }
 
     private func updateInlineSuggestion() {

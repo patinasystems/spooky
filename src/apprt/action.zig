@@ -749,7 +749,18 @@ pub const InitialSize = extern struct {
     };
 };
 
-pub const NativeInputPrompt = extern struct { id: [65]u8, generation: [65]u8 };
+pub const NativeInputPrompt = extern struct {
+    id: [65]u8,
+    generation: [65]u8,
+    /// Immutable prompt geometry in backing pixels from the assigned frame.
+    cursor_valid: bool,
+    cursor_x: f64,
+    cursor_y: f64,
+    viewport_width: u32,
+    viewport_height: u32,
+    columns: u32,
+    rows: u32,
+};
 
 pub const NativeInputPresented = extern struct {
     serial: u64,
@@ -757,6 +768,19 @@ pub const NativeInputPresented = extern struct {
     block_id: [*:0]const u8,
     prompt: *const NativeInputPrompt,
 };
+
+test "native presentation prompt ABI matches C geometry fields" {
+    const c = @import("ghostty.h");
+    const header = c.ghostty_native_prompt_s;
+    try std.testing.expectEqual(@sizeOf(header), @sizeOf(NativeInputPrompt));
+    try std.testing.expectEqual(@alignOf(header), @alignOf(NativeInputPrompt));
+    const fields = @typeInfo(NativeInputPrompt).@"struct".field_names;
+    try std.testing.expectEqual(@typeInfo(header).@"struct".field_names.len, fields.len);
+    inline for (fields) |name| {
+        try std.testing.expectEqual(@offsetOf(header, name), @offsetOf(NativeInputPrompt, name));
+        try std.testing.expectEqual(@sizeOf(@FieldType(header, name)), @sizeOf(@FieldType(NativeInputPrompt, name)));
+    }
+}
 
 pub const ResizeWindow = extern struct {
     width: u32,

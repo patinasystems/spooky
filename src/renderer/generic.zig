@@ -1461,6 +1461,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 native_presented_id: [65]u8,
                 native_prompt_id: [65]u8,
                 native_generation: [65]u8,
+                native_prompt_geometry: renderer.NativePresentation.PromptGeometry,
                 native_layout_pending: bool,
                 native_running: bool,
                 native_awaiting_prompt: bool,
@@ -1670,6 +1671,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .native_presented_id = state.terminal.last_started_command_id,
                     .native_prompt_id = state.terminal.native_input.block_id,
                     .native_generation = native_generation,
+                    .native_prompt_geometry = if (native_generation[0] != 0)
+                        renderer.NativePresentation.PromptGeometry.capture(state.terminal, self.size, raw_scrollbar, scroll_offset_y)
+                    else
+                        .{},
                     .native_layout_pending = native_generation[0] != 0 and
                         (!std.mem.eql(u8, &state.command_chrome.current_id, &state.terminal.native_input.block_id) or
                             (state.native_viewport.footer_height > 0 and native_viewport.footer_top == null)),
@@ -1900,6 +1905,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.native_presentation.block_id = critical.native_presented_id;
                     self.native_presentation.acknowledge = critical.native_presentation_valid;
                     self.native_presentation.prompt_id = critical.native_prompt_id;
+                    self.native_presentation.prompt_geometry = critical.native_prompt_geometry;
                     self.native_presentation.awaiting_native_layout = critical.native_layout_pending;
                     self.native_presentation.generation = if (!self.command_chrome_dirty)
                         critical.native_generation

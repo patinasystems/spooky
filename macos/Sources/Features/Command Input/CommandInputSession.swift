@@ -14,6 +14,7 @@ final class CommandInputSession {
     var onHistory: ((CommandHistoryResponse) -> Void)?
     var onPromptPresented: (() -> Void)?
     var onFramePresented: (() -> Void)?
+    var onGeometryPresented: (() -> Void)?
     var onReplayPromptKey: ((NSEvent, UInt64?) -> Void)?
     private var submissionPresentation = CommandSubmissionPresentation()
     private var hasEditorFont = false
@@ -66,6 +67,7 @@ final class CommandInputSession {
     private(set) var focusRequest: UInt64 = 0
     private(set) var editorVisible = false
     private(set) var layout = CommandTerminalLayout()
+    private(set) var presentedGeometry: CommandPromptGeometry?
     private(set) var blockMetadata: [String: CommandBlockMetadata] = [:]
     private(set) var currentBlockID: String?
     /// The caption/draft identity that has passed the parsed primary-input gate.
@@ -449,7 +451,17 @@ final class CommandInputSession {
         if let surface = surfaceView?.surface { ghostty_surface_cancel_native_submission(surface) }
     }
 
-    func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil) {
+    func nativeInputPresented(blockID: String?, serial: UInt64, promptID: String? = nil, generation: String? = nil,
+                              geometry: CommandPromptGeometry? = nil) {
+        presentedGeometry = geometry
+        // Scrolling an already-owned prompt changes only its position. Do not
+        // reread the PTY, rebuild chrome, or run submission/focus work per frame.
+        if geometry != nil, generation != nil, attachedPromptGeneration == generation,
+           promptID == currentBlockID, isEditable, !isTransferringSubmission,
+           !isHoldingSubmissionPresentation {
+            onGeometryPresented?()
+            return
+        }
         defer { onFramePresented?() }
         let released = submissionPresentation.presented(blockID: blockID, serial: serial,
                                                         readyPromptID: generation == nil ? nil : promptID)

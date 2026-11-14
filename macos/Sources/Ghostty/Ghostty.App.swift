@@ -794,15 +794,24 @@ extension Ghostty {
                 let promptID = copiedID(presented.prompt.pointee.id)
                 let generation = copiedID(presented.prompt.pointee.generation)
                 let serial = presented.serial
+                let prompt = presented.prompt.pointee
+                let geometry = generation.map {
+                    CommandPromptGeometry(generation: $0, cursorValid: prompt.cursor_valid,
+                        cursor: CGPoint(x: prompt.cursor_x, y: prompt.cursor_y),
+                        viewport: CGSize(width: Int(prompt.viewport_width), height: Int(prompt.viewport_height)),
+                        columns: prompt.columns, rows: prompt.rows)
+                }
                 if Thread.isMainThread {
                     MainActor.assumeIsolated {
                         view.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial,
-                                                                          promptID: promptID, generation: generation)
+                                                                          promptID: promptID, generation: generation,
+                                                                          geometry: geometry)
                     }
                 } else {
                     DispatchQueue.main.async { [weak view] in
                         view?.commandInputSession?.nativeInputPresented(blockID: blockID, serial: serial,
-                                                                          promptID: promptID, generation: generation)
+                                                                          promptID: promptID, generation: generation,
+                                                                          geometry: geometry)
                     }
                 }
 

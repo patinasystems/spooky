@@ -117,6 +117,35 @@ struct CommandInputHandoffTests {
         return layout
     }
 
+    @MainActor @Test func scrollingOwnedPromptOnlyPublishesPresentedGeometry() throws {
+        let session = try CommandInputSession()
+        var layout = parsedPrompt("block")
+        layout.nativeBlockID = "block"
+        layout.nativeGeneration = "prompt"
+        session.receiveLayout(layout)
+        session.receive(.init(state: .init(kind: "ready", generation: "prompt", context: "start", blockID: "block"),
+                              receipt: nil, metadata: [:]))
+        session.nativeInputPresented(blockID: nil, serial: 1, promptID: "block", generation: "prompt")
+        #expect(session.isEditable)
+        var geometryUpdates = 0
+        var stateUpdates = 0
+        var focusUpdates = 0
+        session.onGeometryPresented = { geometryUpdates += 1 }
+        session.onChange = { stateUpdates += 1 }
+        session.onPromptPresented = { focusUpdates += 1 }
+        for serial in 2...121 {
+            let geometry = CommandPromptGeometry(generation: "prompt", cursorValid: true,
+                cursor: CGPoint(x: 12, y: 500 - serial), viewport: CGSize(width: 800, height: 600), columns: 80, rows: 24)
+            session.nativeInputPresented(blockID: nil, serial: UInt64(serial), promptID: "block", generation: "prompt",
+                                         geometry: geometry)
+            #expect(session.presentedGeometry == geometry)
+        }
+        #expect(geometryUpdates == 120)
+        #expect(stateUpdates == 0)
+        #expect(focusUpdates == 0)
+        #expect(session.isEditable)
+    }
+
     @Test func continuationAndAlternateScreenReceiveTerminalInput() {
         #expect(handoff.canFinish(layout: CommandTerminalLayout(), readyGeneration: nil, context: "cont"))
         var layout = CommandTerminalLayout()

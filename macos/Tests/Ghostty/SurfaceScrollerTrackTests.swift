@@ -86,6 +86,60 @@ struct SurfaceScrollerTrackTests {
         #expect(scrollView.contentView.bounds.origin.y == 2_000)
     }
 
+    @Test func inlineGutterPreservesScrollerHitAreaWithoutChangingTerminalGeometry() throws {
+        let scrollView = makeScrollView()
+        let host = NSView(frame: scrollView.frame)
+        host.addSubview(scrollView)
+        let scroller = try #require(scrollView.verticalScroller)
+        let contentSize = scrollView.contentSize
+        let documentFrame = try #require(scrollView.documentView).frame
+        let track = host.convert(scroller.bounds, from: scroller)
+        let gutter = SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: host)
+        #expect(gutter > 0)
+        #expect(gutter == host.bounds.maxX - track.minX)
+
+        // Reproduce the editor's sibling z-order. Its opaque view must stop
+        // before the complete scrollbar hit rect, not merely its narrow knob.
+        let editor = NSView(frame: NSRect(x: 0, y: 200, width: host.bounds.width - gutter, height: 36))
+        host.addSubview(editor)
+        #expect(!editor.frame.intersects(track))
+        let scrollbarPoint = NSPoint(x: track.midX, y: editor.frame.midY)
+        #expect(!editor.frame.contains(scrollbarPoint))
+        #expect(scrollView.contentSize == contentSize)
+        #expect(scrollView.documentView?.frame == documentFrame)
+    }
+
+    @Test func inlineGutterStaysStableAcrossKnobVisibilityScrollAndResize() throws {
+        let scrollView = makeScrollView()
+        let scroller = try #require(scrollView.verticalScroller)
+        let gutter = SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: scrollView)
+        for position in [0.0, 0.5, 1.0] {
+            scroller.doubleValue = position
+            scroller.alphaValue = position
+            scroller.isHidden = position == 0
+            #expect(SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: scrollView) == gutter)
+        }
+        scroller.isHidden = false
+        for width: CGFloat in [600, 240] {
+            scrollView.frame.size.width = width
+            scrollView.tile()
+            #expect(SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: scrollView) == gutter)
+            let track = scrollView.convert(scroller.bounds, from: scroller)
+            #expect(scrollView.bounds.width - gutter == track.minX)
+        }
+        // The dock removes vertical overlap by shortening the track. Its
+        // caller can keep a full-width editor without changing this gutter.
+        #expect(SurfaceScrollerTrack.applyBottomInset(80, to: scrollView))
+        #expect(SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: scrollView) == gutter)
+    }
+
+    @Test func disabledScrollbarNeedsNoInlineGutter() {
+        let scrollView = makeScrollView()
+        scrollView.hasVerticalScroller = false
+        scrollView.tile()
+        #expect(SurfaceScrollerTrack.trailingInset(in: scrollView, relativeTo: scrollView) == 0)
+    }
+
     private func makeScrollView() -> CountingScrollView {
         let scrollView = CountingScrollView(frame: NSRect(x: 0, y: 0, width: 400, height: 600))
         scrollView.borderType = .noBorder

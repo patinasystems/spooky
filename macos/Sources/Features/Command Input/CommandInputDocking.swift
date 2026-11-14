@@ -63,12 +63,19 @@ struct CommandInputDocking {
         let reserved = editing
             ? (pinned && coveredRows == 0 ? footerHeight : max(0, editorHeight - line)) : 0
         let x = max(0, (pinned ? layout.paddingLeft : layout.cursorX) - padding)
-        let y = pinned ? max(0, containerHeight - editorHeight)
-            : min(max(0, layout.cursorY - padding), max(0, containerHeight - editorHeight))
+        let y = Self.editorY(cursorY: layout.cursorY, editorHeight: editorHeight,
+                             containerHeight: containerHeight, padding: padding, pinned: pinned)
         return Placement(pinned: pinned, reservedHeight: reserved, origin: CGPoint(x: x, y: y),
                          shown: editing && (layout.cursorValid || pinned),
                          pinnedOffset: editing && pinned ? footerHeight : -1,
                          coveredRows: editing && pinned ? coveredRows : 0)
+    }
+
+    static func editorY(cursorY: CGFloat, editorHeight: CGFloat, containerHeight: CGFloat,
+                        padding: CGFloat, pinned: Bool) -> CGFloat {
+        // Inline input belongs to its document row. Clip at the viewport edge;
+        // clamping its origin would detach it from the scrolling header.
+        pinned ? max(0, containerHeight - editorHeight) : cursorY - padding
     }
 
     /// Mirror PageList's row-resize behavior without walking history. Growth

@@ -17,6 +17,44 @@ struct CommandInputDockingTests {
         #expect(placement.shown)
     }
 
+    @Test func inlinePromptFollowsPresentedPixelsAcrossRowsAndViewportEdges() throws {
+        var layout = geometry()
+        layout.nativeGeneration = "prompt"
+        // The advisory core snapshot can be ahead of the image on screen.
+        layout.cursorY = 500
+        let backingSize = CGSize(width: 800, height: 1_200)
+        let scale = CGSize(width: 2, height: 2)
+        var docking = CommandInputDocking()
+        for y: CGFloat in [180, 178, 166, 154, 144, 142, 1_190, -2] {
+            let presented = CommandPromptGeometry(generation: "prompt", cursorValid: true,
+                cursor: CGPoint(x: 12, y: y), viewport: backingSize, columns: 80, rows: 32)
+            let visible = try #require(presented.applying(to: layout, backingSize: backingSize, scale: scale))
+            let placement = place(&docking, layout: visible)
+            #expect(!placement.pinned)
+            #expect(placement.origin.y + metrics.padding == y / 2)
+        }
+    }
+
+    @Test func presentedPromptRejectsAnotherGenerationOrResizedSurface() {
+        var layout = geometry()
+        layout.nativeGeneration = "prompt"
+        let size = CGSize(width: 800, height: 1_200)
+        let scale = CGSize(width: 2, height: 2)
+        let presented = CommandPromptGeometry(generation: "prompt", cursorValid: false,
+            cursor: .zero, viewport: size, columns: 80, rows: 32)
+        #expect(presented.applying(to: layout, backingSize: size, scale: scale)?.cursorValid == false)
+        // Split dividers can leave fractional backing sizes. The core and
+        // IOSurface admission both truncate to the drawable's integer pixels.
+        #expect(presented.applying(to: layout, backingSize: CGSize(width: 800.5, height: 1_200.5), scale: scale) != nil)
+        #expect(presented.applying(to: layout, backingSize: CGSize(width: 801, height: 1_200), scale: scale) == nil)
+        #expect(presented.applying(to: layout, backingSize: CGSize(width: 800, height: 900), scale: scale) == nil)
+        layout.rows = 30
+        #expect(presented.applying(to: layout, backingSize: size, scale: scale) == nil)
+        layout.rows = 32
+        layout.nativeGeneration = "next"
+        #expect(presented.applying(to: layout, backingSize: size, scale: scale) == nil)
+    }
+
     @Test func retainedRowsAboveMostlyEmptyScreenDoNotCauseDocking() {
         var docking = CommandInputDocking()
         var layout = geometry()

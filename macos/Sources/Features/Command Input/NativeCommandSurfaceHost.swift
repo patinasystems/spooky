@@ -42,6 +42,7 @@ final class NativeCommandSurfaceHost: NSView {
     private var background = NSColor.black
     private var docking = CommandInputDocking()
     private var diagnosticLayout: [String: Double]?
+    private var followsPresentedPrompt = false
     private let pathResolver = CommandPathResolver()
     private lazy var paths = makePathInteraction()
     private let workspaceNotifications = NSWorkspace.shared.notificationCenter
@@ -123,6 +124,7 @@ final class NativeCommandSurfaceHost: NSView {
             self.layoutSubtreeIfNeeded()
             self.displayIfNeeded()
         }
+        session.onGeometryPresented = { [weak self] in self?.synchronizePresentedGeometry() }
         surfaceView.commandPathInteraction = paths
         NotificationCenter.default.addObserver(self, selector: #selector(pathViewportChanged),
                                                name: .ghosttyDidUpdateScrollbar, object: surfaceView)
@@ -245,6 +247,38 @@ final class NativeCommandSurfaceHost: NSView {
                                                   window: window, surface: surfaceView, editor: editor.textView)
     }
 
+    private var presentedLayout: CommandTerminalLayout? {
+        session.presentedGeometry?.applying(
+            to: session.layout, backingSize: surfaceView.convertToBacking(surfaceView.bounds.size),
+            scale: surfaceView.convertToBacking(NSSize(width: 1, height: 1)))
+    }
+
+    /// Runs in the same Core Animation transaction as the matching terminal
+    /// image. Ordinary scrolling changes only this layer's origin, not TextKit
+    /// measurement, completion, shell state, focus, or PTY dimensions.
+    private func synchronizePresentedGeometry() {
+        guard followsPresentedPrompt else { return }
+        guard let geometry = presentedLayout else {
+            session.terminalGeometryChanged()
+            return
+        }
+        if editor.isHidden == geometry.cursorValid {
+            synchronize()
+            return
+        }
+        guard geometry.cursorValid else { return }
+        var frame = editor.frame
+        frame.origin.x = max(0, geometry.cursorX - CommandInputView.padding)
+        frame.origin.y = CommandInputDocking.editorY(
+            cursorY: geometry.cursorY, editorHeight: frame.height,
+            containerHeight: bounds.height, padding: CommandInputView.padding, pinned: false)
+        if frame != editor.frame {
+            editor.setFrameOrigin(frame.origin)
+            // The completion surface is a window overlay, not an editor child.
+            editor.textView.completions.updatePopupPosition()
+        }
+    }
+
     private func synchronize() {
         guard !synchronizing, bounds.width > 0, bounds.height > 0 else { return }
         let measurement = CommandInputDiagnostics.begin(.hostSynchronize)
@@ -252,7 +286,7 @@ final class NativeCommandSurfaceHost: NSView {
         synchronizing = true
         defer { synchronizing = false }
         publishAccent()
-        let geometry = session.layout
+        let geometry = presentedLayout ?? session.layout
         let line = max(1, geometry.cellHeight)
         let padding = CommandInputView.padding
         let theme = surfaceView.derivedConfig.commandUITheme
@@ -303,6 +337,7 @@ final class NativeCommandSurfaceHost: NSView {
         }
         let shown = placement.shown && (session.editorVisible || holdingPresentation)
             && !(transferring && session.submittedEditorRetired)
+        followsPresentedPrompt = editing && session.editorVisible && !placement.pinned && !transferring && !recovering
 
         // Set before resizing/focusing: an unfocused terminal otherwise draws
         // a hollow caret that can move beyond the editor during PTY expansion.
@@ -371,9 +406,11 @@ final class NativeCommandSurfaceHost: NSView {
         // Keep the submitted draft over the old prompt until the terminal
         // parses the ownership boundary. Following an intermediate cursor
         // would move the editor before the shell has accepted the buffer.
+        let trailingInset = placement.pinned ? 0 : terminalView.inlineEditorTrailingInset
         let editorFrame = transferring && !editor.frame.isEmpty ? editor.frame
             : NSRect(x: placement.origin.x, y: placement.origin.y,
-                     width: max(1, bounds.width - placement.origin.x - max(0, geometry.paddingLeft - padding)), height: height)
+                     width: max(1, bounds.width - placement.origin.x
+                                - max(trailingInset, geometry.paddingLeft - padding)), height: height)
         if editor.frame != editorFrame {
             if editor.frame.width != editorFrame.width { editor.dismissCompletions() }
             editor.frame = editorFrame

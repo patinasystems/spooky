@@ -928,6 +928,14 @@ typedef struct {
 typedef struct {
   char id[65];
   char generation[65];
+  // Immutable prompt geometry in backing pixels from the assigned frame.
+  bool cursor_valid;
+  double cursor_x;
+  double cursor_y;
+  uint32_t viewport_width;
+  uint32_t viewport_height;
+  uint32_t columns;
+  uint32_t rows;
 } ghostty_native_prompt_s;
 
 typedef struct {

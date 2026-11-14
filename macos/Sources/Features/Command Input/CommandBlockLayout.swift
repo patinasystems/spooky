@@ -111,6 +111,30 @@ struct CommandTerminalLayout: Equatable {
     }
 }
 
+/// Immutable cursor geometry carried by the Metal image being attached. The
+/// terminal's current state may already describe a later scroll position.
+struct CommandPromptGeometry: Equatable {
+    let generation: String
+    let cursorValid: Bool
+    let cursor: CGPoint
+    let viewport: CGSize
+    let columns: UInt32
+    let rows: UInt32
+
+    func applying(to layout: CommandTerminalLayout, backingSize: CGSize, scale: CGSize) -> CommandTerminalLayout? {
+        guard generation == layout.nativeGeneration, layout.primary,
+              viewport.width == backingSize.width.rounded(.towardZero),
+              viewport.height == backingSize.height.rounded(.towardZero),
+              columns == layout.columns, rows == layout.rows,
+              scale.width > 0, scale.height > 0 else { return nil }
+        var result = layout
+        result.cursorValid = cursorValid
+        result.cursorX = cursor.x / scale.width
+        result.cursorY = cursor.y / scale.height
+        return result
+    }
+}
+
 struct CommandBlockMetadata: Equatable, Sendable {
     let id: String
     let workingDirectory: String
